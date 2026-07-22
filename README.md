@@ -1,92 +1,124 @@
-# autoresearch
+# autoresearch-kernel-fused-moe
 
-![teaser](progress.png)
+An external-agent research loop for optimizing a Triton implementation of a
+quantized Fused MoE operator. The fixed framework owns data generation,
+correctness, measurement, history, and process fault isolation. The research
+agent edits exactly one file: [`kernel.py`](kernel.py).
 
-*One day, frontier AI research used to be done by meat computers in between eating, sleeping, having other fun, and synchronizing once in a while using sound wave interconnect in the ritual of "group meeting". That era is long gone. Research is now entirely the domain of autonomous swarms of AI agents running across compute cluster megastructures in the skies. The agents claim that we are now in the 10,205th generation of the code base, in any case no one could tell if that's right or wrong as the "code" is now a self-modifying binary that has grown beyond human comprehension. This repo is the story of how it all began. -@karpathy, March 2026*.
+The first milestone is intentionally split in two:
 
-The idea: give an AI agent a small but real LLM training setup and let it experiment autonomously overnight. It modifies the code, trains for 5 minutes, checks if the result improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a better model. The training code here is a simplified single-GPU implementation of [nanochat](https://github.com/karpathy/nanochat). The core idea is that you're not touching any of the Python files like you normally would as a researcher. Instead, you are programming the `program.md` Markdown files that provide context to the AI agents and set up your autonomous research org. The default `program.md` in this repo is intentionally kept as a bare bones baseline, though it's obvious how one would iterate on it over time to find the "research org code" that achieves the fastest research progress, how you'd add more agents to the mix, etc. A bit more context on this project is here in this [tweet](https://x.com/karpathy/status/2029701092347630069) and [this tweet](https://x.com/karpathy/status/2031135152349524125).
+- **macOS mock mode** validates the control plane without importing PyTorch or
+  Triton. It never invents latency and never promotes a candidate.
+- **MetaX C500 mode** is the only mode allowed to claim kernel correctness or
+  performance. The seed and adapter are implemented but remain unverified until
+  run in a matching MXMACA/mcPyTorch/mcTriton environment.
 
-## How it works
+## Operator contract
 
-The repo is deliberately kept small and only really has three files that matter:
+`kernel.py` must define:
 
-- **`prepare.py`** — fixed constants, one-time data prep (downloads training data, trains a BPE tokenizer), and runtime utilities (dataloader, evaluation). Not modified.
-- **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
-- **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
+```python
+def run_kernel(
+    a, b_col_major, scale_a, scale_b, moe_weights,
+    token_ids, expert_ids, topk, out,
+) -> None:
+    ...
+```
 
-By design, training runs for a **fixed 5-minute time budget** (wall clock, excluding startup/compilation), regardless of the details of your compute. The metric is **val_bpb** (validation bits per byte) — lower is better, and vocab-size-independent so architectural changes are fairly compared.
+For routed row `r` and output column `n`:
 
-If you are new to neural networks, this ["Dummy's Guide"](https://x.com/hooeem/status/2030720614752039185) looks pretty good for a lot more context.
+```text
+out[r, n] = sum_k(a[r, k] * b_col_major[expert(r), n, k])
+            * scale_a[r] * scale_b[expert(r), n] * moe_weights[r]
+expert(r) = expert_ids[r // 128]
+```
 
-## Quick start
+`a` and `scale_a` are already expanded into routed-row order. `token_ids` is a
+read-only compatibility input and must not trigger another gather. Accumulation
+uses INT32, scaling uses FP32, and the in-place output is BF16.
 
-**Requirements:** A single NVIDIA GPU (tested on H100), Python 3.10+, [uv](https://docs.astral.sh/uv/).
+## Quick start on macOS
+
+Python 3.10+ and NumPy are sufficient; no GPU packages or network are required.
 
 ```bash
-
-# 1. Install uv project manager (if you don't already have it)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 2. Install dependencies
-uv sync
-
-# 3. Download data and train tokenizer (one-time, ~2 min)
-uv run prepare.py
-
-# 4. Manually run a single training experiment (~5 min)
-uv run train.py
+python -m kernel_research doctor --backend mock
+python -m kernel_research evaluate --backend mock --suite smoke --note "seed control-plane check"
+python -m kernel_research history --format table
+python -m unittest discover -s tests -v
 ```
 
-If the above commands all work ok, your setup is working and you can go into autonomous research mode.
+Runtime state is written below `.autoresearch/` and is intentionally untracked.
+Candidate source is archived by SHA-256, and SQLite is the source of truth for
+experiment history.
 
-## Running the agent
+## C500 hand-off
 
-Simply spin up your Claude/Codex or whatever you want in this repo (and disable all permissions), then you can prompt something like:
+Move the repository into the vendor-provided MXMACA environment. Do not install
+stock PyTorch or Triton over that environment. Start with:
 
+```bash
+python -m kernel_research doctor --backend c500
+python -m kernel_research evaluate --backend c500 --suite smoke --note "C500 seed smoke"
+python -m kernel_research evaluate --backend c500 --suite quick --note "C500 quick validation"
 ```
-Hi have a look at program.md and let's kick off a new experiment! let's do the setup first.
+
+Vendor references: [MACA installation guide](https://repos.metax-tech.com/gitea/repos/index/wiki/MACA)
+and [MXMACA C500 release notes](https://developer.metax-tech.com/api/client/document/file/222/preview/?file_type=pdf).
+
+The C500 doctor runs in an isolated worker and performs a minimal mcTriton
+compile/launch probe. A runtime that merely imports, or a non-C500 accelerator,
+is reported as `UNSUPPORTED_ENV`. Its stable environment fields cover the SDK,
+driver, Torch, mcTriton, device, and compile capability; unavailable SDK/driver
+versions remain `null` with an explicit probe error instead of being guessed.
+
+Only after the doctor and smaller suites succeed should `--suite full` allocate
+the four DeepSeek-style production shapes. Cases are processed one at a time;
+an unsupported or insufficient-memory environment fails explicitly rather than
+silently shrinking a case.
+
+The C500 benchmark is warm-cache steady-state: 10 warmups followed by three
+blocks of 10 measurements. Raw samples and p20/p50/p80 are retained. A future
+candidate is promotable only from the `full` suite, when every case reaches a
+0.99 matched ratio, its equal-weight geometric-mean speedup is at least 1.01,
+no case regresses more
+than 3%, and a second `full` run of the exact same source hash repeats the
+result. Compilation phases have a 180-second watchdog and each case phase has
+a 300-second watchdog; timeout output records the active phase and case.
+
+## Commands
+
+```text
+python -m kernel_research doctor --backend mock|c500
+python -m kernel_research evaluate --backend mock|c500 --suite smoke|quick|full [--note TEXT]
+python -m kernel_research history --format table|json|tsv
 ```
 
-The `program.md` file is essentially a super lightweight "skill".
+All machine-readable evaluation output has `schema_version: 1`. Logs and human
+diagnostics go to stderr; JSON goes to stdout.
 
 ## Project structure
 
+```text
+kernel.py                    agent-owned Triton candidate
+kernel_research/             fixed cases, oracle, worker, scoring, history, CLI
+program.md                   external-agent operating protocol
+tests/                       CPU-only unit and integration tests
+.autoresearch/               ignored runtime database and candidate artifacts
 ```
-prepare.py      — constants, data prep + runtime utilities (do not modify)
-train.py        — model, optimizer, training loop (agent modifies this)
-program.md      — agent instructions
-pyproject.toml  — dependencies
-```
 
-## Design choices
+## Trust boundary
 
-- **Single file to modify.** The agent only touches `train.py`. This keeps the scope manageable and diffs reviewable.
-- **Fixed time budget.** Training always runs for exactly 5 minutes, regardless of your specific platform. This means you can expect approx 12 experiments/hour and approx 100 experiments while you sleep. There are two upsides of this design decision. First, this makes experiments directly comparable regardless of what the agent changes (model size, batch size, architecture, etc). Second, this means that autoresearch will find the most optimal model for your platform in that time budget. The downside is that your runs (and results) become not comparable to other people running on other compute platforms.
-- **Self-contained.** No external dependencies beyond PyTorch and a few small packages. No distributed training, no complex configs. One GPU, one file, one metric.
+AST validation proves only that the candidate has valid syntax and the required
+function signature. A spawned worker protects the controller from ordinary
+compiler crashes, illegal device accesses, and timeouts; it is not a security
+sandbox. Run untrusted agents or candidates inside an OS/container boundary.
 
-## Platform support
+## Current limitations
 
-This code currently requires that you have a single NVIDIA GPU. In principle it is quite possible to support CPU, MPS and other platforms but this would also bloat the code. I'm not 100% sure that I want to take this on personally right now. People can reference (or have their agents reference) the full/parent nanochat repository that has wider platform support and shows the various solutions (e.g. a Flash Attention 3 kernels fallback implementation, generic device support, autodetection, etc.), feel free to create forks or discussions for other platforms and I'm happy to link to them here in the README in some new notable forks section or etc.
+- C500 compilation and numerical results have not been validated on this Mac.
+- The MVP has no built-in LLM client, MCTS, beam search, remote scheduler, or
+  NVIDIA backend.
+- Mock results are workflow evidence only and cannot be compared as performance.
 
-Seeing as there seems to be a lot of interest in tinkering with autoresearch on much smaller compute platforms than an H100, a few extra words. If you're going to try running autoresearch on smaller computers (Macbooks etc.), I'd recommend one of the forks below. On top of this, here are some recommendations for how to tune the defaults for much smaller models for aspiring forks:
-
-1. To get half-decent results I'd use a dataset with a lot less entropy, e.g. this [TinyStories dataset](https://huggingface.co/datasets/karpathy/tinystories-gpt4-clean). These are GPT-4 generated short stories. Because the data is a lot narrower in scope, you will see reasonable results with a lot smaller models (if you try to sample from them after training).
-2. You might experiment with decreasing `vocab_size`, e.g. from 8192 down to 4096, 2048, 1024, or even - simply byte-level tokenizer with 256 possibly bytes after utf-8 encoding.
-3. In `prepare.py`, you'll want to lower `MAX_SEQ_LEN` a lot, depending on the computer even down to 256 etc. As you lower `MAX_SEQ_LEN`, you may want to experiment with increasing `DEVICE_BATCH_SIZE` in `train.py` slightly to compensate. The number of tokens per fwd/bwd pass is the product of these two.
-4. Also in `prepare.py`, you'll want to decrease `EVAL_TOKENS` so that your validation loss is evaluated on a lot less data.
-5. In `train.py`, the primary single knob that controls model complexity is the `DEPTH` (default 8, here). A lot of variables are just functions of this, so e.g. lower it down to e.g. 4.
-6. You'll want to most likely use `WINDOW_PATTERN` of just "L", because "SSSL" uses alternating banded attention pattern that may be very inefficient for you. Try it.
-7. You'll want to lower `TOTAL_BATCH_SIZE` a lot, but keep it powers of 2, e.g. down to `2**14` (~16K) or so even, hard to tell.
-
-I think these would be the reasonable hyperparameters to play with. Ask your favorite coding agent for help and copy paste them this guide, as well as the full source code.
-
-## Notable forks
-
-- [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) (MacOS)
-- [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx) (MacOS)
-- [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) (Windows)
-- [andyluo7/autoresearch](https://github.com/andyluo7/autoresearch) (AMD)
-
-## License
-
-MIT
+See [`program.md`](program.md) for the autonomous experiment protocol.

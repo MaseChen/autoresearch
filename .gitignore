@@ -16,8 +16,13 @@ queue/
 CLAUDE.md
 AGENTS.md
 
-# Experimental code/artifacts
-dev/
-
-# Results file
+# Local experiment state and generated artifacts
+.autoresearch/
 results.tsv
+run.log
+core
+core.*
+
+# Vendor/compiler caches that must not become experiment inputs
+.triton/
+.maca/
