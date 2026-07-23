@@ -228,6 +228,9 @@ class C500Backend:
             **_base_environment(),
             **_vendor_version_defaults(),
             "maca_path": os.environ.get("MACA_PATH", "/opt/maca"),
+            "compile_probe_requested": bool(compile_probe),
+            "compile_probe_passed": None,
+            "compile_probe_status": "NOT_RUN",
         }
         runtime, error = _load_c500_runtime()
         if error is not None:
@@ -271,9 +274,9 @@ class C500Backend:
 
         environment.update(accelerator)
         environment.update(_vendor_version_fingerprint(torch))
-        environment["compile_probe_requested"] = bool(compile_probe)
-        environment["compile_probe_passed"] = False
         if compile_probe:
+            environment["compile_probe_passed"] = False
+            environment["compile_probe_status"] = "FAILED"
             try:
                 from .c500_probe import run_probe
 
@@ -289,6 +292,7 @@ class C500Backend:
                     backend=self.name,
                 )
             environment["compile_probe_passed"] = True
+            environment["compile_probe_status"] = "PASSED"
         return BackendResult(
             status=STATUS_SUCCESS,
             eligible_for_promotion=False,
@@ -447,29 +451,63 @@ class C500Backend:
                 baseline_arguments = (*arguments[:-1], baseline_out)
             try:
                 # The first call includes JIT compilation and is intentionally
-                # excluded from timing. The outer executor applies a fresh
-                # compile deadline for every shape.
+                # excluded from timing. Synchronize it separately so an
+                # asynchronous device fault is attributed to the candidate.
                 _report_progress(
-                    progress_callback, "compile", case_id, "first-invocation"
+                    progress_callback,
+                    "compile",
+                    case_id,
+                    "candidate-first-invocation",
                 )
                 run_kernel(*arguments)
-                if baseline_run_kernel is not None and baseline_arguments is not None:
-                    baseline_run_kernel(*baseline_arguments)
                 _synchronize(torch)
-                _report_progress(
-                    progress_callback, "case", case_id, "validate-and-benchmark"
-                )
             except Exception as exc:
+                failure_status = _classify_first_invocation_error(exc)
+                error = (
+                    f"candidate first invocation failed for {case_id}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
                 case_results.append(
                     CaseResult(
                         case_id=case_id,
-                        status=STATUS_COMPILE_ERROR,
-                        error=f"first kernel invocation failed: {type(exc).__name__}: {exc}",
+                        status=failure_status,
+                        error=error,
                     )
                 )
                 return _failed_c500_result(
-                    validation.sha256, case_results, health, STATUS_COMPILE_ERROR
+                    validation.sha256, case_results, health, failure_status
                 )
+
+            if baseline_run_kernel is not None and baseline_arguments is not None:
+                try:
+                    _report_progress(
+                        progress_callback,
+                        "compile",
+                        case_id,
+                        "baseline-first-invocation",
+                    )
+                    baseline_run_kernel(*baseline_arguments)
+                    _synchronize(torch)
+                except Exception as exc:
+                    failure_status = _classify_first_invocation_error(exc)
+                    error = (
+                        f"accepted baseline first invocation failed for {case_id}: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    case_results.append(
+                        CaseResult(
+                            case_id=case_id,
+                            status=failure_status,
+                            error=error,
+                        )
+                    )
+                    return _failed_c500_result(
+                        validation.sha256, case_results, health, failure_status
+                    )
+
+            _report_progress(
+                progress_callback, "case", case_id, "validate-and-benchmark"
+            )
 
             matched_ratio = _matched_ratio(torch, tensors["out"], expected)
             if matched_ratio < MATCHED_RATIO_THRESHOLD:
@@ -695,6 +733,55 @@ def _report_progress(
         callback(phase, case_id, stage)
 
 
+def _classify_first_invocation_error(exc: BaseException) -> str:
+    """Separate known compiler failures from launch/runtime device failures."""
+
+    type_names = " ".join(
+        exception_type.__name__.casefold()
+        for exception_type in type(exc).__mro__
+    )
+    message = str(exc).casefold()
+    combined = f"{type_names} {message}"
+
+    # Runtime markers take precedence because vendor runtime messages can also
+    # contain compiler suggestions such as TORCH_USE_CUDA_DSA.
+    runtime_markers = (
+        "acceleratorerror",
+        "illegal memory access",
+        "illegal address",
+        "mcerrorillegaladdress",
+        "xnack",
+        "atu fault",
+        "address translation error",
+    )
+    if any(marker in combined for marker in runtime_markers):
+        return STATUS_CRASH
+
+    compiler_type_markers = (
+        "compilation",
+        "compileerror",
+        "compiletime",
+        "compiler",
+        "codegeneration",
+        "outofresources",
+    )
+    if any(marker in type_names for marker in compiler_type_markers):
+        return STATUS_COMPILE_ERROR
+
+    compiler_message_markers = (
+        "triton compilation",
+        "compilation failed",
+        "compile failed",
+        "compiler error",
+    )
+    if any(marker in message for marker in compiler_message_markers):
+        return STATUS_COMPILE_ERROR
+
+    # An exception with no positive compiler evidence occurred while launching
+    # or synchronizing device work, so it is a runtime crash.
+    return STATUS_CRASH
+
+
 def _load_c500_runtime() -> tuple[tuple[Any, Any] | None, dict[str, Any] | None]:
     loaded: list[str] = []
     try:
@@ -717,6 +804,12 @@ def _vendor_version_defaults() -> dict[str, Any]:
         "sdk_version": None,
         "sdk_version_source": None,
         "sdk_probe_error": "vendor runtime was not available for SDK probing",
+        "system_maca_version": None,
+        "system_maca_version_source": None,
+        "system_maca_probe_error": (
+            "vendor runtime was not available for system MACA probing"
+        ),
+        "sdk_system_maca_version_match": None,
         "driver_version": None,
         "driver_version_source": None,
         "driver_probe_error": "vendor runtime was not available for driver probing",
@@ -808,7 +901,21 @@ def _runtime_driver_fingerprint(torch: Any) -> dict[str, Any]:
 
 def _parse_driver_version(text: str) -> str | None:
     match = re.search(
-        r"(?im)^\s*(?:kernel\s+)?driver(?:\s+version)?\s*[:=]\s*([^\s,]+)",
+        r"(?i)\bkernel\s+mode\s+driver\s+version\s*[:=]\s*([^\s,|]+)",
+        text,
+    )
+    if match is None:
+        match = re.search(
+            r"(?im)^\s*(?:kernel\s+)?driver(?:\s+version)?"
+            r"\s*[:=]\s*([^\s,|]+)",
+            text,
+        )
+    return None if match is None else match.group(1)
+
+
+def _parse_maca_version(text: str) -> str | None:
+    match = re.search(
+        r"(?i)\bmaca\s+version\s*[:=]\s*([^\s,|]+)",
         text,
     )
     return None if match is None else match.group(1)
@@ -821,12 +928,15 @@ def _mx_smi_fingerprint() -> dict[str, Any]:
             "mx_smi_path": None,
             "mx_smi_version": None,
             "mx_smi_driver_version": None,
+            "mx_smi_maca_version": None,
+            "mx_smi_version_exit_code": None,
+            "mx_smi_status_exit_code": None,
             "mx_smi_probe_error": "mx-smi was not found on PATH",
         }
 
     results: dict[str, subprocess.CompletedProcess[str]] = {}
     errors: list[str] = []
-    for label, arguments in (("version", ["--version"]), ("query", ["-q"])):
+    for label, arguments in (("version", ["--version"]), ("status", [])):
         try:
             completed = subprocess.run(
                 [executable, *arguments],
@@ -846,26 +956,39 @@ def _mx_smi_fingerprint() -> dict[str, Any]:
     version_text = (
         ""
         if version_process is None
-        else (version_process.stdout or version_process.stderr).strip()[:4096]
+        else "\n".join(
+            part.strip()
+            for part in (version_process.stdout, version_process.stderr)
+            if part and part.strip()
+        )[:4096]
     )
-    query_process = results.get("query")
-    query_text = (
+    status_process = results.get("status")
+    status_text = (
         ""
-        if query_process is None
-        else (query_process.stdout or query_process.stderr).strip()[:16384]
+        if status_process is None
+        else "\n".join(
+            part.strip()
+            for part in (status_process.stdout, status_process.stderr)
+            if part and part.strip()
+        )[:16384]
     )
-    driver_version = _parse_driver_version("\n".join((version_text, query_text)))
+    combined_text = "\n".join((version_text, status_text))
+    driver_version = _parse_driver_version(combined_text)
+    maca_version = _parse_maca_version(combined_text)
     if driver_version is None:
         errors.append("driver version was not present in mx-smi output")
+    if maca_version is None:
+        errors.append("MACA version was not present in mx-smi output")
     return {
         "mx_smi_path": executable,
         "mx_smi_version": version_text or None,
         "mx_smi_driver_version": driver_version,
+        "mx_smi_maca_version": maca_version,
         "mx_smi_version_exit_code": (
             None if version_process is None else version_process.returncode
         ),
-        "mx_smi_query_exit_code": (
-            None if query_process is None else query_process.returncode
+        "mx_smi_status_exit_code": (
+            None if status_process is None else status_process.returncode
         ),
         "mx_smi_probe_error": "; ".join(errors) if errors else None,
     }
@@ -876,6 +999,7 @@ def _vendor_version_fingerprint(torch: Any) -> dict[str, Any]:
     runtime_driver = _runtime_driver_fingerprint(torch)
     mx_smi = _mx_smi_fingerprint()
     smi_driver = mx_smi.get("mx_smi_driver_version")
+    smi_maca = mx_smi.get("mx_smi_maca_version")
     driver = (
         {
             "driver_version": str(smi_driver),
@@ -892,7 +1016,25 @@ def _vendor_version_fingerprint(torch: Any) -> dict[str, Any]:
             for value in (existing, str(mx_smi["mx_smi_probe_error"]))
             if value
         )
-    return {**sdk, **driver, **mx_smi}
+    system_maca = {
+        "system_maca_version": str(smi_maca) if smi_maca else None,
+        "system_maca_version_source": "mx-smi" if smi_maca else None,
+        "system_maca_probe_error": (
+            None
+            if smi_maca
+            else (
+                str(mx_smi.get("mx_smi_probe_error"))
+                if mx_smi.get("mx_smi_probe_error")
+                else "MACA version was not present in mx-smi output"
+            )
+        ),
+        "sdk_system_maca_version_match": (
+            str(sdk["sdk_version"]) == str(smi_maca)
+            if sdk.get("sdk_version") is not None and smi_maca is not None
+            else None
+        ),
+    }
+    return {**sdk, **system_maca, **driver, **mx_smi}
 
 
 def _find_accelerator(torch: Any) -> tuple[dict[str, Any], dict[str, Any] | None]:

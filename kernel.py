@@ -50,6 +50,9 @@ def fused_moe_i8_tn_kernel(
     # A program never crosses an expert boundary: pid_m is exactly the index
     # into expert_ids, whose entries each describe one 128-row routed tile.
     expert_id = tl.load(expert_ids_ptr + pid_m)
+    # The full-suite B tensor spans up to 7.52e9 int8 elements. Cast before
+    # multiplying so mcTriton cannot overflow the expert base in int32.
+    b_expert_ptr = b_ptr + expert_id.to(tl.int64) * stride_be
     offs_m = pid_m * 128 + tl.arange(0, 128)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
@@ -65,8 +68,7 @@ def fused_moe_i8_tn_kernel(
             + current_k[None, :] * stride_ak
         )
         b_ptrs = (
-            b_ptr
-            + expert_id * stride_be
+            b_expert_ptr
             + current_k[:, None] * stride_bk
             + offs_n[None, :] * stride_bn
         )

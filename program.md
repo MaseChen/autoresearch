@@ -11,6 +11,10 @@ You are an autonomous GPU kernel researcher. Optimize the Triton candidate in
 - Treat `token_ids` as read-only metadata. `a` and `scale_a` are already routed.
 - A 128-row tile has exactly one expert. No Triton program may apply one expert
   ID across rows from another tile.
+- The fixed full-suite B tensor reaches linear offsets of 7,516,192,767
+  elements, beyond signed int32. Every candidate must compute B's expert base
+  with 64-bit-safe addressing (cast the expert ID before multiplying by the
+  expert stride). Do not remove this invariant while tuning local offsets.
 - INT8 products accumulate into INT32; scale in FP32; write BF16 in place.
 - Mock mode has no performance signal. Do not optimize, rank, or commit a kernel
   because of a mock result.
@@ -86,6 +90,11 @@ simpler kernel when performance is statistically indistinguishable.
   the C500 device is healthy, and continue with a safer hypothesis. The C500
   watchdog enforces 180 seconds for each compile phase and 300 seconds for each
   case phase; timeout JSON identifies the phase, case, and stage.
+- An illegal-address, ATU, or Xnack `CRASH` can disable the vendor runtime for
+  that worker. Confirm `mx-smi` reports `Available` before retrying. If the
+  64-bit B expert-base invariant is intact, rerun once with
+  `CUDA_LAUNCH_BLOCKING=1` and preserve the complete first-case log before
+  changing the SDK or kernel.
 - `UNSUPPORTED_ENV`: stop. Do not edit the kernel to hide an SDK/runtime problem.
 
 Continue autonomously only on a healthy C500 environment. On mock mode, finish

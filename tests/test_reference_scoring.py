@@ -85,6 +85,25 @@ class CaseGenerationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             get_suite("unknown")
 
+    def test_fixed_shape_address_ranges_only_require_int64_for_full_b(self) -> None:
+        int32_max = np.iinfo(np.int32).max
+
+        quick_b_offsets = [
+            case.num_experts * case.n * case.k - 1 for case in QUICK_CASES
+        ]
+        full_b_offsets = [
+            case.num_experts * case.n * case.k - 1 for case in FULL_CASES
+        ]
+        self.assertTrue(all(offset <= int32_max for offset in quick_b_offsets))
+        self.assertTrue(all(offset > int32_max for offset in full_b_offsets))
+
+        # Other fixed-shape linear offsets remain within int32. This protects
+        # the deliberate minimal fix: only B's expert base needs promotion.
+        for case in FULL_CASES:
+            self.assertLessEqual(case.em * case.k - 1, int32_max)  # A
+            self.assertLessEqual(case.num_experts * case.n - 1, int32_max)  # scale B
+            self.assertLessEqual(case.em * case.n - 1, int32_max)  # out
+
     def test_generation_is_deterministic_and_inputs_are_pre_routed(self) -> None:
         first = generate_case(SMOKE_CASES[0])
         second = generate_case(SMOKE_CASES[0], seed=FIXED_SEED)

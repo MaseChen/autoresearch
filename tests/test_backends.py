@@ -4,6 +4,7 @@ import ast
 import importlib
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 from types import ModuleType, SimpleNamespace
@@ -15,11 +16,16 @@ from kernel_research.backends import (
     MEASUREMENT_ROUNDS,
     MockBackend,
     SAMPLES_PER_ROUND,
+    STATUS_COMPILE_ERROR,
+    STATUS_CRASH,
     STATUS_MOCK_VALIDATED,
     STATUS_UNSUPPORTED_ENV,
     WARMUP_ITERATIONS,
     _benchmark_interleaved,
+    _classify_first_invocation_error,
     _parse_driver_version,
+    _parse_maca_version,
+    _mx_smi_fingerprint,
 )
 from kernel_research.contract import KERNEL_PARAMETERS, validate_candidate
 
@@ -182,6 +188,7 @@ class C500BackendTests(unittest.TestCase):
         fake_torch = SimpleNamespace(
             __version__="vendor-test",
             __file__="/vendor/torch/__init__.py",
+            version=SimpleNamespace(maca="3.7.1.3"),
             cuda=FakeAccelerator(),
         )
         fake_triton = SimpleNamespace(
@@ -199,12 +206,18 @@ class C500BackendTests(unittest.TestCase):
             ),
             mock.patch(
                 "kernel_research.backends._mx_smi_fingerprint",
-                return_value={"mx_smi_version": "fixture"},
+                return_value={
+                    "mx_smi_version": "fixture",
+                    "mx_smi_driver_version": "3.8.30",
+                    "mx_smi_maca_version": "3.7.1.5",
+                    "mx_smi_probe_error": None,
+                },
             ),
             mock.patch.dict(
                 sys.modules, {"kernel_research.c500_probe": probe_module}
             ),
         ):
+            not_run = C500Backend().doctor()
             passed = C500Backend().doctor(compile_probe=True)
 
             def fail_probe(device: str) -> None:
@@ -215,15 +228,25 @@ class C500BackendTests(unittest.TestCase):
 
         self.assertEqual(passed.status, "SUCCESS")
         self.assertEqual(seen, ["cuda:0"])
+        self.assertIsNone(not_run.environment["compile_probe_passed"])
+        self.assertEqual(not_run.environment["compile_probe_status"], "NOT_RUN")
         self.assertTrue(passed.environment["compile_probe_passed"])
+        self.assertEqual(passed.environment["compile_probe_status"], "PASSED")
         self.assertEqual(passed.environment["mctriton_version"], "vendor-test")
+        self.assertEqual(passed.environment["driver_version"], "3.8.30")
+        self.assertEqual(passed.environment["system_maca_version"], "3.7.1.5")
+        self.assertFalse(passed.environment["sdk_system_maca_version_match"])
         self.assertEqual(failed.status, STATUS_UNSUPPORTED_ENV)
         self.assertFalse(failed.environment["compile_probe_passed"])
+        self.assertEqual(failed.environment["compile_probe_status"], "FAILED")
         self.assertIn("probe failed on cuda:0", failed.error or "")
         for field in (
             "sdk_version",
             "sdk_version_source",
             "sdk_probe_error",
+            "system_maca_version",
+            "system_maca_version_source",
+            "system_maca_probe_error",
             "driver_version",
             "driver_version_source",
             "driver_probe_error",
@@ -236,6 +259,88 @@ class C500BackendTests(unittest.TestCase):
             "3.4.5",
         )
         self.assertIsNone(_parse_driver_version("mx-smi version 9.9"))
+
+    def test_real_mx_smi_status_text_exposes_driver_and_maca_versions(self) -> None:
+        status_text = """\
+mx-smi  version: 2.3.1
+
+=================== MetaX System Management Interface Log ===================
+| MX-SMI 2.3.1                       Kernel Mode Driver Version: 3.8.30           |
+| MACA Version: 3.7.1.5              BIOS Version: 1.33.5.0                       |
+"""
+        self.assertEqual(_parse_driver_version(status_text), "3.8.30")
+        self.assertEqual(_parse_maca_version(status_text), "3.7.1.5")
+
+    def test_mx_smi_fingerprint_uses_the_supported_no_argument_status_call(
+        self,
+    ) -> None:
+        calls: list[list[str]] = []
+        status_text = (
+            "| MX-SMI 2.3.1 Kernel Mode Driver Version: 3.8.30 |\n"
+            "| MACA Version: 3.7.1.5 BIOS Version: 1.33.5.0 |"
+        )
+
+        def fake_run(command: list[str], **kwargs):
+            calls.append(command)
+            stdout = "mx-smi  version: 2.3.1" if len(command) == 2 else status_text
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        with (
+            mock.patch(
+                "kernel_research.backends.shutil.which",
+                return_value="/usr/bin/mx-smi",
+            ),
+            mock.patch(
+                "kernel_research.backends.subprocess.run",
+                side_effect=fake_run,
+            ),
+        ):
+            fingerprint = _mx_smi_fingerprint()
+
+        self.assertEqual(
+            calls,
+            [["/usr/bin/mx-smi", "--version"], ["/usr/bin/mx-smi"]],
+        )
+        self.assertEqual(fingerprint["mx_smi_driver_version"], "3.8.30")
+        self.assertEqual(fingerprint["mx_smi_maca_version"], "3.7.1.5")
+        self.assertEqual(fingerprint["mx_smi_status_exit_code"], 0)
+        self.assertIsNone(fingerprint["mx_smi_probe_error"])
+
+    def test_first_invocation_error_classification(self) -> None:
+        compilation_error = type("CompilationError", (RuntimeError,), {})
+        accelerator_error = type("AcceleratorError", (RuntimeError,), {})
+
+        self.assertEqual(
+            _classify_first_invocation_error(
+                compilation_error("mcTriton compilation failed")
+            ),
+            STATUS_COMPILE_ERROR,
+        )
+        self.assertEqual(
+            _classify_first_invocation_error(
+                accelerator_error("device launch failed")
+            ),
+            STATUS_CRASH,
+        )
+        self.assertEqual(
+            _classify_first_invocation_error(
+                RuntimeError(
+                    "CUDA error: an illegal memory access was encountered; "
+                    "Compile with TORCH_USE_CUDA_DSA"
+                )
+            ),
+            STATUS_CRASH,
+        )
+        self.assertEqual(
+            _classify_first_invocation_error(
+                RuntimeError("Xnack exception: ATU address translation error")
+            ),
+            STATUS_CRASH,
+        )
+        self.assertEqual(
+            _classify_first_invocation_error(ValueError("unexpected launch failure")),
+            STATUS_CRASH,
+        )
 
     def test_interleaved_measurement_keeps_equal_sample_counts(self) -> None:
         calls = {"candidate": 0, "baseline": 0}

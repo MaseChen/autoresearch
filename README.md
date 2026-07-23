@@ -71,11 +71,21 @@ compile/launch probe. A runtime that merely imports, or a non-C500 accelerator,
 is reported as `UNSUPPORTED_ENV`. Its stable environment fields cover the SDK,
 driver, Torch, mcTriton, device, and compile capability; unavailable SDK/driver
 versions remain `null` with an explicit probe error instead of being guessed.
+The standalone doctor reports `compile_probe_status: PASSED` and
+`compile_probe_passed: true` only after the probe completes. The lightweight
+doctor embedded in evaluation intentionally reports `NOT_RUN` and `null`.
+`driver_version` and `system_maca_version` are parsed from the supported
+no-argument `mx-smi` status output, while the Torch build remains separately
+recorded as `sdk_version`; a patch-version difference is evidence, not an
+automatic rejection.
 
 Only after the doctor and smaller suites succeed should `--suite full` allocate
 the four DeepSeek-style production shapes. Cases are processed one at a time;
 an unsupported or insufficient-memory environment fails explicitly rather than
-silently shrinking a case.
+silently shrinking a case. These B tensors exceed signed-int32 linear address
+range, so the seed promotes the B expert base to int64 before multiplying by
+the expert stride. Candidate kernels must preserve an equivalent 64-bit-safe
+expert-base calculation.
 
 The C500 benchmark is warm-cache steady-state: 10 warmups followed by three
 blocks of 10 measurements. Raw samples and p20/p50/p80 are retained. A future
@@ -117,6 +127,9 @@ sandbox. Run untrusted agents or candidates inside an OS/container boundary.
 ## Current limitations
 
 - C500 compilation and numerical results have not been validated on this Mac.
+- Full-suite correctness and performance remain pending until a C500 run
+  completes all four production shapes; mock, smoke, or quick results do not
+  establish that claim.
 - The MVP has no built-in LLM client, MCTS, beam search, remote scheduler, or
   NVIDIA backend.
 - Mock results are workflow evidence only and cannot be compared as performance.
