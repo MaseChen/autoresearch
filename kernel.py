@@ -211,7 +211,7 @@ def run_kernel(
         raise ValueError("all tensors must be on the same device")
 
     block_size_n = 64
-    block_size_k = 32
+    block_size_k = 64
     grid = (em // _EXPERT_TILE_ROWS, triton.cdiv(n, block_size_n))
     fused_moe_i8_tn_kernel[grid](
         a,
