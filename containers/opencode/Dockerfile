@@ -6,8 +6,10 @@ RUN npm install --global --no-audit --no-fund opencode-ai@1.17.7 \
     && npm cache clean --force \
     && test "$(opencode --version)" = "1.17.7"
 
-RUN groupadd --gid 1000 opencode \
-    && useradd --uid 1000 --gid 1000 --no-create-home --home-dir /home/opencode opencode
+# The pinned Node base image already provides node as UID/GID 1000.
+# Fail closed if a future base image changes that invariant.
+RUN test "$(id -u node)" = "1000" \
+    && test "$(id -g node)" = "1000"
 
 USER 1000:1000
 WORKDIR /home/opencode
