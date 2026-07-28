@@ -265,6 +265,36 @@ class IsolatedEvaluationTests(unittest.TestCase):
                         pass
                 _close_queue(pid_output)
 
+    def test_direct_worker_without_owned_group_reaches_kill_fallback(self) -> None:
+        class StubbornProcess:
+            pid = None
+
+            def __init__(self) -> None:
+                self.alive = True
+                self.terminated = False
+                self.killed = False
+                self.joins: list[float | None] = []
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def kill(self) -> None:
+                self.killed = True
+                self.alive = False
+
+            def join(self, timeout=None) -> None:
+                self.joins.append(timeout)
+
+        process = StubbornProcess()
+        _stop_process(process)  # type: ignore[arg-type]
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.killed)
+        self.assertFalse(process.alive)
+        self.assertEqual(process.joins, [2.0, 2.0])
+
     @unittest.skipUnless(
         hasattr(os, "setsid") and hasattr(os, "killpg"),
         "POSIX process groups are required",

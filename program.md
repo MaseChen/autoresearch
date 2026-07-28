@@ -3,6 +3,13 @@
 You are an autonomous GPU kernel researcher. Optimize the Triton candidate in
 `kernel.py` for the MetaX C500 while preserving the fixed operator contract.
 
+There are two execution modes. In the manual mode, a trusted operator edits
+`kernel.py` using the steps below. In staged-candidate mode, OpenCode has no
+tools and returns one complete `ProposalV1`; the host controller stores that
+source outside Git and performs the same scientific stages. The proposer must
+not assume it can inspect files, execute commands, continue a prior chat, or
+repair a candidate in place.
+
 ## Non-negotiable boundaries
 
 - Edit only `kernel.py` during experiments.
@@ -69,6 +76,37 @@ You are an autonomous GPU kernel researcher. Optimize the Triton candidate in
    per-case/aggregate change in the commit message. Rejected candidates remain
    in `.autoresearch/artifacts/` and SQLite, not in Git history.
 
+## Staged-candidate mode
+
+Each proposal must be either one JSON object or one `json` fenced block with
+exactly these fields and no others:
+
+```json
+{
+  "schema_version": 1,
+  "parent_candidate_hash": "<accepted 64-character lowercase SHA-256>",
+  "hypothesis": "<one falsifiable hypothesis>",
+  "rationale": "<evidence and expected effect>",
+  "kernel_source": "<complete replacement kernel.py>"
+}
+```
+
+The controller rejects parent mismatches, duplicate source hashes, extra text,
+tool events, unknown fields, capability-expanding Python and missing int64-safe
+B expert-base addressing before GPU access. Policy parsing is resource-bounded
+and the evaluator repeats it before importing the candidate. A unique proposal
+is then evaluated
+in order: policy → smoke → quick → full primary → unchanged-hash full
+confirmation. Only host-validated results are copied into the trusted history.
+
+The autonomous controller never writes the repository's `kernel.py` and never
+runs Git commit or push. A promoted staged artifact remains in runtime state
+for a trusted operator to inspect and materialize later.
+
+Compiler caches are isolated by evaluator image digest, framework commit and
+candidate hash. The same source may reuse its cache through smoke, quick,
+primary and confirmation, but a different candidate never receives it.
+
 ## Promotion rule
 
 - Every case: matched ratio >= 0.99.
@@ -86,8 +124,9 @@ simpler kernel when performance is statistically indistinguishable.
   features instead of weakening the evaluator.
 - `PRECISION_FAILED`: reduce the change to isolate indexing, masking, dtype, or
   expert-boundary errors.
-- `CRASH` or `TIMEOUT`: the worker is fault-isolated; restore `kernel.py`, verify
-  the C500 device is healthy, and continue with a safer hypothesis. The C500
+- `CRASH` or `TIMEOUT`: in manual mode, restore `kernel.py` and verify the
+  C500 device. In staged-candidate mode, terminate the entire unattended
+  session; do not retry automatically. The C500
   watchdog enforces 180 seconds for each compile phase and 300 seconds for each
   case phase; timeout JSON identifies the phase, case, and stage.
 - An illegal-address, ATU, or Xnack `CRASH` can disable the vendor runtime for
@@ -96,6 +135,9 @@ simpler kernel when performance is statistically indistinguishable.
   `CUDA_LAUNCH_BLOCKING=1` and preserve the complete first-case log before
   changing the SDK or kernel.
 - `UNSUPPORTED_ENV`: stop. Do not edit the kernel to hide an SDK/runtime problem.
+- SIGINT/SIGTERM/SIGQUIT closes the run as `STOPPED` after exact-container
+  cleanup. SIGKILL/OOM requires explicit operator inspection; do not assume an
+  in-process cleanup handler ran.
 
 Continue autonomously only on a healthy C500 environment. On mock mode, finish
 the workflow check and wait for real hardware rather than generating experiments.

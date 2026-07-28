@@ -2,16 +2,17 @@
 
 An external-agent research loop for optimizing a Triton implementation of a
 quantized Fused MoE operator. The fixed framework owns data generation,
-correctness, measurement, history, and process fault isolation. The research
-agent edits exactly one file: [`kernel.py`](kernel.py).
+correctness, measurement, history, and process fault isolation. It supports a
+manual workflow and a bounded OpenCode + DeepSeek proposal workflow.
 
 The first milestone is intentionally split in two:
 
 - **macOS mock mode** validates the control plane without importing PyTorch or
   Triton. It never invents latency and never promotes a candidate.
 - **MetaX C500 mode** is the only mode allowed to claim kernel correctness or
-  performance. The seed and adapter are implemented but remain unverified until
-  run in a matching MXMACA/mcPyTorch/mcTriton environment.
+  performance. The current `c944f4e…` BLOCK_K=64 seed has completed smoke,
+  quick and all four full cases on C500; each new server still establishes its
+  own accepted full baseline before comparisons.
 
 ## Operator contract
 
@@ -40,12 +41,13 @@ uses INT32, scaling uses FP32, and the in-place output is BF16.
 ## Quick start on macOS
 
 Python 3.10+ and NumPy are sufficient; no GPU packages or network are required.
+The macOS system Python 3.9 is not a supported test interpreter.
 
 ```bash
 python -m kernel_research doctor --backend mock
 python -m kernel_research evaluate --backend mock --suite smoke --note "seed control-plane check"
 python -m kernel_research history --format table
-python -m unittest discover -s tests -v
+python3.10 -m unittest discover -s tests -v
 ```
 
 Runtime state is written below `.autoresearch/` and is intentionally untracked.
@@ -102,16 +104,158 @@ a 300-second watchdog; timeout output records the active phase and case.
 python -m kernel_research doctor --backend mock|c500
 python -m kernel_research evaluate --backend mock|c500 --suite smoke|quick|full [--note TEXT]
 python -m kernel_research history --format table|json|tsv
+
+kernel-autoresearch doctor --config CONFIG
+kernel-autoresearch start --config CONFIG
+kernel-autoresearch resume --config CONFIG --run-id ID
+kernel-autoresearch status --config CONFIG [--run-id ID]
+kernel-autoresearch stop --config CONFIG --run-id ID
+kernel-autoresearch checkpoint --config CONFIG --run-id ID
 ```
 
 All machine-readable evaluation output has `schema_version: 1`. Logs and human
 diagnostics go to stderr; JSON goes to stdout.
+
+`python -m kernel_research evaluate-raw` is an internal controller interface.
+It repeats the bounded autonomous policy before candidate import, then emits
+evidence without opening SQLite or making a promotion decision. The public
+manual `evaluate` command intentionally retains its contract-only policy.
+
+## Controlled OpenCode workflow
+
+The host controller is standard-library-only. OpenCode is a replaceable
+`Proposer`: it receives a bounded prompt and returns a complete `ProposalV1`.
+It never receives a repository mount, GPU device or Docker socket. The trusted
+host validates the response, stages its source outside the repository, and
+runs smoke → quick → full primary → same-hash confirmation. It writes accepted
+and rejected evidence to the existing history only after validating raw
+container output. It never replaces `kernel.py`, commits, or pushes.
+
+Copy [`config/autorun.example.json`](config/autorun.example.json) outside the
+repository and replace the proposer image reference and `expected_git_commit`.
+Every configured path must be absolute and canonical; both images must use a
+repository digest (`name@sha256:...`). The current baseline kernel hash remains
+`c944f4e01b846061662918453c8b859f95f0f70d102d52447194e46d055dd015`.
+Its accepted provenance commit is
+`838e020252d1eb2190065036418e3b2064346822`; the controller commit is the newer
+exact `git rev-parse HEAD` value placed in the deployment config.
+
+The example deliberately sets `acknowledge_gpu_passthrough_risk` to `false`.
+`doctor` remains available, but candidate GPU evaluation through `start` or
+`resume` is blocked until it is explicitly set to `true` for an authorized
+GPU. Direct GPU device mounting is not an adversarial kernel sandbox.
+
+Build the pinned OpenCode 1.17.7 image, push it to a registry you control, and
+record the returned repository digest:
+
+```bash
+cd /home/mx/workspace/autoresearch
+docker build --pull --no-cache \
+  -f containers/opencode/Dockerfile \
+  -t YOUR_REGISTRY/kernel-autoresearch-opencode:1.17.7 .
+docker push YOUR_REGISTRY/kernel-autoresearch-opencode:1.17.7
+docker image inspect --format '{{json .RepoDigests}}' \
+  YOUR_REGISTRY/kernel-autoresearch-opencode:1.17.7
+```
+
+Create a dedicated, provider-budget-limited key without putting it in an
+environment variable or project file:
+
+```bash
+install -d -m 700 /home/mx/.config/kernel-autoresearch
+umask 077
+read -r -s -p 'DeepSeek API key: ' DEEPSEEK_KEY
+printf '%s' "$DEEPSEEK_KEY" \
+  > /home/mx/.config/kernel-autoresearch/deepseek-api-key
+unset DEEPSEEK_KEY
+chmod 600 /home/mx/.config/kernel-autoresearch/deepseek-api-key
+```
+
+Install only the console wrapper (the controller itself does not import the
+project's NumPy dependency), validate, then launch inside `tmux`:
+
+```bash
+python3 -m pip install --user --no-deps -e .
+kernel-autoresearch doctor \
+  --config /home/mx/autoresearch-runtime/gpu1/autorun.json
+tmux new -s fused-moe-research
+kernel-autoresearch start \
+  --config /home/mx/autoresearch-runtime/gpu1/autorun.json
+```
+
+The defaults stop after five unique proposals that pass strict Proposal
+validation, six hours, three consecutive proposer/controller failures, or the
+first confirmed promotion. Scientific rejections do not consume the controller
+failure budget. `CRASH`, `TIMEOUT`, `UNSUPPORTED_ENV`, exit 137, ATU, Xnack or
+illegal-address evidence stops the entire run without an unattended retry.
+`resume` always requires an explicit run ID; if primary completed, it resumes
+the same candidate at confirmation.
+
+SIGINT, SIGTERM and SIGQUIT use the same controlled shutdown path: the exact
+full-run-ID container is killed, the interruption is recorded, and the run
+closes as `STOPPED`. SIGKILL and host OOM cannot be handled in-process; use the
+recorded exact container name for operator recovery.
+
+For the deployment canary, make exactly one live DeepSeek/OpenCode proposal
+without candidate GPU evaluation:
+
+```bash
+kernel-autoresearch start \
+  --config /home/mx/autoresearch-runtime/gpu1/autorun.json \
+  --proposal-only
+```
+
+This still runs the trusted C500 doctor, but stops at `PROPOSAL_READY` after
+ProposalV1 and research-policy validation. Inspect its prompt, raw NDJSON and
+staged source before starting the one-candidate C500 dry run with a copied
+config whose `max_candidates` is `1`.
+
+### Server acceptance sequence
+
+Use a dedicated runtime directory and retain each JSON response. Do not start
+the five-candidate session until all of these checks pass:
+
+1. Run `kernel-autoresearch doctor`; confirm `status=SUCCESS`, the compile probe
+   is `PASSED`, and the GPU-risk acknowledgement value matches the config.
+2. Run the proposal-only canary above with risk acknowledgement still false.
+3. Copy the config, set `max_candidates` to `1` and
+   `acknowledge_gpu_passthrough_risk` to true, then run one complete staged
+   session. Confirm smoke, quick, full-primary and confirmation evidence is
+   present or that a scientific rejection stopped that candidate cleanly.
+4. Exercise safe controller fault fixtures without submitting a hostile GPU
+   program:
+
+   ```bash
+   PYTHONPATH=tests python3.10 -m unittest -v \
+     test_autorun.StateMachineTests.test_quick_compile_failure_and_full_performance_rejection \
+     test_autorun_hardening.CommandRunnerHardeningTests.test_high_rate_output_is_bounded_and_killed_immediately \
+     test_autorun_hardening.StoreAndRecoveryTests.test_controller_signal_stops_and_cleans_exact_container
+   ```
+
+5. For the canary run ID, require both commands below to return no containers;
+   inspect the candidate-hash cache directories and confirm no candidate shares
+   another candidate's path:
+
+   ```bash
+   docker ps -aq --filter "label=kernel-autoresearch.run=RUN_ID"
+   find /home/mx/autoresearch-runtime/gpu1/cache -mindepth 3 -maxdepth 3 -type d
+   ```
+
+6. Create a checkpoint, open both copied databases with
+   `PRAGMA integrity_check`, and verify every file against `manifest.json`.
+   The controller's checkpoint tests perform the same reconstruction and
+   SHA-256 checks locally.
+7. Only then enable the normal five-candidate, six-hour config. The first
+   confirmed promotion or any hard GPU/runtime fault terminates the session.
 
 ## Project structure
 
 ```text
 kernel.py                    agent-owned Triton candidate
 kernel_research/             fixed cases, oracle, worker, scoring, history, CLI
+kernel_research/autorun/     trusted host controller and proposer adapter
+containers/opencode/         pinned no-tool OpenCode proposer image
+config/                      secret-free deployment example
 program.md                   external-agent operating protocol
 tests/                       CPU-only unit and integration tests
 .autoresearch/               ignored runtime database and candidate artifacts
@@ -119,19 +263,48 @@ tests/                       CPU-only unit and integration tests
 
 ## Trust boundary
 
-AST validation proves only that the candidate has valid syntax and the required
-function signature. A spawned worker protects the controller from ordinary
-compiler crashes, illegal device accesses, and timeouts; it is not a security
-sandbox. Run untrusted agents or candidates inside an OS/container boundary.
+The autonomous path adds a conservative research-policy AST gate, but that gate
+is not a Python sandbox. Policy parsing runs in a short-lived worker with
+source, CPU, wall-clock, Linux memory and output bounds, and is repeated inside
+`evaluate-raw`. The proposer container has network but no repository, devices,
+state or Docker socket. The evaluator container is offline and sees only a
+commit-keyed framework snapshot, one candidate, an optional accepted baseline,
+a candidate-specific compiler cache and the three authorized GPU1 devices.
+Cache namespaces include evaluator digest, framework commit and candidate hash.
+The evaluator does not see either SQLite database. Both containers are
+non-root, read-only, capability-free and resource-bounded.
+
+The trusted host process is the only component allowed to call Docker and
+update history. Membership in the Docker group is effectively root-equivalent,
+so never expose its shell or socket to the Agent. Device isolation limits
+ordinary mistakes; an adversarial accelerator kernel may still crash or attack
+the shared driver. Without a VM/IOMMU boundary this design does not claim
+adversarial GPU isolation.
+
+Controller state uses a validated stage machine and transactional state/event
+writes. Checkpoints use SQLite backup, reopen both copies for `integrity_check`,
+and include database counts plus a SHA-256 file manifest. The two databases
+remain separate; deterministic run notes and candidate hashes reconcile the
+narrow cross-database window.
+
+For local branch-aware coverage evidence:
+
+```bash
+python3.10 -m pip install -e '.[dev]'
+python3.10 -m coverage run -m unittest discover -s tests -v
+python3.10 -m coverage report
+```
+
+Acceptance requires an unrounded total of at least 80% and branch-only coverage
+of at least 85% for `autorun/controller.py`, `autorun/runtime.py`, and
+`autorun/store.py`.
 
 ## Current limitations
 
-- C500 compilation and numerical results have not been validated on this Mac.
-- Full-suite correctness and performance remain pending until a C500 run
-  completes all four production shapes; mock, smoke, or quick results do not
-  establish that claim.
-- The MVP has no built-in LLM client, MCTS, beam search, remote scheduler, or
-  NVIDIA backend.
+- C500 results cannot be reproduced on macOS; every deployment must pass its
+  own doctor and establish an accepted full baseline.
+- The MVP has no in-process LLM client, MCTS, beam search, remote scheduler, or
+  NVIDIA backend. `opencode` is the only proposer adapter in this release.
 - Mock results are workflow evidence only and cannot be compared as performance.
 
 See [`program.md`](program.md) for the autonomous experiment protocol.

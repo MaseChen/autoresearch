@@ -23,6 +23,7 @@ import time
 from types import ModuleType
 from typing import Any, Callable, Mapping, Sequence
 
+from .constants import EXPERT_TILE_ROWS, REQUIRED_MATCH_RATIO
 from .contract import validate_candidate
 
 
@@ -36,7 +37,7 @@ STATUS_TIMEOUT = "TIMEOUT"
 STATUS_SUCCESS = "SUCCESS"
 
 SCHEMA_VERSION = 1
-MATCHED_RATIO_THRESHOLD = 0.99
+MATCHED_RATIO_THRESHOLD = REQUIRED_MATCH_RATIO
 WARMUP_ITERATIONS = 10
 MEASUREMENT_ROUNDS = 3
 SAMPLES_PER_ROUND = 10
@@ -1141,9 +1142,9 @@ def _torch_reference(torch: Any, tensors: Mapping[str, Any]) -> Any:
     n = int(b.shape[1])
     expected = torch.empty((em, n), dtype=torch.bfloat16, device=a.device)
 
-    for tile in range(em // 128):
-        row_start = tile * 128
-        row_end = row_start + 128
+    for tile in range(em // EXPERT_TILE_ROWS):
+        row_start = tile * EXPERT_TILE_ROWS
+        row_end = row_start + EXPERT_TILE_ROWS
         expert = int(expert_ids[tile].item())
         a_tile = a[row_start:row_end].contiguous()
         b_tile = b[expert].transpose(0, 1).contiguous()

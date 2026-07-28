@@ -14,10 +14,12 @@ from typing import Final, Literal, Mapping
 
 import numpy as np
 
+from .constants import EXPERT_TILE_ROWS
+
 
 FIXED_SEED: Final[int] = 20260721
 DEFAULT_SEED: Final[int] = FIXED_SEED
-TILE_ROWS: Final[int] = 128
+TILE_ROWS: Final[int] = EXPERT_TILE_ROWS
 TOPK: Final[int] = 8
 ZIPF_ALPHA: Final[float] = 1.2
 

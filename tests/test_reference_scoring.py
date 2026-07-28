@@ -162,6 +162,30 @@ class ReferenceTests(unittest.TestCase):
         self.assertTrue(np.isnan(rounded[5]))
         self.assertTrue(np.all((rounded[:-1].view(np.uint32) & 0xFFFF) == 0))
 
+    def test_bfloat16_all_float32_subnormals_match_integer_rne(self) -> None:
+        chunk_size = 1 << 16
+        for sign in (np.uint32(0), np.uint32(0x80000000)):
+            for start in range(1, 1 << 23, chunk_size):
+                mantissa = np.arange(
+                    start,
+                    min(start + chunk_size, 1 << 23),
+                    dtype=np.uint32,
+                )
+                bits = mantissa | sign
+                actual = bfloat16_round(
+                    bits.view(np.float32)
+                ).view(np.uint32)
+                upper = bits >> np.uint32(16)
+                remainder = bits & np.uint32(0xFFFF)
+                round_up = (remainder > np.uint32(0x8000)) | (
+                    (remainder == np.uint32(0x8000))
+                    & ((upper & np.uint32(1)) == np.uint32(1))
+                )
+                expected = (
+                    upper + round_up.astype(np.uint32)
+                ) << np.uint32(16)
+                np.testing.assert_array_equal(actual, expected)
+
     def test_tile_mapping_formula_and_read_only_inputs(self) -> None:
         dataset = make_dataset(em=256, n=2, k=4, experts=3)
         dataset.a[:] = np.array([1, -2, 3, -4], dtype=np.int8)

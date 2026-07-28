@@ -154,6 +154,20 @@ def validate_candidate(
                 ),
             ),
         )
+    except (RecursionError, MemoryError) as exc:
+        return CandidateValidation(
+            source=source,
+            sha256=digest,
+            errors=(
+                CandidateError(
+                    code="AST_RESOURCE_LIMIT",
+                    message=(
+                        "candidate syntax tree exceeded parser resources: "
+                        f"{type(exc).__name__}"
+                    ),
+                ),
+            ),
+        )
 
     definitions = [
         node

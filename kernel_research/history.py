@@ -18,7 +18,7 @@ from typing import Any
 from .contract import EVALUATION_STATUSES
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _utc_now() -> str:
@@ -187,63 +187,82 @@ class HistoryStore:
         )
         if current_version > SCHEMA_VERSION:
             self._connection.close()
-            raise RuntimeError(
+            raise sqlite3.DatabaseError(
                 f"history schema {current_version} is newer than supported "
                 f"version {SCHEMA_VERSION}"
             )
-        if current_version == SCHEMA_VERSION:
-            return
-        try:
-            self._connection.executescript(
-                """
-                BEGIN IMMEDIATE;
+        if current_version == 0:
+            try:
+                self._connection.executescript(
+                    """
+                    BEGIN IMMEDIATE;
 
-                CREATE TABLE IF NOT EXISTS experiments (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    schema_version INTEGER NOT NULL,
-                    created_at TEXT NOT NULL,
-                    candidate_hash TEXT NOT NULL,
-                    git_commit TEXT,
-                    backend TEXT NOT NULL,
-                    suite TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    promotable INTEGER NOT NULL CHECK (promotable IN (0, 1)),
-                    duplicate_of_id INTEGER REFERENCES experiments(id),
-                    aggregate_score REAL,
-                    note TEXT NOT NULL,
-                    environment_json TEXT NOT NULL,
-                    error_summary TEXT,
-                    artifact_path TEXT NOT NULL,
-                    result_json TEXT NOT NULL
-                );
+                    CREATE TABLE IF NOT EXISTS experiments (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        schema_version INTEGER NOT NULL,
+                        created_at TEXT NOT NULL,
+                        candidate_hash TEXT NOT NULL,
+                        git_commit TEXT,
+                        backend TEXT NOT NULL,
+                        suite TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        promotable INTEGER NOT NULL CHECK (promotable IN (0, 1)),
+                        duplicate_of_id INTEGER REFERENCES experiments(id),
+                        aggregate_score REAL,
+                        note TEXT NOT NULL,
+                        environment_json TEXT NOT NULL,
+                        error_summary TEXT,
+                        artifact_path TEXT NOT NULL,
+                        result_json TEXT NOT NULL
+                    );
 
-                CREATE INDEX IF NOT EXISTS experiments_candidate_hash_idx
-                    ON experiments(candidate_hash, id);
-                CREATE INDEX IF NOT EXISTS experiments_best_idx
-                    ON experiments(backend, suite, status, promotable, aggregate_score);
+                    CREATE INDEX IF NOT EXISTS experiments_candidate_hash_idx
+                        ON experiments(candidate_hash, id);
+                    CREATE INDEX IF NOT EXISTS experiments_best_idx
+                        ON experiments(
+                            backend, suite, status, promotable, aggregate_score
+                        );
 
-                CREATE TABLE IF NOT EXISTS case_measurements (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    experiment_id INTEGER NOT NULL
-                        REFERENCES experiments(id) ON DELETE CASCADE,
-                    case_name TEXT NOT NULL,
-                    matched_ratio REAL,
-                    passed INTEGER CHECK (passed IS NULL OR passed IN (0, 1)),
-                    raw_samples_json TEXT NOT NULL,
-                    baseline_samples_json TEXT NOT NULL,
-                    metrics_json TEXT NOT NULL,
-                    UNIQUE(experiment_id, case_name)
-                );
+                    CREATE TABLE IF NOT EXISTS case_measurements (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        experiment_id INTEGER NOT NULL
+                            REFERENCES experiments(id) ON DELETE CASCADE,
+                        case_name TEXT NOT NULL,
+                        matched_ratio REAL,
+                        passed INTEGER
+                            CHECK (passed IS NULL OR passed IN (0, 1)),
+                        raw_samples_json TEXT NOT NULL,
+                        baseline_samples_json TEXT NOT NULL,
+                        metrics_json TEXT NOT NULL,
+                        UNIQUE(experiment_id, case_name)
+                    );
 
-                PRAGMA user_version = 1;
-                COMMIT;
-                """
-            )
-        except Exception:
-            if self._connection.in_transaction:
-                self._connection.execute("ROLLBACK")
-            self._connection.close()
-            raise
+                    PRAGMA user_version = 1;
+                    COMMIT;
+                    """
+                )
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                self._connection.close()
+                raise
+            current_version = 1
+        if current_version == 1:
+            try:
+                self._connection.executescript(
+                    """
+                    BEGIN IMMEDIATE;
+                    CREATE INDEX IF NOT EXISTS experiments_autorun_note_idx
+                        ON experiments(note, candidate_hash, backend, suite, id);
+                    PRAGMA user_version = 2;
+                    COMMIT;
+                    """
+                )
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                self._connection.close()
+                raise
 
     @property
     def schema_version(self) -> int:
@@ -415,17 +434,22 @@ class HistoryStore:
 
         return self.record_experiment(**values)
 
-    def _record_from_row(self, row: sqlite3.Row) -> ExperimentRecord:
-        case_rows = self._connection.execute(
-            """
-            SELECT case_name, matched_ratio, passed, raw_samples_json,
-                   baseline_samples_json, metrics_json
-            FROM case_measurements
-            WHERE experiment_id = ?
-            ORDER BY id
-            """,
-            (int(row["id"]),),
-        ).fetchall()
+    def _record_from_row(
+        self,
+        row: sqlite3.Row,
+        case_rows: Sequence[sqlite3.Row] | None = None,
+    ) -> ExperimentRecord:
+        if case_rows is None:
+            case_rows = self._connection.execute(
+                """
+                SELECT experiment_id, case_name, matched_ratio, passed,
+                       raw_samples_json, baseline_samples_json, metrics_json
+                FROM case_measurements
+                WHERE experiment_id = ?
+                ORDER BY id
+                """,
+                (int(row["id"]),),
+            ).fetchall()
         cases = tuple(
             CaseMeasurement(
                 name=str(case["case_name"]),
@@ -467,11 +491,42 @@ class HistoryStore:
             case_measurements=cases,
         )
 
+    def _records_from_rows(
+        self, rows: Sequence[sqlite3.Row]
+    ) -> list[ExperimentRecord]:
+        if not rows:
+            return []
+        ids = [int(row["id"]) for row in rows]
+        placeholders = ",".join("?" for _ in ids)
+        case_rows = self._connection.execute(
+            f"""
+            SELECT experiment_id, case_name, matched_ratio, passed,
+                   raw_samples_json, baseline_samples_json, metrics_json, id
+            FROM case_measurements
+            WHERE experiment_id IN ({placeholders})
+            ORDER BY experiment_id, id
+            """,
+            ids,
+        ).fetchall()
+        by_experiment: dict[int, list[sqlite3.Row]] = {
+            experiment_id: [] for experiment_id in ids
+        }
+        for case in case_rows:
+            by_experiment[int(case["experiment_id"])].append(case)
+        return [
+            self._record_from_row(row, by_experiment[int(row["id"])])
+            for row in rows
+        ]
+
     def get_experiment(self, experiment_id: int) -> ExperimentRecord | None:
         row = self._connection.execute(
             "SELECT * FROM experiments WHERE id = ?", (experiment_id,)
         ).fetchone()
-        return None if row is None else self._record_from_row(row)
+        return (
+            None
+            if row is None
+            else self._records_from_rows([row])[0]
+        )
 
     def list_experiments(
         self,
@@ -504,10 +559,53 @@ class HistoryStore:
             query += " LIMIT ?"
             parameters.append(limit)
         rows = self._connection.execute(query, parameters).fetchall()
-        return [self._record_from_row(row) for row in rows]
+        return self._records_from_rows(rows)
 
     def find_by_candidate_hash(self, candidate_hash: str) -> list[ExperimentRecord]:
         return self.list_experiments(candidate_hash=candidate_hash)
+
+    def find_by_note_candidate(
+        self, *, note: str, candidate_hash: str
+    ) -> ExperimentRecord | None:
+        row = self._connection.execute(
+            """
+            SELECT * FROM experiments
+            WHERE note = ? AND candidate_hash = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (note, candidate_hash),
+        ).fetchone()
+        return (
+            None
+            if row is None
+            else self._records_from_rows([row])[0]
+        )
+
+    def list_autorun_experiments(
+        self,
+        *,
+        run_id: str,
+        backend: str | None = None,
+        suite: str | None = None,
+        promotable_only: bool = False,
+    ) -> list[ExperimentRecord]:
+        clauses = ["note LIKE ?"]
+        parameters: list[Any] = [f"autorun:{run_id}:%"]
+        if backend is not None:
+            clauses.append("backend = ?")
+            parameters.append(backend)
+        if suite is not None:
+            clauses.append("suite = ?")
+            parameters.append(suite)
+        if promotable_only:
+            clauses.append("promotable = 1")
+        rows = self._connection.execute(
+            "SELECT * FROM experiments WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY id",
+            parameters,
+        ).fetchall()
+        return self._records_from_rows(rows)
 
     def has_candidate(self, candidate_hash: str) -> bool:
         row = self._connection.execute(
@@ -544,7 +642,11 @@ class HistoryStore:
             + " ORDER BY aggregate_score DESC, id DESC LIMIT 1",
             parameters,
         ).fetchone()
-        return None if row is None else self._record_from_row(row)
+        return (
+            None
+            if row is None
+            else self._records_from_rows([row])[0]
+        )
 
     def export_rows(self) -> list[dict[str, Any]]:
         return [record.to_dict() for record in self.list_experiments()]

@@ -8,11 +8,12 @@ from typing import Final, Mapping
 import numpy as np
 
 from .cases import CaseSpec, DataSet, FIXED_SEED, TILE_ROWS, TOPK, generate_case
+from .constants import REQUIRED_MATCH_RATIO as _REQUIRED_MATCH_RATIO
 
 
 RTOL: Final[float] = 2.0e-2
 ATOL: Final[float] = 5.0e-3
-REQUIRED_MATCH_RATIO: Final[float] = 0.99
+REQUIRED_MATCH_RATIO: Final[float] = _REQUIRED_MATCH_RATIO
 
 _READ_ONLY_FIELDS: Final[tuple[str, ...]] = (
     "a",

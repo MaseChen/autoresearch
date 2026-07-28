@@ -18,10 +18,14 @@ AGENTS.md
 
 # Local experiment state and generated artifacts
 .autoresearch/
+autorun.json
+controller.sqlite3*
 results.tsv
 run.log
 core
 core.*
+.coverage*
+htmlcov/
 
 # Vendor/compiler caches that must not become experiment inputs
 .triton/
