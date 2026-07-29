@@ -439,7 +439,6 @@ def write_opencode_config(path: Path, config: ControllerConfig) -> None:
         "mcp": {},
         "formatter": False,
         "lsp": False,
-        "subagent_depth": 0,
         "enabled_providers": ["deepseek"],
         "tools": {
             "bash": False,

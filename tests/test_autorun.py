@@ -341,7 +341,7 @@ class ConfigAndArgvTests(unittest.TestCase):
             self.assertIn("/baseline/kernel.py", joined)
             opencode = json.loads(opencode_config.read_text(encoding="utf-8"))
             self.assertEqual(opencode["permission"], {"*": "deny"})
-            self.assertEqual(opencode["subagent_depth"], 0)
+            self.assertNotIn("subagent_depth", opencode)
             self.assertEqual(opencode["share"], "disabled")
             self.assertFalse(opencode["formatter"])
             self.assertFalse(opencode["lsp"])
