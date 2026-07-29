@@ -318,6 +318,15 @@ mx-smi  version: 2.3.1
         )
         self.assertEqual(
             _classify_first_invocation_error(
+                AssertionError(
+                    "num_warps must be a power of 2 or greater than 0 "
+                    "and less than or equal to 16"
+                )
+            ),
+            STATUS_COMPILE_ERROR,
+        )
+        self.assertEqual(
+            _classify_first_invocation_error(
                 accelerator_error("device launch failed")
             ),
             STATUS_CRASH,

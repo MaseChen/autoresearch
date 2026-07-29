@@ -774,6 +774,9 @@ def _classify_first_invocation_error(exc: BaseException) -> str:
         "compilation failed",
         "compile failed",
         "compiler error",
+        "num_warps must be",
+        "num_stages must be",
+        "num_ctas must be",
     )
     if any(marker in message for marker in compiler_message_markers):
         return STATUS_COMPILE_ERROR

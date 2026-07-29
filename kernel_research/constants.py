@@ -5,6 +5,7 @@ from __future__ import annotations
 
 EXPERT_TILE_ROWS = 128
 REQUIRED_MATCH_RATIO = 0.99
+C500_ALLOWED_NUM_WARPS = frozenset({1, 2, 4, 8, 16})
 
 # These are trusted-controller ceilings. User configuration may lower them but
 # may never raise them.

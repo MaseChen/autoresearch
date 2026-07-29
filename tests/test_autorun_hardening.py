@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import sqlite3
 import subprocess
@@ -136,6 +137,28 @@ class CommandRunnerHardeningTests(unittest.TestCase):
 
 
 class PolicyHardeningTests(unittest.TestCase):
+    def test_c500_num_warps_is_literal_and_bounded(self) -> None:
+        pattern = re.compile(r"(?m)^(?P<indent>\s*)num_warps=[^,\n]+,$")
+
+        def with_num_warps(value: str) -> str:
+            updated, count = pattern.subn(
+                rf"\g<indent>num_warps={value},", SEED
+            )
+            self.assertEqual(count, 1)
+            return updated
+
+        self.assertTrue(validate_research_candidate(with_num_warps("8")).valid)
+        for value in ("0", "3", "32", "topk"):
+            with self.subTest(num_warps=value):
+                result = validate_research_candidate(
+                    with_num_warps(value)
+                )
+                self.assertFalse(result.valid)
+                self.assertIn(
+                    "C500_NUM_WARPS_INVALID",
+                    {error.code for error in result.errors},
+                )
+
     def test_int64_product_must_flow_to_the_b_load(self) -> None:
         swapped = SEED.replace(
             "expert_id.to(tl.int64) * stride_be",
@@ -204,22 +227,37 @@ class PolicyHardeningTests(unittest.TestCase):
         self.assertIn("output limit", excessive.errors[0].message)
 
     def test_evaluate_raw_rechecks_policy_before_executor(self) -> None:
-        unsafe = SEED.replace(
-            "expert_id.to(tl.int64) * stride_be",
-            "expert_id * stride_be",
+        unsafe_variants = (
+            (
+                SEED.replace(
+                    "expert_id.to(tl.int64) * stride_be",
+                    "expert_id * stride_be",
+                ),
+                "INT64_B_BASE_REQUIRED",
+            ),
+            (
+                re.sub(
+                    r"(?m)^(?P<indent>\s*)num_warps=[^,\n]+,$",
+                    r"\g<indent>num_warps=32,",
+                    SEED,
+                ),
+                "C500_NUM_WARPS_INVALID",
+            ),
         )
-        with tempfile.TemporaryDirectory() as temporary:
-            candidate = Path(temporary) / "kernel.py"
-            candidate.write_text(unsafe, encoding="utf-8")
-            with mock.patch(
-                "kernel_research.evaluation.evaluate_isolated"
-            ) as evaluate:
-                result = raw_evaluate(
-                    candidate, backend="mock", suite="smoke"
-                )
-        evaluate.assert_not_called()
-        self.assertEqual(result["status"], "CONTRACT_ERROR")
-        self.assertIn("INT64_B_BASE_REQUIRED", result["error"])
+        for unsafe, error_code in unsafe_variants:
+            with self.subTest(error_code=error_code):
+                with tempfile.TemporaryDirectory() as temporary:
+                    candidate = Path(temporary) / "kernel.py"
+                    candidate.write_text(unsafe, encoding="utf-8")
+                    with mock.patch(
+                        "kernel_research.evaluation.evaluate_isolated"
+                    ) as evaluate:
+                        result = raw_evaluate(
+                            candidate, backend="mock", suite="smoke"
+                        )
+                evaluate.assert_not_called()
+                self.assertEqual(result["status"], "CONTRACT_ERROR")
+                self.assertIn(error_code, result["error"])
 
 
 class FixedRunner:

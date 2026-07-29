@@ -17,6 +17,7 @@ import tempfile
 from typing import Any
 
 from .constants import (
+    C500_ALLOWED_NUM_WARPS,
     MAX_CANDIDATE_SOURCE_BYTES,
     POLICY_OUTPUT_LIMIT_BYTES,
     POLICY_WALL_TIMEOUT_SEC,
@@ -476,6 +477,27 @@ def validate_research_candidate(source: str) -> ResearchPolicyResult:
                     node,
                 )
             )
+        elif isinstance(node, ast.keyword) and node.arg == "num_warps":
+            value = (
+                node.value.value
+                if isinstance(node.value, ast.Constant)
+                else None
+            )
+            if (
+                type(value) is not int
+                or value not in C500_ALLOWED_NUM_WARPS
+            ):
+                allowed = ", ".join(
+                    str(item) for item in sorted(C500_ALLOWED_NUM_WARPS)
+                )
+                errors.append(
+                    _error(
+                        "C500_NUM_WARPS_INVALID",
+                        "num_warps must be a literal supported by C500 "
+                        f"mcTriton: one of {allowed}",
+                        node.value,
+                    )
+                )
 
     if not _int64_stride_base_present(tree):
         errors.append(
