@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,29 @@ FULL_CASES = (
     "full_decode_down",
     "full_prefill_down",
 )
+
+_BLOCK_SIZE_N_ASSIGNMENT = re.compile(
+    r"(?m)^    block_size_n = [0-9]+$"
+)
+
+
+def _with_block_size_n(source: str, value: int) -> str:
+    updated, count = _BLOCK_SIZE_N_ASSIGNMENT.subn(
+        f"    block_size_n = {value}", source
+    )
+    if count != 1:
+        raise AssertionError(
+            "fixture source must contain exactly one block_size_n assignment"
+        )
+    return updated
+
+
+def _with_different_block_size_n(source: str) -> str:
+    for value in (16, 32, 64, 128, 256, 512):
+        updated = _with_block_size_n(source, value)
+        if updated != source:
+            return updated
+    raise AssertionError("could not construct a distinct fixture candidate")
 
 
 def _proposal_value(source: str = SEED) -> dict:
@@ -798,7 +822,7 @@ class StateMachineTests(unittest.TestCase):
             "Change only kernel.py.", encoding="utf-8"
         )
         _baseline(config.state_dir)
-        source = SEED.replace("block_size_n = 64", "block_size_n = 32")
+        source = _with_different_block_size_n(SEED)
         proposal = ProposalV1.from_value(
             _proposal_value(source), expected_parent_hash=SEED_HASH
         )
@@ -959,11 +983,14 @@ class StateMachineTests(unittest.TestCase):
                 "Change only kernel.py.", encoding="utf-8"
             )
             _baseline(config.state_dir)
+            sources = [
+                source
+                for tile in (16, 32, 64, 128, 256, 512)
+                if (source := _with_block_size_n(SEED, tile)) != SEED
+            ][:5]
+            self.assertEqual(len(sources), 5)
             proposals = {}
-            for index, tile in enumerate((16, 32, 128, 256, 512), 1):
-                source = SEED.replace(
-                    "block_size_n = 64", f"block_size_n = {tile}"
-                )
+            for index, source in enumerate(sources, 1):
                 proposals[index] = ProposalV1.from_value(
                     _proposal_value(source), expected_parent_hash=SEED_HASH
                 )

@@ -49,6 +49,7 @@ from test_autorun import (
     _baseline,
     _config,
     _proposal_value,
+    _with_different_block_size_n,
 )
 
 
@@ -254,7 +255,7 @@ class ControllerPublicSurfaceTests(unittest.TestCase):
             "Only kernel.py.", encoding="utf-8"
         )
         _baseline(config.state_dir)
-        source = SEED.replace("block_size_n = 64", "block_size_n = 32")
+        source = _with_different_block_size_n(SEED)
         proposal = ProposalV1.from_value(
             _proposal_value(source), expected_parent_hash=SEED_HASH
         )
@@ -1206,9 +1207,11 @@ class KernelWrapperTests(unittest.TestCase):
             out,
         )
         grid, _args, kwargs = kernel.launches[-1]
-        self.assertEqual(grid, (2, 2))
-        self.assertEqual(kwargs["BLOCK_SIZE_K"], 64)
-        self.assertEqual(kwargs["num_warps"], 8)
+        self.assertEqual(grid, (2, 1))
+        self.assertEqual(kwargs["BLOCK_SIZE_N"], 128)
+        self.assertEqual(kwargs["BLOCK_SIZE_K"], 128)
+        self.assertEqual(kwargs["num_warps"], 16)
+        self.assertEqual(kwargs["num_stages"], 2)
         with self.assertRaisesRegex(ValueError, "topk"):
             module.run_kernel(
                 a,

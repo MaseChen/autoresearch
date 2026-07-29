@@ -44,6 +44,7 @@ from test_autorun import (
     _baseline,
     _config,
     _proposal_value,
+    _with_different_block_size_n,
 )
 
 
@@ -337,7 +338,7 @@ class AdapterAndCacheTests(unittest.TestCase):
             candidate_b = root / "b.py"
             candidate_a.write_text(SEED, encoding="utf-8")
             candidate_b.write_text(
-                SEED.replace("block_size_n = 64", "block_size_n = 32"),
+                _with_different_block_size_n(SEED),
                 encoding="utf-8",
             )
             for index, candidate in enumerate((candidate_a, candidate_b), 1):
@@ -445,9 +446,7 @@ class StoreAndRecoveryTests(unittest.TestCase):
                 "Only kernel.py.", encoding="utf-8"
             )
             _baseline(config.state_dir)
-            proposal_source = SEED.replace(
-                "block_size_n = 64", "block_size_n = 32"
-            )
+            proposal_source = _with_different_block_size_n(SEED)
             proposal = ProposalV1.from_value(
                 _proposal_value(proposal_source),
                 expected_parent_hash=SEED_HASH,
