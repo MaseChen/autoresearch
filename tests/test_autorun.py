@@ -309,6 +309,11 @@ class ConfigAndArgvTests(unittest.TestCase):
                 opencode_config=opencode_config,
             )
             joined = " ".join(proposal_args)
+            self.assertIn("--interactive", proposal_args)
+            self.assertLess(
+                proposal_args.index("--interactive"),
+                proposal_args.index(config.proposer_image),
+            )
             self.assertNotIn(str(config.repository_dir), joined)
             self.assertNotIn("/dev/mxcd", joined)
             self.assertNotIn("docker.sock", joined)

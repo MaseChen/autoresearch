@@ -244,6 +244,9 @@ def proposer_argv(
     )
     argv.extend(
         [
+            # Keep Docker stdin open so the pinned OpenCode CLI can consume the
+            # proposal prompt without placing its contents in argv or env.
+            "--interactive",
             "--network",
             "bridge",
             "--tmpfs",
