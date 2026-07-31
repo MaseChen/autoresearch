@@ -8,10 +8,22 @@ import json
 import re
 from typing import Any, Iterable, Mapping
 
+from ..constants import OPENCODE_PROPOSER_STEPS
 from .models import ProposalV1
 
 
 FENCED_JSON_RE = re.compile(r"\A\s*```json\s*\n(.*?)\n```\s*\Z", re.DOTALL)
+STEP_LIMIT_FALLBACK_RE = re.compile(
+    r"\A(?:"
+    r"maximum steps for this agent have been reached"
+    r"|critical\s+[-–—]\s+maximum steps reached"
+    r")[.!:]?\Z",
+    re.IGNORECASE,
+)
+
+
+class ProposerStepLimitError(ValueError):
+    """OpenCode emitted its forced summary after exhausting agent steps."""
 
 
 @dataclass(frozen=True)
@@ -106,9 +118,19 @@ def parse_opencode_ndjson(
         raise ValueError("OpenCode produced no JSON events")
     if not text_parts:
         raise ValueError("OpenCode produced no final text event")
-    return parse_proposal_text(
-        "".join(text_parts), expected_parent_hash=expected_parent_hash
-    )
+    final_text = "".join(text_parts)
+    try:
+        return parse_proposal_text(
+            final_text, expected_parent_hash=expected_parent_hash
+        )
+    except ValueError as exc:
+        first_line = final_text.lstrip().splitlines()[0].strip()
+        if STEP_LIMIT_FALLBACK_RE.fullmatch(first_line):
+            raise ProposerStepLimitError(
+                "PROPOSER_STEP_LIMIT: OpenCode exhausted its configured "
+                f"{OPENCODE_PROPOSER_STEPS}-step proposal budget"
+            ) from exc
+        raise
 
 
 def build_prompt(request: ProposalRequest) -> str:

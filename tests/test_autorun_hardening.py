@@ -24,6 +24,7 @@ from kernel_research.autorun.models import ProposalV1
 from kernel_research.autorun.opencode import OpenCodeProposer
 from kernel_research.autorun.proposal import (
     ProposalRequest,
+    ProposerStepLimitError,
     parse_opencode_ndjson,
 )
 from kernel_research.autorun.runtime import CommandResult, CommandRunner
@@ -46,6 +47,10 @@ from test_autorun import (
     _config,
     _proposal_value,
     _with_different_block_size_n,
+)
+
+STEP_LIMIT_FIXTURE = (
+    Path(__file__).with_name("fixtures") / "opencode_step_limit_005.ndjson"
 )
 
 
@@ -301,6 +306,118 @@ class AdapterAndCacheTests(unittest.TestCase):
             parse_opencode_ndjson(
                 two_responses, expected_parent_hash=SEED_HASH
             )
+
+    def test_real_step_limit_ndjson_and_heading_variants_are_classified(
+        self,
+    ) -> None:
+        fixture_events = [
+            json.loads(line)
+            for line in STEP_LIMIT_FIXTURE.read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line
+        ]
+        text_event = next(
+            event for event in fixture_events if event["type"] == "text"
+        )
+        details = "\n\nSanitized OpenCode fallback details."
+        headings = (
+            "Maximum steps for this agent have been reached",
+            "CRITICAL – MAXIMUM STEPS REACHED",
+            "CRITICAL – Maximum steps reached",
+        )
+        for heading in headings:
+            with self.subTest(heading=heading):
+                events = json.loads(json.dumps(fixture_events))
+                candidate_text_event = next(
+                    event for event in events if event["type"] == "text"
+                )
+                candidate_text_event["part"]["text"] = heading + details
+                raw = "\n".join(
+                    json.dumps(event, ensure_ascii=False) for event in events
+                )
+                with self.assertRaisesRegex(
+                    ProposerStepLimitError,
+                    r"^PROPOSER_STEP_LIMIT:.*3-step proposal budget$",
+                ):
+                    parse_opencode_ndjson(
+                        raw, expected_parent_hash=SEED_HASH
+                    )
+        self.assertIn(
+            "Maximum steps for this agent have been reached",
+            text_event["part"]["text"],
+        )
+
+    def test_step_limit_classification_preserves_strict_json_errors(
+        self,
+    ) -> None:
+        raw = json.dumps(
+            {"type": "text", "part": {"text": "not JSON"}}
+        )
+        with self.assertRaises(ValueError) as caught:
+            parse_opencode_ndjson(raw, expected_parent_hash=SEED_HASH)
+        self.assertNotIsInstance(caught.exception, ProposerStepLimitError)
+        self.assertIn("valid JSON", str(caught.exception))
+
+        source = (
+            SEED
+            + "\n# Maximum steps for this agent have been reached in a comment.\n"
+        )
+        value = _proposal_value(source)
+        proposal_raw = json.dumps(
+            {
+                "type": "text",
+                "part": {"text": json.dumps(value)},
+            }
+        )
+        proposal = parse_opencode_ndjson(
+            proposal_raw, expected_parent_hash=SEED_HASH
+        )
+        self.assertEqual(proposal.kernel_source, source)
+
+    def test_step_limit_adapter_archives_redacted_output_before_raising(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = _config(root)
+            fixture = STEP_LIMIT_FIXTURE.read_text(encoding="utf-8")
+            runner = FixedRunner(
+                [
+                    CommandResult(
+                        argv=(),
+                        returncode=0,
+                        stdout=fixture,
+                        stderr="provider diagnostic secret",
+                    )
+                ]
+            )
+            adapter = OpenCodeProposer(
+                config,
+                run_id="b" * 32,
+                iteration_index=5,
+                run_dir=root / "run",
+                runner=runner,  # type: ignore[arg-type]
+            )
+            request = ProposalRequest(
+                parent_candidate_hash=SEED_HASH,
+                accepted_kernel=SEED,
+                program_markdown="Only kernel.py.",
+                environment={},
+                accepted_case_p50_us={},
+                recent_experiments=(),
+                session_feedback=(),
+            )
+            with self.assertRaisesRegex(
+                ProposerStepLimitError, r"^PROPOSER_STEP_LIMIT:"
+            ):
+                adapter.propose(request)
+            self.assertEqual(
+                adapter.raw_path.read_text(encoding="utf-8"), fixture
+            )
+            stderr = adapter.stderr_path.read_text(encoding="utf-8")
+            self.assertNotIn("secret", stderr)
+            self.assertIn("[REDACTED_SECRET]", stderr)
 
     def test_opencode_adapter_uses_full_run_id_and_redacts_secret(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -19,6 +19,7 @@ from kernel_research.autorun.models import ControllerConfig, ProposalV1
 from kernel_research.autorun.proposal import (
     ProposalRequest,
     Proposer,
+    ProposerStepLimitError,
     parse_opencode_ndjson,
     parse_proposal_text,
 )
@@ -30,6 +31,7 @@ from kernel_research.autorun.runtime import (
 )
 from kernel_research.autorun.store import ControllerStore
 from kernel_research.cli import main as evaluator_main
+from kernel_research.constants import OPENCODE_PROPOSER_STEPS
 from kernel_research.evaluation import record_external_result
 from kernel_research.history import HistoryStore
 from kernel_research.research_policy import validate_research_candidate
@@ -378,6 +380,10 @@ class ConfigAndArgvTests(unittest.TestCase):
             self.assertTrue(
                 all(enabled is False for enabled in opencode["tools"].values())
             )
+            proposer = opencode["agent"]["kernel-proposer"]
+            self.assertEqual(OPENCODE_PROPOSER_STEPS, 3)
+            self.assertEqual(proposer["steps"], OPENCODE_PROPOSER_STEPS)
+            self.assertEqual(proposer["permission"], {"*": "deny"})
 
     def test_config_rejects_capability_and_path_expansion(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -656,9 +662,12 @@ class StaticProposer(Proposer):
         return self.proposal
 
 
-class FailingProposer(Proposer):
+class StepLimitProposer(Proposer):
     def propose(self, request: ProposalRequest) -> ProposalV1:
-        raise RuntimeError("fixture proposer failure")
+        raise ProposerStepLimitError(
+            "PROPOSER_STEP_LIMIT: OpenCode exhausted its configured "
+            "3-step proposal budget"
+        )
 
 
 class FakeEvaluator:
@@ -1090,7 +1099,7 @@ class StateMachineTests(unittest.TestCase):
             controller = ResearchController(
                 config,
                 evaluator=evaluator,
-                proposer_factory=lambda run_id, index, run_dir: FailingProposer(),
+                proposer_factory=lambda run_id, index, run_dir: StepLimitProposer(),
             )
             run_id = self._create_run(controller, config)
             result = controller._run_loop(run_id)
@@ -1102,6 +1111,13 @@ class StateMachineTests(unittest.TestCase):
             self.assertTrue(
                 all(item["outcome"] == "PROPOSER_ERROR" for item in iterations)
             )
+            self.assertTrue(
+                all(item["candidate_hash"] is None for item in iterations)
+            )
+            self.assertTrue(
+                all("PROPOSER_STEP_LIMIT:" in item["error"] for item in iterations)
+            )
+            self.assertEqual(result["valid_candidates"], 0)
             self.assertEqual(evaluator.stages, [])
 
     def test_duplicate_accepted_hash_never_reaches_gpu_or_candidate_budget(self) -> None:

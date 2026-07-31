@@ -15,6 +15,7 @@ from typing import Any, Sequence
 from ..constants import (
     COMMAND_READ_CHUNK_BYTES,
     EVALUATOR_PID_LIMIT,
+    OPENCODE_PROPOSER_STEPS,
     PROPOSER_PID_LIMIT,
 )
 from .models import ControllerConfig
@@ -429,7 +430,7 @@ def evaluator_doctor_argv(
 
 
 def write_opencode_config(path: Path, config: ControllerConfig) -> None:
-    """Write the no-tool, one-step OpenCode configuration."""
+    """Write the no-tool, bounded-step OpenCode configuration."""
 
     value: dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
@@ -478,7 +479,7 @@ def write_opencode_config(path: Path, config: ControllerConfig) -> None:
             "kernel-proposer": {
                 "description": "One-shot Fused MoE kernel proposal generator",
                 "mode": "primary",
-                "steps": 1,
+                "steps": OPENCODE_PROPOSER_STEPS,
                 "model": config.opencode_model,
                 "permission": {"*": "deny"},
                 "reasoningEffort": "max",
