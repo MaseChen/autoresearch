@@ -18,6 +18,7 @@ from kernel_research.autorun.controller import ResearchController, gpu_lock
 from kernel_research.autorun.models import ControllerConfig, ProposalV1
 from kernel_research.autorun.proposal import (
     ProposalRequest,
+    ProposalFormatError,
     Proposer,
     ProposerStepLimitError,
     parse_opencode_ndjson,
@@ -171,7 +172,7 @@ class ProposalTests(unittest.TestCase):
             ).candidate_hash,
             SEED_HASH,
         )
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ProposalFormatError):
             parse_proposal_text(
                 fenced + "\nextra", expected_parent_hash=SEED_HASH
             )

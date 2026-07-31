@@ -13,6 +13,7 @@ from typing import Any, Iterator, Sequence
 from .controller import ControllerSignal, ResearchController
 from .errors import ControlledRuntimeError
 from .models import ControllerConfig
+from .summary import compact_status_payload
 
 
 def _print(value: Any) -> None:
@@ -63,8 +64,15 @@ def _doctor(args: argparse.Namespace) -> int:
 
 
 def _start(args: argparse.Namespace) -> int:
-    payload = _controller(args).start(proposal_only=args.proposal_only)
-    _print(payload)
+    controller = _controller(args)
+    payload = controller.start(proposal_only=args.proposal_only)
+    output = payload
+    if args.format == "compact":
+        output = compact_status_payload(
+            controller.status(str(payload["id"])),
+            command="start",
+        )
+    _print(output)
     return (
         0
         if payload["status"]
@@ -74,13 +82,23 @@ def _start(args: argparse.Namespace) -> int:
 
 
 def _resume(args: argparse.Namespace) -> int:
-    payload = _controller(args).resume(args.run_id)
-    _print(payload)
+    controller = _controller(args)
+    payload = controller.resume(args.run_id)
+    output = payload
+    if args.format == "compact":
+        output = compact_status_payload(
+            controller.status(args.run_id),
+            command="resume",
+        )
+    _print(output)
     return 0 if payload["status"] in {"PROMOTED", "BUDGET_EXHAUSTED"} else 3
 
 
 def _status(args: argparse.Namespace) -> int:
-    _print(_controller(args).status(args.run_id))
+    payload = _controller(args).status(args.run_id)
+    if args.format == "compact":
+        payload = compact_status_payload(payload)
+    _print(payload)
     return 0
 
 
@@ -118,7 +136,16 @@ def build_parser() -> argparse.ArgumentParser:
             subparser.add_argument(
                 "--proposal-only",
                 action="store_true",
-                help="make one live proposal and policy-check it without candidate evaluation",
+                help=(
+                    "make one live proposal and policy-check it without "
+                    "candidate evaluation"
+                ),
+            )
+        if command in {"start", "resume", "status"}:
+            subparser.add_argument(
+                "--format",
+                choices=("json", "compact"),
+                default="json",
             )
         subparser.set_defaults(handler=handler)
     return parser

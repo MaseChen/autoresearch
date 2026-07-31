@@ -1074,6 +1074,101 @@ class CliAndWorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "programming defect"):
                 autorun_cli.main(["status", "--config", "/tmp/config"])
 
+    def test_autorun_start_resume_and_status_compact_json(self) -> None:
+        fake = mock.Mock()
+        terminal = {"id": "run", "status": "BUDGET_EXHAUSTED"}
+        full_status = {
+            "schema_version": 1,
+            "command": "status",
+            "status": "BUDGET_EXHAUSTED",
+            "run": {
+                "id": "run",
+                "status": "BUDGET_EXHAUSTED",
+                "valid_candidates": 5,
+                "consecutive_failures": 0,
+                "stop_reason": "valid candidate budget exhausted",
+                "stop_requested": False,
+                "initial_best_hash": "a" * 64,
+                "final_best_hash": None,
+                "created_at": "created",
+                "updated_at": "updated",
+                "config": {
+                    "max_candidates": 5,
+                    "max_hours": 6.0,
+                    "deepseek_key_file": "/secret/path",
+                },
+                "preflight": {"large": True},
+            },
+            "iterations": [
+                {
+                    "iteration_index": 1,
+                    "stage": "DONE",
+                    "status": "COMPLETED",
+                    "outcome": "FULL_REJECTED",
+                    "candidate_hash": "b" * 64,
+                    "hypothesis": "fixture",
+                    "experiment_ids": {"full_primary": 1},
+                    "active_container": None,
+                    "error": None,
+                    "result_summary": {
+                        "relative_speedup_vs_accepted": 0.9
+                    },
+                }
+            ],
+        }
+        fake.start.return_value = terminal
+        fake.resume.return_value = terminal
+        fake.status.return_value = full_status
+        commands = (
+            (
+                ["start", "--config", "/tmp/config", "--format", "compact"],
+                "start",
+            ),
+            (
+                [
+                    "resume",
+                    "--config",
+                    "/tmp/config",
+                    "--run-id",
+                    "run",
+                    "--format",
+                    "compact",
+                ],
+                "resume",
+            ),
+            (
+                [
+                    "status",
+                    "--config",
+                    "/tmp/config",
+                    "--run-id",
+                    "run",
+                    "--format",
+                    "compact",
+                ],
+                "status",
+            ),
+        )
+        with mock.patch(
+            "kernel_research.autorun.cli._controller", return_value=fake
+        ):
+            for argv, expected_command in commands:
+                with self.subTest(argv=argv), redirect_stdout(
+                    io.StringIO()
+                ) as output:
+                    self.assertEqual(autorun_cli.main(argv), 0)
+                value = json.loads(output.getvalue())
+                self.assertEqual(value["format"], "compact")
+                self.assertEqual(value["command"], expected_command)
+                self.assertNotIn("config", value["run"])
+                self.assertNotIn("preflight", value["run"])
+                self.assertEqual(
+                    value["iterations"][0]["result_summary"][
+                        "relative_speedup_vs_accepted"
+                    ],
+                    0.9,
+                )
+
     def test_policy_worker_error_bounding(self) -> None:
         result = ResearchPolicyResult(
             source=SEED,

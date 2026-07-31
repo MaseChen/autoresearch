@@ -24,12 +24,22 @@ from kernel_research.autorun.models import ProposalV1
 from kernel_research.autorun.opencode import OpenCodeProposer
 from kernel_research.autorun.proposal import (
     ProposalRequest,
+    ProposerFormatRetryExhaustedError,
     ProposerStepLimitError,
+    build_prompt,
     parse_opencode_ndjson,
 )
 from kernel_research.autorun.runtime import CommandResult, CommandRunner
 from kernel_research.autorun.states import Stage
 from kernel_research.autorun.store import ControllerStore
+from kernel_research.autorun.summary import (
+    compact_status_payload,
+    summarize_result,
+)
+from kernel_research.constants import (
+    MAX_FEEDBACK_CANDIDATES,
+    MAX_FEEDBACK_ERROR_CHARS,
+)
 from kernel_research.evaluation import raw_evaluate, record_external_result
 from kernel_research.history import HistoryStore
 from kernel_research.research_policy import (
@@ -38,6 +48,7 @@ from kernel_research.research_policy import (
 )
 
 from test_autorun import (
+    FakeEvaluator,
     FULL_CASES,
     NoopRunner,
     SEED,
@@ -142,6 +153,31 @@ class CommandRunnerHardeningTests(unittest.TestCase):
 
 
 class PolicyHardeningTests(unittest.TestCase):
+    def test_triton_jit_rejects_plain_module_globals_only_inside_kernel(
+        self,
+    ) -> None:
+        self.assertTrue(validate_research_candidate(SEED).valid)
+        unsafe = SEED.replace(
+            "offs_m = pid_m * 128 + tl.arange(0, 128)",
+            "offs_m = pid_m * _EXPERT_TILE_ROWS + "
+            "tl.arange(0, _EXPERT_TILE_ROWS)",
+        )
+        result = validate_research_candidate(unsafe)
+        self.assertFalse(result.valid)
+        errors = [
+            error
+            for error in result.errors
+            if error.code == "TRITON_NON_CONSTEXPR_GLOBAL"
+        ]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("_EXPERT_TILE_ROWS", errors[0].message)
+
+        constexpr = unsafe.replace(
+            "_EXPERT_TILE_ROWS = 128",
+            "_EXPERT_TILE_ROWS: tl.constexpr = 128",
+        )
+        self.assertTrue(validate_research_candidate(constexpr).valid)
+
     def test_c500_num_warps_is_literal_and_bounded(self) -> None:
         pattern = re.compile(r"(?m)^(?P<indent>\s*)num_warps=[^,\n]+,$")
 
@@ -248,6 +284,14 @@ class PolicyHardeningTests(unittest.TestCase):
                 ),
                 "C500_NUM_WARPS_INVALID",
             ),
+            (
+                SEED.replace(
+                    "offs_m = pid_m * 128 + tl.arange(0, 128)",
+                    "offs_m = pid_m * _EXPERT_TILE_ROWS + "
+                    "tl.arange(0, _EXPERT_TILE_ROWS)",
+                ),
+                "TRITON_NON_CONSTEXPR_GLOBAL",
+            ),
         )
         for unsafe, error_code in unsafe_variants:
             with self.subTest(error_code=error_code):
@@ -269,10 +313,12 @@ class FixedRunner:
     def __init__(self, results: list[CommandResult]) -> None:
         self.results = list(results)
         self.argv: list[tuple[str, ...]] = []
+        self.kwargs: list[dict[str, object]] = []
         self.removed: list[str] = []
 
-    def run(self, argv, **_kwargs):
+    def run(self, argv, **kwargs):
         self.argv.append(tuple(str(value) for value in argv))
+        self.kwargs.append(dict(kwargs))
         return self.results.pop(0)
 
     def remove_exact_container(
@@ -418,6 +464,303 @@ class AdapterAndCacheTests(unittest.TestCase):
             stderr = adapter.stderr_path.read_text(encoding="utf-8")
             self.assertNotIn("secret", stderr)
             self.assertIn("[REDACTED_SECRET]", stderr)
+            self.assertEqual(len(runner.argv), 1)
+
+    def test_format_retry_succeeds_with_shared_budgets_and_full_audit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = _config(root)
+            malformed = json.dumps(
+                {
+                    "type": "text",
+                    "part": {
+                        "text": '{"schema_version":1,"kernel_source":"'
+                    },
+                }
+            )
+            valid = json.dumps(
+                {
+                    "type": "text",
+                    "part": {"text": json.dumps(_proposal_value())},
+                }
+            )
+            runner = FixedRunner(
+                [
+                    CommandResult((), 0, malformed, "secret first"),
+                    CommandResult((), 0, valid, "secret second"),
+                ]
+            )
+            adapter = OpenCodeProposer(
+                config,
+                run_id="c" * 32,
+                iteration_index=1,
+                run_dir=root / "run",
+                runner=runner,  # type: ignore[arg-type]
+            )
+            request = ProposalRequest(
+                parent_candidate_hash=SEED_HASH,
+                accepted_kernel=SEED,
+                program_markdown="Only kernel.py.",
+                environment={},
+                accepted_case_p50_us={},
+                recent_experiments=(),
+                session_feedback=(),
+            )
+            with mock.patch(
+                "kernel_research.autorun.opencode.time.monotonic",
+                side_effect=[1000.0, 1000.0, 1100.0],
+            ):
+                proposal = adapter.propose(request)
+            self.assertEqual(proposal.candidate_hash, SEED_HASH)
+            self.assertEqual(len(runner.argv), 2)
+            self.assertTrue(
+                all(adapter.container_name in argv for argv in runner.argv)
+            )
+            self.assertEqual(
+                [item["outcome"] for item in adapter.attempts],
+                ["FORMAT_ERROR", "SUCCESS"],
+            )
+            first_raw = root / "run" / "raw" / "001.ndjson"
+            retry_raw = root / "run" / "raw" / "001.retry-1.ndjson"
+            retry_prompt = root / "run" / "prompts" / "001.retry-1.txt"
+            self.assertTrue(first_raw.is_file())
+            self.assertTrue(retry_raw.is_file())
+            self.assertIn("FORMAT RETRY", retry_prompt.read_text(encoding="utf-8"))
+            for stderr_path in (
+                root / "run" / "raw" / "001.stderr.txt",
+                root / "run" / "raw" / "001.retry-1.stderr.txt",
+            ):
+                stderr = stderr_path.read_text(encoding="utf-8")
+                self.assertNotIn("secret", stderr)
+                self.assertIn("[REDACTED_SECRET]", stderr)
+            first_limit = int(runner.kwargs[0]["max_output_bytes"])
+            second_limit = int(runner.kwargs[1]["max_output_bytes"])
+            used = len(malformed.encode("utf-8")) + len(
+                "secret first".encode("utf-8")
+            )
+            self.assertEqual(first_limit, config.proposer_max_output_bytes)
+            self.assertEqual(second_limit, first_limit - used)
+            self.assertEqual(
+                float(runner.kwargs[0]["timeout_sec"]), 1200.0
+            )
+            self.assertEqual(
+                float(runner.kwargs[1]["timeout_sec"]), 1100.0
+            )
+
+    def test_format_retry_exhaustion_and_non_format_failures_do_not_retry(
+        self,
+    ) -> None:
+        malformed = json.dumps(
+            {"type": "text", "part": {"text": "not JSON"}}
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = _config(root)
+            runner = FixedRunner(
+                [
+                    CommandResult((), 0, malformed, ""),
+                    CommandResult((), 0, malformed, ""),
+                ]
+            )
+            adapter = OpenCodeProposer(
+                config,
+                run_id="d" * 32,
+                iteration_index=1,
+                run_dir=root / "run",
+                runner=runner,  # type: ignore[arg-type]
+            )
+            request = ProposalRequest(
+                parent_candidate_hash=SEED_HASH,
+                accepted_kernel=SEED,
+                program_markdown="Only kernel.py.",
+                environment={},
+                accepted_case_p50_us={},
+                recent_experiments=(),
+                session_feedback=(),
+            )
+            with self.assertRaisesRegex(
+                ProposerFormatRetryExhaustedError,
+                "^PROPOSER_FORMAT_RETRY_EXHAUSTED:",
+            ):
+                adapter.propose(request)
+            self.assertEqual(len(runner.argv), 2)
+
+        semantic = _proposal_value()
+        semantic["parent_candidate_hash"] = "0" * 64
+        non_retry_outputs = (
+            json.dumps({"type": "tool_use", "name": "bash"}),
+            json.dumps({"type": "error", "message": "provider failed"}),
+            json.dumps(
+                {
+                    "type": "text",
+                    "part": {"text": json.dumps(semantic)},
+                }
+            ),
+        )
+        for index, output in enumerate(non_retry_outputs, 1):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = _config(root)
+                runner = FixedRunner([CommandResult((), 0, output, "")])
+                adapter = OpenCodeProposer(
+                    config,
+                    run_id="e" * 32,
+                    iteration_index=index,
+                    run_dir=root / "run",
+                    runner=runner,  # type: ignore[arg-type]
+                )
+                with self.assertRaises(ValueError):
+                    adapter.propose(request)
+                self.assertEqual(len(runner.argv), 1)
+
+        runtime_failures = (
+            CommandResult((), -15, "", "", timed_out=True),
+            CommandResult((), -9, "limited", "", output_limited=True),
+            CommandResult((), 1, "", "container failed"),
+        )
+        for index, command_result in enumerate(runtime_failures, 1):
+            with self.subTest(
+                runtime=index
+            ), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = _config(root)
+                runner = FixedRunner([command_result])
+                adapter = OpenCodeProposer(
+                    config,
+                    run_id="f" * 32,
+                    iteration_index=index,
+                    run_dir=root / "run",
+                    runner=runner,  # type: ignore[arg-type]
+                )
+                with self.assertRaises(RuntimeError):
+                    adapter.propose(request)
+                self.assertEqual(len(runner.argv), 1)
+
+    def test_format_retry_exhaustion_counts_one_controller_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = _config(root)
+            (config.repository_dir / "program.md").write_text(
+                "Only kernel.py.", encoding="utf-8"
+            )
+            _baseline(config.state_dir)
+            malformed = json.dumps(
+                {"type": "text", "part": {"text": "not JSON"}}
+            )
+            runner = FixedRunner(
+                [
+                    CommandResult((), 0, malformed, ""),
+                    CommandResult((), 0, malformed, ""),
+                ]
+            )
+            evaluator = FakeEvaluator()
+            controller = ResearchController(
+                config,
+                evaluator=evaluator,
+                proposer_factory=lambda run_id, index, run_dir: OpenCodeProposer(
+                    config,
+                    run_id=run_id,
+                    iteration_index=index,
+                    run_dir=run_dir,
+                    runner=runner,  # type: ignore[arg-type]
+                ),
+            )
+            run_id = "format-retry-run"
+            with ControllerStore(controller.controller_db) as store:
+                store.create_run(
+                    run_id=run_id,
+                    deadline_epoch=time.time() + 3600,
+                    config=config.redacted_dict(),
+                    initial_best_hash=SEED_HASH,
+                )
+            result = controller._run_loop(run_id, proposal_only=True)
+            self.assertEqual(result["status"], "FAILED")
+            self.assertEqual(result["consecutive_failures"], 1)
+            self.assertEqual(result["valid_candidates"], 0)
+            self.assertEqual(evaluator.stages, [])
+            with ControllerStore(controller.controller_db) as store:
+                iteration = store.latest_iteration(run_id)
+                events = store.list_events(run_id)
+            self.assertEqual(iteration["outcome"], "PROPOSER_ERROR")
+            self.assertIsNone(iteration["candidate_hash"])
+            self.assertEqual(iteration["experiment_ids"], {})
+            self.assertIn(
+                "PROPOSER_FORMAT_RETRY_EXHAUSTED",
+                iteration["error"],
+            )
+            self.assertTrue(
+                any(
+                    event["event"] == "PROPOSER_FORMAT_RETRY"
+                    for event in events
+                )
+            )
+            self.assertTrue(
+                str(iteration["raw_output_path"]).endswith(
+                    "001.retry-1.ndjson"
+                )
+            )
+
+    def test_format_retry_enforces_shared_timeout_and_output_budget(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = _config(root)
+            request = ProposalRequest(
+                parent_candidate_hash=SEED_HASH,
+                accepted_kernel=SEED,
+                program_markdown="Only kernel.py.",
+                environment={},
+                accepted_case_p50_us={},
+                recent_experiments=(),
+                session_feedback=(),
+            )
+            timeout_runner = FixedRunner([])
+            timeout_adapter = OpenCodeProposer(
+                config,
+                run_id="1" * 32,
+                iteration_index=1,
+                run_dir=root / "timeout",
+                runner=timeout_runner,  # type: ignore[arg-type]
+            )
+            with (
+                mock.patch(
+                    "kernel_research.autorun.opencode.time.monotonic",
+                    side_effect=[0.0, config.proposer_timeout_sec + 1],
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError, "shared configured timeout"
+                ),
+            ):
+                timeout_adapter.propose(request)
+            self.assertEqual(timeout_runner.argv, [])
+
+            malformed = json.dumps(
+                {"type": "text", "part": {"text": "not JSON"}}
+            )
+            output_config = replace(
+                config,
+                proposer_max_output_bytes=len(malformed.encode("utf-8")),
+            )
+            output_runner = FixedRunner(
+                [CommandResult((), 0, malformed, "")]
+            )
+            output_adapter = OpenCodeProposer(
+                output_config,
+                run_id="2" * 32,
+                iteration_index=1,
+                run_dir=root / "output",
+                runner=output_runner,  # type: ignore[arg-type]
+            )
+            with self.assertRaisesRegex(
+                RuntimeError, "shared output byte limit"
+            ):
+                output_adapter.propose(request)
+            self.assertEqual(len(output_runner.argv), 1)
 
     def test_opencode_adapter_uses_full_run_id_and_redacts_secret(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -517,6 +860,284 @@ class AdapterAndCacheTests(unittest.TestCase):
                 (config.controller_dir / "cache-manifests").rglob("*.json")
             )
             self.assertEqual(len(manifests), 2)
+
+
+class FeedbackAndStatusTests(unittest.TestCase):
+    @staticmethod
+    def _rejected_result(*, error: str | None = None) -> dict:
+        return {
+            "status": "SUCCESS" if error is None else "COMPILE_ERROR",
+            "aggregate_score": 1.7656064778560598,
+            "error": error,
+            "latency_samples_us": [999.0] * 30,
+            "promotion": {
+                "phase": "rejected",
+                "reason": "aggregate_speedup_below_threshold",
+                "global_score": 1.7656064778560598,
+                "decision": {
+                    "reason": "aggregate_speedup_below_threshold",
+                    "aggregate_speedup": 0.8363341873244841,
+                    "worst_case_regression": 0.22573751310775947,
+                    "per_case_speedups": {
+                        "full_decode_down": 0.8530472848274107,
+                        "full_decode_gate_up": 0.827830862551063,
+                        "full_prefill_down": 0.8491846975816244,
+                        "full_prefill_gate_up": 0.8158353556991007,
+                    },
+                },
+            },
+            "cases": [
+                {
+                    "case_id": "full_decode_down",
+                    "status": "SUCCESS",
+                    "matched_ratio": 1.0,
+                    "p50_us": 117.0,
+                    "baseline_p50_us": 100.0,
+                    "latency_samples_us": [117.0] * 30,
+                    "baseline_latency_samples_us": [100.0] * 30,
+                    "error": error,
+                }
+            ],
+        }
+
+    @staticmethod
+    def _complete_candidate(
+        store: ControllerStore,
+        *,
+        run_id: str,
+        index: int,
+        candidate_hash: str,
+        outcome: str,
+        result: dict,
+        error: str | None = None,
+    ) -> None:
+        iteration = store.create_iteration(run_id, index, SEED_HASH)
+        iteration = store.accept_candidate(
+            int(iteration["id"]),
+            candidate_hash=candidate_hash,
+            hypothesis=f"hypothesis-{index}",
+            rationale="rationale-must-not-enter-feedback",
+            candidate_path=f"/runtime/{candidate_hash}.py",
+        )
+        store.update_iteration(
+            int(iteration["id"]),
+            status="COMPLETED",
+            stage="DONE",
+            outcome=outcome,
+            result=result,
+            error=error,
+        )
+
+    def test_cross_run_feedback_is_candidate_level_bounded_and_restart_safe(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = _config(root)
+            (config.repository_dir / "program.md").write_text(
+                "Only kernel.py.", encoding="utf-8"
+            )
+            _baseline(config.state_dir)
+            previous_run = "previous-run"
+            current_run = "current-run"
+            long_error = "compile-detail-" + "x" * (
+                MAX_FEEDBACK_ERROR_CHARS + 100
+            )
+            hashes = [
+                hashlib.sha256(f"candidate-{index}".encode()).hexdigest()
+                for index in range(MAX_FEEDBACK_CANDIDATES + 1)
+            ]
+            with ControllerStore(
+                config.controller_dir / "controller.sqlite3"
+            ) as store:
+                for run_id in (previous_run, current_run):
+                    store.create_run(
+                        run_id=run_id,
+                        deadline_epoch=time.time() + 3600,
+                        config=config.redacted_dict(),
+                        initial_best_hash=SEED_HASH,
+                    )
+                for index, candidate_hash in enumerate(hashes, 1):
+                    is_latest = index == len(hashes)
+                    self._complete_candidate(
+                        store,
+                        run_id=previous_run,
+                        index=index,
+                        candidate_hash=candidate_hash,
+                        outcome=(
+                            "COMPILE_ERROR" if is_latest else "FULL_REJECTED"
+                        ),
+                        result=self._rejected_result(
+                            error=long_error if is_latest else None
+                        ),
+                        error=long_error if is_latest else None,
+                    )
+                self._complete_candidate(
+                    store,
+                    run_id=previous_run,
+                    index=len(hashes) + 1,
+                    candidate_hash=hashes[-1],
+                    outcome="COMPILE_ERROR",
+                    result=self._rejected_result(error=long_error),
+                    error=long_error,
+                )
+                proposal_only = store.create_iteration(
+                    previous_run, len(hashes) + 2, SEED_HASH
+                )
+                proposal_only = store.accept_candidate(
+                    int(proposal_only["id"]),
+                    candidate_hash="f" * 64,
+                    hypothesis="proposal-only",
+                    rationale="not scientific",
+                    candidate_path="/runtime/proposal-only.py",
+                )
+                store.update_iteration(
+                    int(proposal_only["id"]),
+                    status="COMPLETED",
+                    stage="DONE",
+                    outcome="PROPOSAL_VALIDATED",
+                    result={"status": "SUCCESS"},
+                )
+                for index in range(1, MAX_FEEDBACK_CANDIDATES + 2):
+                    proposer_error = store.create_iteration(
+                        current_run, index, SEED_HASH
+                    )
+                    store.update_iteration(
+                        int(proposer_error["id"]),
+                        status="COMPLETED",
+                        stage="DONE",
+                        outcome="PROPOSER_ERROR",
+                        error=f"malformed JSON {index}",
+                    )
+
+            controller = ResearchController(
+                config,
+                evaluator=FakeEvaluator(),
+            )
+            request = controller._proposal_request(current_run)
+            self.assertEqual(
+                len(request.recent_experiments), MAX_FEEDBACK_CANDIDATES
+            )
+            candidate_hashes = [
+                item["candidate_hash"]
+                for item in request.recent_experiments
+            ]
+            self.assertEqual(len(candidate_hashes), len(set(candidate_hashes)))
+            self.assertNotIn(hashes[0], candidate_hashes)
+            self.assertNotIn("f" * 64, candidate_hashes)
+            newest = request.recent_experiments[-1]
+            summary = newest["result_summary"]
+            self.assertEqual(summary["status"], "COMPILE_ERROR")
+            self.assertEqual(
+                summary["global_normalized_score"],
+                1.7656064778560598,
+            )
+            self.assertEqual(
+                summary["relative_speedup_vs_accepted"],
+                0.8363341873244841,
+            )
+            self.assertLessEqual(
+                len(summary["error"]), MAX_FEEDBACK_ERROR_CHARS
+            )
+            self.assertEqual(
+                len(request.session_feedback), MAX_FEEDBACK_CANDIDATES
+            )
+            self.assertEqual(
+                request.session_feedback[0]["iteration_index"], 2
+            )
+            prompt = build_prompt(request)
+            self.assertIn('"recent_candidate_feedback"', prompt)
+            self.assertNotIn('"recent_experiments"', prompt)
+            self.assertNotIn("rationale-must-not-enter-feedback", prompt)
+            self.assertNotIn("latency_samples_us", prompt)
+            with ControllerStore(controller.controller_db) as store:
+                with self.assertRaisesRegex(ValueError, "non-negative"):
+                    store.list_recent_scientific_iterations(
+                        exclude_run_id=current_run,
+                        limit=-1,
+                    )
+
+    def test_status_result_summary_and_compact_projection_are_unambiguous(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = _config(root)
+            _baseline(config.state_dir)
+            run_id = "status-run"
+            candidate_hash = hashlib.sha256(b"status-candidate").hexdigest()
+            with ControllerStore(
+                config.controller_dir / "controller.sqlite3"
+            ) as store:
+                store.create_run(
+                    run_id=run_id,
+                    deadline_epoch=time.time() + 3600,
+                    config=config.redacted_dict(),
+                    initial_best_hash=SEED_HASH,
+                )
+                self._complete_candidate(
+                    store,
+                    run_id=run_id,
+                    index=1,
+                    candidate_hash=candidate_hash,
+                    outcome="FULL_REJECTED",
+                    result=self._rejected_result(),
+                )
+                active = store.create_iteration(run_id, 2, SEED_HASH)
+                store.update_iteration(
+                    int(active["id"]),
+                    active_container="exact-active-container",
+                )
+
+            controller = ResearchController(
+                config,
+                evaluator=FakeEvaluator(),
+            )
+            status = controller.status(run_id)
+            completed = status["iterations"][0]
+            summary = completed["result_summary"]
+            self.assertNotIn("result", completed)
+            self.assertEqual(
+                summary["global_normalized_score"],
+                1.7656064778560598,
+            )
+            self.assertEqual(
+                summary["relative_speedup_vs_accepted"],
+                0.8363341873244841,
+            )
+            self.assertNotIn("latency_samples_us", json.dumps(summary))
+            self.assertEqual(
+                status["iterations"][1]["result_summary"]["status"], None
+            )
+
+            compact = compact_status_payload(status)
+            self.assertEqual(compact["format"], "compact")
+            self.assertNotIn("config", compact["run"])
+            self.assertNotIn("preflight", compact["run"])
+            self.assertEqual(
+                compact["iterations"][1]["active_container"],
+                "exact-active-container",
+            )
+            self.assertEqual(
+                compact["iterations"][0]["result_summary"],
+                summary,
+            )
+            confirmation_result = self._rejected_result()
+            decision = confirmation_result["promotion"]["decision"]
+            decision["confirmation_speedup"] = 0.82
+            decision["confirmation_worst_case_regression"] = 0.18
+            confirmation = summarize_result(confirmation_result)
+            self.assertEqual(
+                confirmation["primary_speedup_vs_accepted"],
+                0.8363341873244841,
+            )
+            self.assertEqual(
+                confirmation["relative_speedup_vs_accepted"], 0.82
+            )
+            self.assertEqual(
+                confirmation["conservative_speedup_vs_accepted"], 0.82
+            )
+            self.assertEqual(confirmation["worst_case_regression"], 0.18)
 
 
 class StoreAndRecoveryTests(unittest.TestCase):

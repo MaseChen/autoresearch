@@ -20,6 +20,7 @@ from ..constants import (
     DOCTOR_OUTPUT_LIMIT_BYTES,
     DOCTOR_TIMEOUT_SEC,
     EVALUATOR_OUTPUT_LIMIT_BYTES,
+    MAX_FEEDBACK_CANDIDATES,
 )
 from ..evaluation import record_external_result
 from ..history import ExperimentRecord, HistoryStore
@@ -36,6 +37,7 @@ from .runtime import (
 )
 from .states import RunStatus, Stage, TERMINAL_RUN_STATUSES
 from .store import ControllerStore
+from .summary import feedback_for_iteration, summarize_result
 
 
 HARD_STATUSES = frozenset({"CRASH", "TIMEOUT", "UNSUPPORTED_ENV"})
@@ -647,52 +649,21 @@ class ResearchController:
             for case in best.result.get("cases", [])
             if case.get("p50_us") is not None
         }
-        with HistoryStore(
-            self.history_db, state_dir=self.config.state_dir
-        ) as history:
-            records = history.list_experiments(limit=8, newest_first=True)
-        recent = tuple(
-            {
-                "id": record.id,
-                "candidate_hash": record.candidate_hash,
-                "status": record.status,
-                "suite": record.suite,
-                "aggregate_score": record.aggregate_score,
-                "note": record.note,
-                "promotion": record.result.get("promotion"),
-            }
-            for record in reversed(records)
-        )
         with ControllerStore(self.controller_db) as store:
-            feedback = tuple(
-                {
-                    "iteration": item["iteration_index"],
-                    "candidate_hash": item["candidate_hash"],
-                    "hypothesis": item["hypothesis"],
-                    "outcome": item["outcome"],
-                    "error": item["error"],
-                    "result": {
-                        "status": item["result"].get("status"),
-                        "error": item["result"].get("error"),
-                        "promotion": item["result"].get("promotion"),
-                        "cases": [
-                            {
-                                "case_id": case.get("case_id"),
-                                "status": case.get("status"),
-                                "matched_ratio": case.get("matched_ratio"),
-                                "p50_us": case.get("p50_us"),
-                                "baseline_p50_us": case.get(
-                                    "baseline_p50_us"
-                                ),
-                                "error": case.get("error"),
-                            }
-                            for case in item["result"].get("cases", [])
-                        ],
-                    },
-                }
+            recent_items = store.list_recent_scientific_iterations(
+                exclude_run_id=run_id,
+                limit=MAX_FEEDBACK_CANDIDATES,
+            )
+            recent = tuple(
+                feedback_for_iteration(item)
+                for item in reversed(recent_items)
+            )
+            completed = [
+                item
                 for item in store.list_iterations(run_id)
                 if item["status"] != "RUNNING"
-            )
+            ][-MAX_FEEDBACK_CANDIDATES:]
+            feedback = tuple(feedback_for_iteration(item) for item in completed)
         environment = dict(best.environment)
         environment.update(
             {
@@ -904,7 +875,26 @@ class ResearchController:
                 **paths,
             )
             try:
-                proposal = proposer.propose(request)
+                try:
+                    proposal = proposer.propose(request)
+                finally:
+                    updated_paths = {
+                        "prompt_path": (
+                            str(getattr(proposer, "prompt_path", "")) or None
+                        ),
+                        "raw_output_path": (
+                            str(getattr(proposer, "raw_path", "")) or None
+                        ),
+                    }
+                    store.update_iteration(iteration_id, **updated_paths)
+                    attempts = getattr(proposer, "attempts", ())
+                    if len(attempts) > 1:
+                        store.add_event(
+                            run_id,
+                            "PROPOSER_FORMAT_RETRY",
+                            {"attempts": list(attempts)},
+                            iteration_id=iteration_id,
+                        )
             except Exception as exc:
                 raise ProposerFailure(f"{type(exc).__name__}: {exc}") from exc
             if self._candidate_seen(store, proposal.candidate_hash):
@@ -1320,6 +1310,10 @@ class ResearchController:
                 }
             iterations = store.list_iterations(str(run["id"]))
         for item in iterations:
+            item["result_summary"] = summarize_result(
+                item.get("result"),
+                error=item.get("error"),
+            )
             item.pop("rationale", None)
             item.pop("result", None)
         return {

@@ -8,7 +8,7 @@ import json
 import re
 from typing import Any, Iterable, Mapping
 
-from ..constants import OPENCODE_PROPOSER_STEPS
+from ..constants import MAX_FEEDBACK_CANDIDATES, OPENCODE_PROPOSER_STEPS
 from .models import ProposalV1
 
 
@@ -24,6 +24,14 @@ STEP_LIMIT_FALLBACK_RE = re.compile(
 
 class ProposerStepLimitError(ValueError):
     """OpenCode emitted its forced summary after exhausting agent steps."""
+
+
+class ProposalFormatError(ValueError):
+    """The proposer response is not syntactically valid JSON/JSON fencing."""
+
+
+class ProposerFormatRetryExhaustedError(ValueError):
+    """Both strictly bounded Proposal JSON attempts failed syntax parsing."""
 
 
 @dataclass(frozen=True)
@@ -49,11 +57,15 @@ def parse_proposal_text(text: str, *, expected_parent_hash: str) -> ProposalV1:
     fenced = FENCED_JSON_RE.fullmatch(text)
     payload = fenced.group(1) if fenced else text.strip()
     if "```" in payload:
-        raise ValueError("proposal contains malformed or additional fenced content")
+        raise ProposalFormatError(
+            "proposal contains malformed or additional fenced content"
+        )
     try:
         value = json.loads(payload)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"proposal is not valid JSON: {exc}") from exc
+        raise ProposalFormatError(
+            f"proposal is not valid JSON: {exc}"
+        ) from exc
     return ProposalV1.from_value(value, expected_parent_hash=expected_parent_hash)
 
 
@@ -92,7 +104,7 @@ def parse_opencode_ndjson(
         try:
             event = json.loads(line)
         except json.JSONDecodeError as exc:
-            raise ValueError(
+            raise ProposalFormatError(
                 f"OpenCode output line {line_number} is not JSON: {exc}"
             ) from exc
         forbidden = _contains_forbidden_event(event)
@@ -123,7 +135,7 @@ def parse_opencode_ndjson(
         return parse_proposal_text(
             final_text, expected_parent_hash=expected_parent_hash
         )
-    except ValueError as exc:
+    except ProposalFormatError as exc:
         first_line = final_text.lstrip().splitlines()[0].strip()
         if STEP_LIMIT_FALLBACK_RE.fullmatch(first_line):
             raise ProposerStepLimitError(
@@ -140,7 +152,10 @@ def build_prompt(request: ProposalRequest) -> str:
         "accepted_candidate_hash": request.parent_candidate_hash,
         "environment": dict(request.environment),
         "accepted_case_p50_us": dict(request.accepted_case_p50_us),
-        "recent_experiments": [dict(item) for item in request.recent_experiments[-8:]],
+        "recent_candidate_feedback": [
+            dict(item)
+            for item in request.recent_experiments[-MAX_FEEDBACK_CANDIDATES:]
+        ],
         "session_feedback": [dict(item) for item in request.session_feedback],
     }
     sections: Iterable[str] = (

@@ -349,6 +349,109 @@ def _safe_decorator(node: ast.expr) -> bool:
     )
 
 
+def _is_triton_jit_decorator(node: ast.expr) -> bool:
+    target = node.func if isinstance(node, ast.Call) else node
+    return (
+        isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Name)
+        and target.value.id == "triton"
+        and target.attr == "jit"
+    )
+
+
+def _is_constexpr_annotation(node: ast.expr | None) -> bool:
+    if not isinstance(node, ast.Attribute) or node.attr != "constexpr":
+        return False
+    if isinstance(node.value, ast.Name):
+        return node.value.id == "tl"
+    return (
+        isinstance(node.value, ast.Attribute)
+        and node.value.attr == "language"
+        and isinstance(node.value.value, ast.Name)
+        and node.value.value.id == "triton"
+    )
+
+
+def _plain_module_literal_names(tree: ast.Module) -> set[str]:
+    names: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        if not _literal_assignment(node):
+            continue
+        if (
+            isinstance(node, ast.AnnAssign)
+            and _is_constexpr_annotation(node.annotation)
+        ):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        names.update(
+            target.id for target in targets if isinstance(target, ast.Name)
+        )
+    return names
+
+
+def _triton_non_constexpr_global_errors(
+    tree: ast.Module,
+) -> list[CandidateError]:
+    plain_globals = _plain_module_literal_names(tree)
+    if not plain_globals:
+        return []
+    errors: list[CandidateError] = []
+    for function in tree.body:
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not any(
+            _is_triton_jit_decorator(decorator)
+            for decorator in function.decorator_list
+        ):
+            continue
+        local_names = {
+            node.id
+            for node in ast.walk(function)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+        }
+        local_names.update(
+            argument.arg
+            for argument in (
+                *function.args.posonlyargs,
+                *function.args.args,
+                *function.args.kwonlyargs,
+            )
+        )
+        if function.args.vararg is not None:
+            local_names.add(function.args.vararg.arg)
+        if function.args.kwarg is not None:
+            local_names.add(function.args.kwarg.arg)
+        global_declarations = {
+            name
+            for node in ast.walk(function)
+            if isinstance(node, ast.Global)
+            for name in node.names
+        }
+        local_names.difference_update(global_declarations)
+        reported: set[str] = set()
+        for node in ast.walk(function):
+            if (
+                isinstance(node, ast.Name)
+                and isinstance(node.ctx, ast.Load)
+                and node.id in plain_globals
+                and node.id not in local_names
+                and node.id not in reported
+            ):
+                errors.append(
+                    _error(
+                        "TRITON_NON_CONSTEXPR_GLOBAL",
+                        f"@triton.jit function {function.name!r} reads "
+                        f"ordinary module constant {node.id!r}; use a literal, "
+                        "a tl.constexpr parameter, or an annotated constexpr",
+                        node,
+                    )
+                )
+                reported.add(node.id)
+    return errors
+
+
 def validate_research_candidate(source: str) -> ResearchPolicyResult:
     """Apply the public contract and autonomous-research policy to source."""
 
@@ -367,6 +470,8 @@ def validate_research_candidate(source: str) -> ResearchPolicyResult:
             )
         )
         return ResearchPolicyResult(source, contract.sha256, tuple(errors))
+
+    errors.extend(_triton_non_constexpr_global_errors(tree))
 
     for index, node in enumerate(tree.body):
         if _is_docstring(node, index):

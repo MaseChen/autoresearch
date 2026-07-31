@@ -467,6 +467,31 @@ class ControllerStore:
         ).fetchall()
         return [self.get_iteration(int(row["id"])) for row in rows]
 
+    def list_recent_scientific_iterations(
+        self,
+        *,
+        exclude_run_id: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Return newest completed candidate iterations from earlier runs."""
+
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        rows = self.connection.execute(
+            """
+            SELECT MAX(id) AS id FROM iterations
+            WHERE run_id <> ?
+              AND status = 'COMPLETED'
+              AND candidate_hash IS NOT NULL
+              AND outcome NOT IN ('PROPOSAL_VALIDATED', 'DUPLICATE')
+            GROUP BY candidate_hash
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (exclude_run_id, limit),
+        ).fetchall()
+        return [self.get_iteration(int(row["id"])) for row in rows]
+
     def update_iteration(self, iteration_id: int, **values: Any) -> dict[str, Any]:
         allowed = {
             "status",

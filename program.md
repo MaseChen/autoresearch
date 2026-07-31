@@ -25,6 +25,15 @@ repair a candidate in place.
 - INT8 products accumulate into INT32; scale in FP32; write BF16 in place.
 - C500 mcTriton accepts only a literal power-of-two `num_warps` in
   `{1, 2, 4, 8, 16}`. Never request 32 or a dynamically computed warp count.
+- C500 exposes a 64 KiB shared-memory limit per program. Treat larger tile and
+  staging combinations as compile failures; do not rely on the controller to
+  silently shrink them.
+- A `@triton.jit` kernel must not read an ordinary Python module constant.
+  Use a literal, a `tl.constexpr` kernel parameter, or an explicitly annotated
+  module constexpr. Ordinary constants remain valid in the Python wrapper.
+- On this mcTriton version, do not apply `tl.max_contiguous` to a pointer
+  tensor. Shape/layout hints may only be applied to integer index or offset
+  tensors whose semantics are supported by the compiler.
 - Mock mode has no performance signal. Do not optimize, rank, or commit a kernel
   because of a mock result.
 
