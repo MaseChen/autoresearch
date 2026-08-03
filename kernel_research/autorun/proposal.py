@@ -26,6 +26,10 @@ class ProposerStepLimitError(ValueError):
     """OpenCode emitted its forced summary after exhausting agent steps."""
 
 
+class ProposerOutputTokenLimitError(ValueError):
+    """OpenCode exhausted the model output budget before ProposalV1."""
+
+
 class ProposalFormatError(ValueError):
     """The proposer response is not syntactically valid JSON/JSON fencing."""
 
@@ -90,6 +94,46 @@ def _contains_forbidden_event(value: Any) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class _LengthFinish:
+    reasoning_tokens: int | None
+    output_tokens: int | None
+
+
+def _length_finish(event: Mapping[str, Any]) -> _LengthFinish | None:
+    event_type = str(event.get("type", "")).lower().replace("-", "_")
+    part = event.get("part")
+    if event_type != "step_finish" or not isinstance(part, Mapping):
+        return None
+    if str(part.get("reason", "")).lower() != "length":
+        return None
+    tokens = part.get("tokens")
+    if not isinstance(tokens, Mapping):
+        return _LengthFinish(None, None)
+
+    def token(name: str) -> int | None:
+        value = tokens.get(name)
+        return value if type(value) is int and value >= 0 else None
+
+    return _LengthFinish(token("reasoning"), token("output"))
+
+
+def _output_limit_error(finish: _LengthFinish) -> str:
+    reasoning = (
+        "unknown"
+        if finish.reasoning_tokens is None
+        else str(finish.reasoning_tokens)
+    )
+    output = (
+        "unknown" if finish.output_tokens is None else str(finish.output_tokens)
+    )
+    return (
+        "PROPOSER_OUTPUT_TOKEN_LIMIT: OpenCode exhausted the model output "
+        f"token budget before a complete ProposalV1 (reasoning={reasoning}, "
+        f"output={output})"
+    )
+
+
 def parse_opencode_ndjson(
     raw: str, *, expected_parent_hash: str
 ) -> ProposalV1:
@@ -97,6 +141,7 @@ def parse_opencode_ndjson(
 
     text_parts: list[str] = []
     event_count = 0
+    length_finish: _LengthFinish | None = None
     for line_number, line in enumerate(raw.splitlines(), 1):
         if not line.strip():
             continue
@@ -112,6 +157,9 @@ def parse_opencode_ndjson(
             raise ValueError(f"OpenCode emitted forbidden {forbidden}")
         if not isinstance(event, dict):
             raise ValueError("OpenCode event must be an object")
+        observed_finish = _length_finish(event)
+        if observed_finish is not None:
+            length_finish = observed_finish
         event_type = str(event.get("type", "")).lower()
         part = event.get("part")
         if (
@@ -129,6 +177,10 @@ def parse_opencode_ndjson(
     if event_count == 0:
         raise ValueError("OpenCode produced no JSON events")
     if not text_parts:
+        if length_finish is not None:
+            raise ProposerOutputTokenLimitError(
+                _output_limit_error(length_finish)
+            )
         raise ValueError("OpenCode produced no final text event")
     final_text = "".join(text_parts)
     try:
@@ -136,11 +188,21 @@ def parse_opencode_ndjson(
             final_text, expected_parent_hash=expected_parent_hash
         )
     except ProposalFormatError as exc:
+        if length_finish is not None:
+            raise ProposerOutputTokenLimitError(
+                _output_limit_error(length_finish)
+            ) from exc
         first_line = final_text.lstrip().splitlines()[0].strip()
         if STEP_LIMIT_FALLBACK_RE.fullmatch(first_line):
             raise ProposerStepLimitError(
                 "PROPOSER_STEP_LIMIT: OpenCode exhausted its configured "
                 f"{OPENCODE_PROPOSER_STEPS}-step proposal budget"
+            ) from exc
+        raise
+    except ValueError as exc:
+        if length_finish is not None:
+            raise ProposerOutputTokenLimitError(
+                _output_limit_error(length_finish)
             ) from exc
         raise
 

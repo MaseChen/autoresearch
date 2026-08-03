@@ -20,6 +20,7 @@ dev = [
 [project.scripts]
 kernel-research = "kernel_research.cli:main"
 kernel-autoresearch = "kernel_research.autorun.cli:main"
+kernel-autoresearch-admin = "kernel_research.autorun.admin:main"
 
 [tool.setuptools.packages.find]
 include = ["kernel_research*"]

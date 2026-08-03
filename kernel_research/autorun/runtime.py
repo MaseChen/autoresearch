@@ -212,6 +212,8 @@ def _common_security_argv(
         name,
         "--label",
         f"kernel-autoresearch.run={run_id}",
+        "--label",
+        "kernel-autoresearch.project=fused-moe",
         "--init",
         "--read-only",
         "--user",

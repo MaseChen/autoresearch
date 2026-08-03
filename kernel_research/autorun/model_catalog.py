@@ -27,14 +27,14 @@ OPENCODE_MODEL_SPECS: Mapping[str, OpenCodeModelSpec] = MappingProxyType(
             provider_id="deepseek-v4-pro",
             display_name="DeepSeek V4 Pro",
             context_tokens=1_000_000,
-            output_tokens=32_768,
+            output_tokens=65_536,
         ),
         "deepseek/deepseek-v4-flash": OpenCodeModelSpec(
             qualified_id="deepseek/deepseek-v4-flash",
             provider_id="deepseek-v4-flash",
             display_name="DeepSeek V4 Flash",
             context_tokens=1_000_000,
-            output_tokens=32_768,
+            output_tokens=65_536,
         ),
     }
 )

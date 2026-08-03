@@ -26,6 +26,7 @@ from kernel_research.autorun.opencode import OpenCodeProposer
 from kernel_research.autorun.proposal import (
     ProposalRequest,
     ProposerFormatRetryExhaustedError,
+    ProposerOutputTokenLimitError,
     ProposerStepLimitError,
     build_prompt,
     parse_opencode_ndjson,
@@ -63,6 +64,10 @@ from test_autorun import (
 
 STEP_LIMIT_FIXTURE = (
     Path(__file__).with_name("fixtures") / "opencode_step_limit_005.ndjson"
+)
+OUTPUT_LIMIT_FIXTURE = (
+    Path(__file__).with_name("fixtures")
+    / "opencode_flash_output_limit.ndjson"
 )
 
 
@@ -510,6 +515,66 @@ class AdapterAndCacheTests(unittest.TestCase):
         )
         self.assertEqual(proposal.kernel_source, source)
 
+    def test_flash_output_token_limit_is_classified_without_format_retry(
+        self,
+    ) -> None:
+        raw = OUTPUT_LIMIT_FIXTURE.read_text(encoding="utf-8")
+        with self.assertRaisesRegex(
+            ProposerOutputTokenLimitError,
+            r"^PROPOSER_OUTPUT_TOKEN_LIMIT:.*reasoning=32000, output=0\)$",
+        ):
+            parse_opencode_ndjson(raw, expected_parent_hash=SEED_HASH)
+
+        partial = raw.replace(
+            '{"type":"step_finish"',
+            '{"type":"text","part":{"text":"{\\\"schema_version\\\":1"}}\n'
+            '{"type":"step_finish"',
+        )
+        with self.assertRaises(ProposerOutputTokenLimitError):
+            parse_opencode_ndjson(partial, expected_parent_hash=SEED_HASH)
+
+        semantic = json.dumps({"type": "text", "part": {"text": "{}"}})
+        with self.assertRaises(ProposerOutputTokenLimitError):
+            parse_opencode_ndjson(
+                semantic + "\n" + raw.splitlines()[-1],
+                expected_parent_hash=SEED_HASH,
+            )
+
+        complete = json.dumps(
+            {"type": "text", "part": {"text": json.dumps(_proposal_value())}}
+        )
+        length = raw.splitlines()[-1]
+        proposal = parse_opencode_ndjson(
+            complete + "\n" + length,
+            expected_parent_hash=SEED_HASH,
+        )
+        self.assertEqual(proposal.candidate_hash, SEED_HASH)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = _config(root)
+            runner = FixedRunner([CommandResult((), 0, raw, "")])
+            adapter = OpenCodeProposer(
+                config,
+                run_id="l" * 32,
+                iteration_index=1,
+                run_dir=root / "run",
+                runner=runner,  # type: ignore[arg-type]
+            )
+            request = ProposalRequest(
+                parent_candidate_hash=SEED_HASH,
+                accepted_kernel=SEED,
+                program_markdown="Only kernel.py.",
+                environment={},
+                accepted_case_p50_us={},
+                recent_experiments=(),
+                session_feedback=(),
+            )
+            with self.assertRaises(ProposerOutputTokenLimitError):
+                adapter.propose(request)
+            self.assertEqual(len(runner.argv), 1)
+            self.assertEqual(adapter.attempts[0]["outcome"], "PROPOSAL_ERROR")
+
     def test_step_limit_adapter_archives_redacted_output_before_raising(
         self,
     ) -> None:
@@ -792,6 +857,58 @@ class AdapterAndCacheTests(unittest.TestCase):
                     "001.retry-1.ndjson"
                 )
             )
+
+    def test_output_token_limit_counts_once_and_never_calls_evaluator(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = _config(root)
+            (config.repository_dir / "program.md").write_text(
+                "Only kernel.py.", encoding="utf-8"
+            )
+            _baseline(config.state_dir)
+            runner = FixedRunner(
+                [
+                    CommandResult(
+                        (),
+                        0,
+                        OUTPUT_LIMIT_FIXTURE.read_text(encoding="utf-8"),
+                        "",
+                    )
+                ]
+            )
+            evaluator = FakeEvaluator()
+            controller = ResearchController(
+                config,
+                evaluator=evaluator,
+                proposer_factory=lambda run_id, index, run_dir: OpenCodeProposer(
+                    config,
+                    run_id=run_id,
+                    iteration_index=index,
+                    run_dir=run_dir,
+                    runner=runner,  # type: ignore[arg-type]
+                ),
+            )
+            run_id = "output-token-limit-run"
+            with ControllerStore(controller.controller_db) as store:
+                store.create_run(
+                    run_id=run_id,
+                    deadline_epoch=time.time() + 3600,
+                    config=config.redacted_dict(),
+                    initial_best_hash=SEED_HASH,
+                )
+            result = controller._run_loop(run_id, proposal_only=True)
+            self.assertEqual(result["status"], "FAILED")
+            self.assertEqual(result["consecutive_failures"], 1)
+            self.assertEqual(result["valid_candidates"], 0)
+            self.assertEqual(evaluator.stages, [])
+            self.assertEqual(len(runner.argv), 1)
+            with ControllerStore(controller.controller_db) as store:
+                iteration = store.latest_iteration(run_id)
+            self.assertEqual(iteration["outcome"], "PROPOSER_ERROR")
+            self.assertIsNone(iteration["candidate_hash"])
+            self.assertIn("PROPOSER_OUTPUT_TOKEN_LIMIT:", iteration["error"])
 
     def test_format_retry_enforces_shared_timeout_and_output_budget(
         self,

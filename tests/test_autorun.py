@@ -472,7 +472,7 @@ class ConfigAndArgvTests(unittest.TestCase):
                     self.assertEqual(provider["name"], spec.display_name)
                     self.assertEqual(
                         provider["limit"],
-                        {"context": 1_000_000, "output": 32_768},
+                        {"context": 1_000_000, "output": 65_536},
                     )
                     self.assertEqual(
                         argv[argv.index("--model") + 1], qualified_id

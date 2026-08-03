@@ -116,6 +116,12 @@ kernel-autoresearch resume --config CONFIG --run-id ID
 kernel-autoresearch status --config CONFIG [--run-id ID]
 kernel-autoresearch stop --config CONFIG --run-id ID
 kernel-autoresearch checkpoint --config CONFIG --run-id ID
+
+kernel-autoresearch-admin bootstrap --manifest PATH --pro-config PATH --flash-config PATH
+kernel-autoresearch-admin sync --manifest PATH
+kernel-autoresearch-admin verify --manifest PATH --level static|cpu|doctor
+kernel-autoresearch-admin update --manifest PATH [--doctor]
+kernel-autoresearch-admin adopt-baseline --manifest PATH --candidate-hash HASH [--doctor]
 ```
 
 All machine-readable evaluation output has `schema_version: 1`. Logs and human
@@ -162,6 +168,15 @@ the immutable run config: never change it when resuming a run. Unknown models,
 aliases and other providers are rejected, and API/network failure never causes
 an automatic Pro↔Flash fallback. This keeps every proposal attributable to one
 model even when provider connectivity is unstable.
+
+Both audited models use a one-million-token context window and a project-side
+65,536-token model-output ceiling. Thinking remains enabled with maximum
+reasoning effort. This leaves room for ProposalV1 after a long reasoning trace
+while the host still independently limits OpenCode to three steps, 20 minutes,
+2 MiB of captured output and a 256 KiB kernel source. A `step_finish` with
+`reason=length` and no complete Proposal is reported as
+`PROPOSER_OUTPUT_TOKEN_LIMIT`; it is not treated as malformed JSON, retried, or
+silently sent to the other model.
 
 The example deliberately sets `acknowledge_gpu_passthrough_risk` to `false`.
 `doctor` remains available, but candidate GPU evaluation through `start` or
@@ -239,6 +254,46 @@ To compare Pro and Flash, create `autorun.pro.json` and
 the Flash config or vice versa. Run Flash proposal-only and one-candidate GPU
 canaries before a five-candidate session. Keep the accepted baseline, image
 digests, budgets and protocol identical when comparing model outcomes.
+
+### Server administration
+
+Git/config maintenance is deliberately outside the research controller. After
+installing this version, import the two already validated model configs once:
+
+```bash
+kernel-autoresearch-admin bootstrap \
+  --manifest /home/mx/autoresearch-runtime/gpu1/admin.json \
+  --pro-config /home/mx/autoresearch-runtime/gpu1/autorun.pro.json \
+  --flash-config /home/mx/autoresearch-runtime/gpu1/autorun.flash.json
+
+source /home/mx/autoresearch-runtime/gpu1/env.sh
+kernel-autoresearch-admin verify \
+  --manifest "$AUTORESEARCH_MANIFEST" \
+  --level doctor
+```
+
+`bootstrap` requires the input configs to differ only by model. It creates a
+shared base, formal five-candidate configs, one-candidate canary configs and a
+secret-free `env.sh`, all mode 0600. `sync` updates commit pins after a trusted
+local Git change but never adopts a new kernel hash. The only supported hash
+transition is explicit `adopt-baseline` after the same hash is committed and
+recorded as an accepted C500 full confirmation.
+
+Subsequent fast-forward deployments use:
+
+```bash
+kernel-autoresearch-admin update \
+  --manifest /home/mx/autoresearch-runtime/gpu1/admin.json \
+  --doctor
+```
+
+The updater takes the GPU1 cooperative lock, rejects active runs/containers,
+fetches only the fixed tracking branch, requires a fast-forward, runs fixed-
+image CPU tests, reinstalls the host entry point, stages config synchronization
+and optionally runs both doctors. Formal configs publish only after all checks
+pass. It never resets Git, pulls images, reads the API key value, invokes
+DeepSeek, starts a run, commits or pushes. See
+[server administration](docs/server-admin.md) for the full procedure.
 
 ### Server acceptance sequence
 
@@ -327,11 +382,12 @@ python3.10 -m coverage report
 
 Acceptance requires an unrounded total of at least 80% and branch-only coverage
 of at least 85% for `autorun/controller.py`, `autorun/runtime.py`, and
-`autorun/store.py`.
+`autorun/store.py`. The server-administration release also requires at least
+85% branch-aware coverage for `autorun/admin.py`.
 
-The dual-model release passes 118 Python 3.10 tests with 83.31% total
-branch-aware coverage. Before the dual-model tests were added, the recorded
-baseline was 114 tests and 83.07%.
+The Flash-output/admin release passes 133 Python 3.10 tests with 83.71% total
+branch-aware coverage; `autorun/admin.py` is 85.36%. The preceding dual-model
+release recorded 118 tests and 83.31%.
 
 ## Current limitations
 
