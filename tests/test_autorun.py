@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
+from dataclasses import replace
 import hashlib
 import io
 import json
@@ -15,6 +16,10 @@ import time
 import unittest
 
 from kernel_research.autorun.controller import ResearchController, gpu_lock
+from kernel_research.autorun.model_catalog import (
+    DEFAULT_OPENCODE_MODEL,
+    OPENCODE_MODEL_SPECS,
+)
 from kernel_research.autorun.models import ControllerConfig, ProposalV1
 from kernel_research.autorun.proposal import (
     ProposalRequest,
@@ -270,6 +275,52 @@ class PolicyTests(unittest.TestCase):
 
 
 class ConfigAndArgvTests(unittest.TestCase):
+    def test_opencode_model_allowlist_defaults_and_rejects_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            value = _config(root).redacted_dict()
+            value["gpu_devices"] = [
+                "/dev/mxcd",
+                "/dev/dri/card2",
+                "/dev/dri/renderD129",
+            ]
+            path = root / "model-config.json"
+
+            value.pop("opencode_model")
+            path.write_text(json.dumps(value), encoding="utf-8")
+            self.assertEqual(
+                ControllerConfig.load(path).opencode_model,
+                DEFAULT_OPENCODE_MODEL,
+            )
+
+            for qualified_id in OPENCODE_MODEL_SPECS:
+                with self.subTest(qualified_id=qualified_id):
+                    selected = dict(value, opencode_model=qualified_id)
+                    path.write_text(json.dumps(selected), encoding="utf-8")
+                    self.assertEqual(
+                        ControllerConfig.load(path).opencode_model,
+                        qualified_id,
+                    )
+
+            invalid_models = (
+                None,
+                7,
+                "deepseek-v4-pro",
+                "deepseek-v4-flash",
+                "deepseek/deepseek-chat",
+                "other/deepseek-v4-flash",
+            )
+            allowed = ", ".join(sorted(OPENCODE_MODEL_SPECS))
+            for invalid in invalid_models:
+                with self.subTest(invalid=invalid):
+                    selected = dict(value, opencode_model=invalid)
+                    path.write_text(json.dumps(selected), encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        re.escape(f"opencode_model must be one of: {allowed}"),
+                    ):
+                        ControllerConfig.load(path)
+
     def test_config_is_strict_and_requires_digest_paths_and_secret_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -385,6 +436,60 @@ class ConfigAndArgvTests(unittest.TestCase):
             self.assertEqual(OPENCODE_PROPOSER_STEPS, 3)
             self.assertEqual(proposer["steps"], OPENCODE_PROPOSER_STEPS)
             self.assertEqual(proposer["permission"], {"*": "deny"})
+
+    def test_selected_model_is_consistent_across_config_agent_and_argv(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            base = _config(root)
+            for qualified_id, spec in OPENCODE_MODEL_SPECS.items():
+                with self.subTest(qualified_id=qualified_id):
+                    config = replace(base, opencode_model=qualified_id)
+                    opencode_config = root / f"{spec.provider_id}.json"
+                    write_opencode_config(opencode_config, config)
+                    value = json.loads(
+                        opencode_config.read_text(encoding="utf-8")
+                    )
+                    argv = proposer_argv(
+                        config,
+                        name="proposal-name",
+                        run_id="run",
+                        opencode_config=opencode_config,
+                    )
+                    self.assertEqual(value["model"], qualified_id)
+                    self.assertEqual(
+                        value["agent"]["kernel-proposer"]["model"],
+                        qualified_id,
+                    )
+                    self.assertEqual(
+                        list(value["provider"]["deepseek"]["models"]),
+                        [spec.provider_id],
+                    )
+                    provider = value["provider"]["deepseek"]["models"][
+                        spec.provider_id
+                    ]
+                    self.assertEqual(provider["name"], spec.display_name)
+                    self.assertEqual(
+                        provider["limit"],
+                        {"context": 1_000_000, "output": 32_768},
+                    )
+                    self.assertEqual(
+                        argv[argv.index("--model") + 1], qualified_id
+                    )
+                    self.assertEqual(value["permission"], {"*": "deny"})
+                    agent = value["agent"]["kernel-proposer"]
+                    self.assertEqual(agent["steps"], 3)
+                    self.assertEqual(agent["reasoningEffort"], "max")
+                    self.assertEqual(
+                        agent["thinking"], {"type": "enabled"}
+                    )
+                    self.assertTrue(
+                        all(
+                            enabled is False
+                            for enabled in value["tools"].values()
+                        )
+                    )
 
     def test_config_rejects_capability_and_path_expansion(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

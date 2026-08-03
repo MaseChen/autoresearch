@@ -135,6 +135,7 @@ def compact_status_payload(
             "consecutive_failures": run.get("consecutive_failures"),
             "max_candidates": config.get("max_candidates"),
             "max_hours": config.get("max_hours"),
+            "proposer_model": config.get("opencode_model"),
             "deadline_epoch": run.get("deadline_epoch"),
             "stop_reason": run.get("stop_reason"),
             "stop_requested": run.get("stop_requested"),

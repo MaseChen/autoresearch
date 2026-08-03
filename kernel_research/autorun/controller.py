@@ -616,6 +616,7 @@ class ResearchController:
         return {
             "schema_version": 1,
             "command": "doctor",
+            "proposer_model": self.config.opencode_model,
             "status": "SUCCESS" if not errors else "FAILED",
             "errors": errors,
             "identity": identity,

@@ -15,7 +15,7 @@
   ],
   "evaluator_cache_dir": "/home/mx/autoresearch-runtime/gpu1/cache",
   "expected_git_commit": "REPLACE_WITH_GIT_REV_PARSE_HEAD_40_LOWERCASE_HEX",
-  "expected_kernel_hash": "c944f4e01b846061662918453c8b859f95f0f70d102d52447194e46d055dd015",
+  "expected_kernel_hash": "88b9eb6f612dbe47e2e59498fd8c45df305e832524155dafb310cc98b26cf9b9",
   "opencode_model": "deepseek/deepseek-v4-pro",
   "max_candidates": 5,
   "max_hours": 6,

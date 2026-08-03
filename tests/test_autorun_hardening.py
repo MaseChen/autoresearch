@@ -20,6 +20,7 @@ from kernel_research.autorun.controller import (
     DockerEvaluator,
     ResearchController,
 )
+from kernel_research.autorun.model_catalog import OPENCODE_MODEL_SPECS
 from kernel_research.autorun.models import ProposalV1
 from kernel_research.autorun.opencode import OpenCodeProposer
 from kernel_research.autorun.proposal import (
@@ -328,6 +329,94 @@ class FixedRunner:
 
 
 class AdapterAndCacheTests(unittest.TestCase):
+    def test_opencode_adapter_uses_selected_model_without_fallback(self) -> None:
+        request = ProposalRequest(
+            parent_candidate_hash=SEED_HASH,
+            accepted_kernel=SEED,
+            program_markdown="Only kernel.py.",
+            environment={},
+            accepted_case_p50_us={},
+            recent_experiments=(),
+            session_feedback=(),
+        )
+        valid = json.dumps(
+            {
+                "type": "text",
+                "part": {"text": json.dumps(_proposal_value())},
+            }
+        )
+        for index, qualified_id in enumerate(OPENCODE_MODEL_SPECS, 1):
+            with self.subTest(qualified_id=qualified_id), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = replace(
+                    _config(root), opencode_model=qualified_id
+                )
+                runner = FixedRunner([CommandResult((), 0, valid, "")])
+                adapter = OpenCodeProposer(
+                    config,
+                    run_id=f"{index}" * 32,
+                    iteration_index=1,
+                    run_dir=root / "run",
+                    runner=runner,  # type: ignore[arg-type]
+                )
+                self.assertEqual(
+                    adapter.propose(request).candidate_hash, SEED_HASH
+                )
+                argv = runner.argv[0]
+                self.assertEqual(
+                    argv[argv.index("--model") + 1], qualified_id
+                )
+
+                malformed = json.dumps(
+                    {"type": "text", "part": {"text": "not JSON"}}
+                )
+                retry_runner = FixedRunner(
+                    [
+                        CommandResult((), 0, malformed, ""),
+                        CommandResult((), 0, valid, ""),
+                    ]
+                )
+                retry_adapter = OpenCodeProposer(
+                    config,
+                    run_id=f"r{index}" * 16,
+                    iteration_index=2,
+                    run_dir=root / "retry-run",
+                    runner=retry_runner,  # type: ignore[arg-type]
+                )
+                self.assertEqual(
+                    retry_adapter.propose(request).candidate_hash,
+                    SEED_HASH,
+                )
+                self.assertEqual(len(retry_runner.argv), 2)
+                self.assertTrue(
+                    all(
+                        argv[argv.index("--model") + 1] == qualified_id
+                        for argv in retry_runner.argv
+                    )
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            flash = "deepseek/deepseek-v4-flash"
+            config = replace(_config(root), opencode_model=flash)
+            runner = FixedRunner(
+                [CommandResult((), 1, "", "transient network failure")]
+            )
+            adapter = OpenCodeProposer(
+                config,
+                run_id="f" * 32,
+                iteration_index=1,
+                run_dir=root / "run",
+                runner=runner,  # type: ignore[arg-type]
+            )
+            with self.assertRaisesRegex(
+                RuntimeError, "OpenCode container exited with code 1"
+            ):
+                adapter.propose(request)
+            self.assertEqual(len(runner.argv), 1)
+            argv = runner.argv[0]
+            self.assertEqual(argv[argv.index("--model") + 1], flash)
+
     def test_ndjson_chunks_are_concatenated_without_separators(self) -> None:
         proposal_text = json.dumps(_proposal_value())
         chunks = [
@@ -1114,6 +1203,10 @@ class FeedbackAndStatusTests(unittest.TestCase):
             self.assertEqual(compact["format"], "compact")
             self.assertNotIn("config", compact["run"])
             self.assertNotIn("preflight", compact["run"])
+            self.assertEqual(
+                compact["run"]["proposer_model"],
+                "deepseek/deepseek-v4-pro",
+            )
             self.assertEqual(
                 compact["iterations"][1]["active_container"],
                 "exact-active-container",

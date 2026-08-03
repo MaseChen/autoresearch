@@ -23,6 +23,7 @@ from kernel_research.autorun import cli as autorun_cli
 from kernel_research.autorun import controller as controller_module
 from kernel_research.autorun import runtime as autorun_runtime
 from kernel_research.autorun.controller import DockerEvaluator, ResearchController
+from kernel_research.autorun.errors import ControlledRuntimeError
 from kernel_research.autorun.models import ProposalV1
 from kernel_research.autorun.runtime import CommandResult, CommandRunner
 from kernel_research.autorun.states import IterationStatus, RunStatus, Stage
@@ -342,6 +343,47 @@ class ControllerPublicSurfaceTests(unittest.TestCase):
                 doctor = controller.doctor()
             self.assertEqual(doctor["status"], "SUCCESS")
             self.assertTrue(doctor["gpu_passthrough_risk_acknowledged"])
+            self.assertEqual(
+                doctor["proposer_model"], "deepseek/deepseek-v4-pro"
+            )
+
+    def test_resume_rejects_opencode_model_drift_in_both_directions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            controller, pro_config, _runner = self._controller(root)
+            pairs = (
+                (
+                    "deepseek/deepseek-v4-pro",
+                    "deepseek/deepseek-v4-flash",
+                ),
+                (
+                    "deepseek/deepseek-v4-flash",
+                    "deepseek/deepseek-v4-pro",
+                ),
+            )
+            for index, (stored_model, resumed_model) in enumerate(pairs, 1):
+                run_id = f"model-drift-{index}"
+                stored_config = replace(
+                    pro_config, opencode_model=stored_model
+                )
+                with ControllerStore(controller.controller_db) as store:
+                    store.create_run(
+                        run_id=run_id,
+                        deadline_epoch=time.time() + 3600,
+                        config=stored_config.redacted_dict(),
+                        initial_best_hash=SEED_HASH,
+                    )
+                resumed = ResearchController(
+                    replace(pro_config, opencode_model=resumed_model),
+                    evaluator=FakeEvaluator(),
+                )
+                with self.assertRaisesRegex(
+                    ControlledRuntimeError,
+                    "resume config changed immutable fields: opencode_model",
+                ):
+                    resumed.resume(run_id)
 
     def test_repository_identity_and_framework_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1095,6 +1137,7 @@ class CliAndWorkerTests(unittest.TestCase):
                 "config": {
                     "max_candidates": 5,
                     "max_hours": 6.0,
+                    "opencode_model": "deepseek/deepseek-v4-flash",
                     "deepseek_key_file": "/secret/path",
                 },
                 "preflight": {"large": True},
@@ -1162,6 +1205,10 @@ class CliAndWorkerTests(unittest.TestCase):
                 self.assertEqual(value["command"], expected_command)
                 self.assertNotIn("config", value["run"])
                 self.assertNotIn("preflight", value["run"])
+                self.assertEqual(
+                    value["run"]["proposer_model"],
+                    "deepseek/deepseek-v4-flash",
+                )
                 self.assertEqual(
                     value["iterations"][0]["result_summary"][
                         "relative_speedup_vs_accepted"

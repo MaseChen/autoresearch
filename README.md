@@ -10,9 +10,14 @@ The first milestone is intentionally split in two:
 - **macOS mock mode** validates the control plane without importing PyTorch or
   Triton. It never invents latency and never promotes a candidate.
 - **MetaX C500 mode** is the only mode allowed to claim kernel correctness or
-  performance. The current `c944f4e…` BLOCK_K=64 seed has completed smoke,
-  quick and all four full cases on C500; each new server still establishes its
-  own accepted full baseline before comparisons.
+  performance. The current accepted `88b9eb6f…` 128×128 tile kernel has
+  completed smoke, quick, full primary and full confirmation on C500; each new
+  server still establishes its own accepted full baseline before comparisons.
+
+## Project documents
+
+- [项目改造说明](docs/project-overview.md)
+- [当前进度报告（2026-07-28）](docs/status-report-2026-07-28.md)
 
 ## Operator contract
 
@@ -134,11 +139,29 @@ container output. It never replaces `kernel.py`, commits, or pushes.
 Copy [`config/autorun.example.json`](config/autorun.example.json) outside the
 repository and replace the proposer image reference and `expected_git_commit`.
 Every configured path must be absolute and canonical; both images must use a
-repository digest (`name@sha256:...`). The current baseline kernel hash remains
-`c944f4e01b846061662918453c8b859f95f0f70d102d52447194e46d055dd015`.
+repository digest (`name@sha256:...`). The current baseline kernel hash is
+`88b9eb6f612dbe47e2e59498fd8c45df305e832524155dafb310cc98b26cf9b9`.
 Its accepted provenance commit is
-`838e020252d1eb2190065036418e3b2064346822`; the controller commit is the newer
+`03fd62cf3a32b907c9e2d88f8b4ac9b1c65a087c`; the controller commit is the newer
 exact `git rev-parse HEAD` value placed in the deployment config.
+
+The proposer supports exactly two audited DeepSeek model IDs:
+
+```json
+"opencode_model": "deepseek/deepseek-v4-pro"
+```
+
+or:
+
+```json
+"opencode_model": "deepseek/deepseek-v4-flash"
+```
+
+Pro remains the default when the field is omitted. Model selection is part of
+the immutable run config: never change it when resuming a run. Unknown models,
+aliases and other providers are rejected, and API/network failure never causes
+an automatic Pro↔Flash fallback. This keeps every proposal attributable to one
+model even when provider connectivity is unstable.
 
 The example deliberately sets `acknowledge_gpu_passthrough_risk` to `false`.
 `doctor` remains available, but candidate GPU evaluation through `start` or
@@ -209,6 +232,13 @@ This still runs the trusted C500 doctor, but stops at `PROPOSAL_READY` after
 ProposalV1 and research-policy validation. Inspect its prompt, raw NDJSON and
 staged source before starting the one-candidate C500 dry run with a copied
 config whose `max_candidates` is `1`.
+
+To compare Pro and Flash, create `autorun.pro.json` and
+`autorun.flash.json` from the same validated config and change only
+`opencode_model`. Start a new run for each model; do not resume a Pro run with
+the Flash config or vice versa. Run Flash proposal-only and one-candidate GPU
+canaries before a five-candidate session. Keep the accepted baseline, image
+digests, budgets and protocol identical when comparing model outcomes.
 
 ### Server acceptance sequence
 
@@ -298,6 +328,10 @@ python3.10 -m coverage report
 Acceptance requires an unrounded total of at least 80% and branch-only coverage
 of at least 85% for `autorun/controller.py`, `autorun/runtime.py`, and
 `autorun/store.py`.
+
+The dual-model release passes 118 Python 3.10 tests with 83.31% total
+branch-aware coverage. Before the dual-model tests were added, the recorded
+baseline was 114 tests and 83.07%.
 
 ## Current limitations
 

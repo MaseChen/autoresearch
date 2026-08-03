@@ -23,6 +23,7 @@ from ..constants import (
     MAX_PROPOSER_OUTPUT_BYTES,
     MAX_PROPOSER_TIMEOUT_SEC,
 )
+from .model_catalog import DEFAULT_OPENCODE_MODEL, resolve_opencode_model
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 IMAGE_RE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
@@ -183,7 +184,7 @@ class ControllerConfig:
     evaluator_cache_dir: Path
     expected_git_commit: str
     expected_kernel_hash: str
-    opencode_model: str = "deepseek/deepseek-v4-pro"
+    opencode_model: str = DEFAULT_OPENCODE_MODEL
     max_candidates: int = 5
     max_hours: float = 6.0
     max_consecutive_failures: int = 3
@@ -311,11 +312,10 @@ class ControllerConfig:
             raise ValueError(
                 "deepseek_key_file must be outside repository, state and controller"
             )
-        opencode_model = str(
-            obj.get("opencode_model", "deepseek/deepseek-v4-pro")
+        model = resolve_opencode_model(
+            obj.get("opencode_model", DEFAULT_OPENCODE_MODEL)
         )
-        if opencode_model != "deepseek/deepseek-v4-pro":
-            raise ValueError("opencode_model must be deepseek/deepseek-v4-pro")
+        opencode_model = model.qualified_id
         max_candidates = _positive_int(
             obj.get("max_candidates", 5), "max_candidates"
         )
