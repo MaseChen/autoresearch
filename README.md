@@ -385,8 +385,8 @@ of at least 85% for `autorun/controller.py`, `autorun/runtime.py`, and
 `autorun/store.py`. The server-administration release also requires at least
 85% branch-aware coverage for `autorun/admin.py`.
 
-The Flash-output/admin release passes 133 Python 3.10 tests with 83.71% total
-branch-aware coverage; `autorun/admin.py` is 85.36%. The preceding dual-model
+The Flash-output/admin release passes 135 Python 3.10 tests with 83.68% total
+branch-aware coverage; `autorun/admin.py` is 85.13%. The preceding dual-model
 release recorded 118 tests and 83.31%.
 
 ## Current limitations

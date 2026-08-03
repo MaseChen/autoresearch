@@ -201,6 +201,35 @@ class AdminManifestAndSyncTests(unittest.TestCase):
             self.assertNotIn("opencode_model", base)
             self.assertEqual(base["expected_kernel_hash"], SEED_HASH)
 
+    def test_bootstrap_adopts_current_commit_but_not_a_new_kernel_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = AdminFixture(Path(temporary))
+            old_commit = fixture.commit
+            (fixture.repo / "README.md").write_text("pulled update\n", encoding="utf-8")
+            _command("git", "add", "README.md", cwd=fixture.repo)
+            _command("git", "commit", "-m", "pulled update", cwd=fixture.repo)
+            current = _command("git", "rev-parse", "HEAD", cwd=fixture.repo)
+            self.assertNotEqual(old_commit, current)
+            manifest = fixture.bootstrap()
+            pro = json.loads(manifest.pro_config.read_text(encoding="utf-8"))
+            self.assertEqual(pro["expected_git_commit"], current)
+            self.assertEqual(pro["expected_kernel_hash"], SEED_HASH)
+
+    def test_bootstrap_rejects_an_unproven_kernel_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = AdminFixture(Path(temporary))
+            for path in (fixture.pro_path, fixture.flash_path):
+                value = json.loads(path.read_text(encoding="utf-8"))
+                value["expected_kernel_hash"] = "0" * 64
+                path.write_text(json.dumps(value), encoding="utf-8")
+                path.chmod(0o600)
+            with self.assertRaisesRegex(ControlledRuntimeError, "input kernel pin"):
+                admin.bootstrap(
+                    fixture.manifest_path,
+                    fixture.pro_path,
+                    fixture.flash_path,
+                )
+
     def test_manifest_rejects_unknown_fields_modes_and_symlinks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = AdminFixture(Path(temporary))

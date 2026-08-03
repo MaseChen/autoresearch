@@ -786,6 +786,18 @@ def bootstrap(manifest_path: Path, pro_path: Path, flash_path: Path) -> dict[str
         expected_upstream=upstream,
         host_python=Path(sys.executable).resolve(),
     )
+    repository_state = _repo_state(manifest)
+    if repository_state["kernel_hash"] != repository_state["kernel_blob_hash"]:
+        raise ControlledRuntimeError("working kernel.py differs from HEAD Git blob")
+    if repository_state["kernel_hash"] != pro_config.expected_kernel_hash:
+        raise ControlledRuntimeError(
+            "bootstrap input kernel pin does not match current kernel.py"
+        )
+    best, _ = _artifact_for_best(pro_config)
+    if best.candidate_hash != repository_state["kernel_hash"]:
+        raise ControlledRuntimeError(
+            "bootstrap accepted History baseline does not match kernel.py"
+        )
     for path in (
         manifest.base_config,
         manifest.pro_canary_config,
@@ -798,7 +810,7 @@ def bootstrap(manifest_path: Path, pro_path: Path, flash_path: Path) -> dict[str
     base["max_candidates"] = 5
     values = _render_config_values(
         base,
-        commit=pro_config.expected_git_commit,
+        commit=repository_state["head"],
         kernel_hash=pro_config.expected_kernel_hash,
     )
     _validate_generated(values)
