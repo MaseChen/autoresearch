@@ -386,6 +386,54 @@ class AdminVerificationAndUpdateTests(unittest.TestCase):
                 static = admin.verify(manifest, "static")
             self.assertEqual(static["status"], "SUCCESS")
             self.assertEqual(static["static"]["models"]["flash"], admin.FLASH_MODEL)
+            self.assertEqual(
+                static["static"]["model_settings"]["pro"]["reasoning_effort"],
+                "max",
+            )
+            self.assertEqual(
+                static["static"]["model_settings"]["flash"][
+                    "reasoning_effort"
+                ],
+                "high",
+            )
+            self.assertEqual(
+                static["static"]["model_settings"]["flash"]["output_tokens"],
+                65_536,
+            )
+
+            real_write = admin.write_opencode_config
+
+            for wrong_model, wrong_effort in (
+                (admin.PRO_MODEL, "high"),
+                (admin.FLASH_MODEL, "max"),
+            ):
+                def write_wrong_effort(path, config):
+                    real_write(path, config)
+                    if config.opencode_model != wrong_model:
+                        return
+                    value = json.loads(path.read_text(encoding="utf-8"))
+                    value["agent"]["kernel-proposer"][
+                        "reasoningEffort"
+                    ] = wrong_effort
+                    path.write_text(json.dumps(value), encoding="utf-8")
+
+                with (
+                    mock.patch.object(
+                        ControllerConfig, "validate_host", return_value=[]
+                    ),
+                    mock.patch.object(admin, "_active_containers", return_value=[]),
+                    mock.patch.object(admin, "_run", side_effect=inspect_images),
+                    mock.patch.object(
+                        admin,
+                        "write_opencode_config",
+                        side_effect=write_wrong_effort,
+                    ),
+                    self.assertRaisesRegex(
+                        ControlledRuntimeError,
+                        "OpenCode proposer boundary mismatch",
+                    ),
+                ):
+                    admin.verify(manifest, "static")
 
             with (
                 mock.patch.object(admin, "_static_checks", return_value={"ok": True}),
@@ -437,10 +485,12 @@ class AdminVerificationAndUpdateTests(unittest.TestCase):
             }
 
             def payload(config: ControllerConfig) -> dict:
+                spec = admin.OPENCODE_MODEL_SPECS[config.opencode_model]
                 return {
                     "status": "SUCCESS",
                     "errors": [],
                     "proposer_model": config.opencode_model,
+                    "proposer_reasoning_effort": spec.reasoning_effort,
                     "c500_probe": {
                         "environment": {"compile_probe_status": "PASSED"}
                     },
@@ -453,6 +503,9 @@ class AdminVerificationAndUpdateTests(unittest.TestCase):
             with mock.patch.object(admin, "ResearchController", side_effect=controllers):
                 result = admin._doctor_configs(configs)
             self.assertEqual(result["flash"]["status"], "SUCCESS")
+            self.assertEqual(
+                result["flash"]["proposer_reasoning_effort"], "high"
+            )
 
             failures = (
                 ({"status": "FAILED", "errors": ["bad"]}, "doctor failed"),
@@ -468,6 +521,16 @@ class AdminVerificationAndUpdateTests(unittest.TestCase):
                     {
                         "status": "SUCCESS",
                         "proposer_model": admin.PRO_MODEL,
+                        "proposer_reasoning_effort": "high",
+                        "c500_probe": {"environment": {"compile_probe_status": "PASSED"}},
+                    },
+                    "reasoning effort identity",
+                ),
+                (
+                    {
+                        "status": "SUCCESS",
+                        "proposer_model": admin.PRO_MODEL,
+                        "proposer_reasoning_effort": "max",
                         "c500_probe": {"environment": {"compile_probe_status": "FAILED"}},
                     },
                     "compile probe",

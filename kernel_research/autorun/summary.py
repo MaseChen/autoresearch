@@ -128,6 +128,7 @@ def compact_status_payload(
     compact_run: dict[str, Any] | None = None
     if run is not None:
         config = _mapping(run.get("config"))
+        preflight = _mapping(run.get("preflight"))
         compact_run = {
             "id": run.get("id"),
             "status": run.get("status"),
@@ -136,6 +137,9 @@ def compact_status_payload(
             "max_candidates": config.get("max_candidates"),
             "max_hours": config.get("max_hours"),
             "proposer_model": config.get("opencode_model"),
+            "proposer_reasoning_effort": preflight.get(
+                "proposer_reasoning_effort"
+            ),
             "deadline_epoch": run.get("deadline_epoch"),
             "stop_reason": run.get("stop_reason"),
             "stop_requested": run.get("stop_requested"),

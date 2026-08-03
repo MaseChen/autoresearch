@@ -346,6 +346,7 @@ class ControllerPublicSurfaceTests(unittest.TestCase):
             self.assertEqual(
                 doctor["proposer_model"], "deepseek/deepseek-v4-pro"
             )
+            self.assertEqual(doctor["proposer_reasoning_effort"], "max")
 
     def test_resume_rejects_opencode_model_drift_in_both_directions(
         self,
@@ -1140,7 +1141,10 @@ class CliAndWorkerTests(unittest.TestCase):
                     "opencode_model": "deepseek/deepseek-v4-flash",
                     "deepseek_key_file": "/secret/path",
                 },
-                "preflight": {"large": True},
+                "preflight": {
+                    "large": True,
+                    "proposer_reasoning_effort": "high",
+                },
             },
             "iterations": [
                 {
@@ -1210,11 +1214,30 @@ class CliAndWorkerTests(unittest.TestCase):
                     "deepseek/deepseek-v4-flash",
                 )
                 self.assertEqual(
+                    value["run"]["proposer_reasoning_effort"], "high"
+                )
+                self.assertEqual(
                     value["iterations"][0]["result_summary"][
                         "relative_speedup_vs_accepted"
                     ],
                     0.9,
                 )
+
+        full_status["run"]["preflight"] = {"legacy": True}
+        with (
+            mock.patch(
+                "kernel_research.autorun.cli._controller", return_value=fake
+            ),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(
+                autorun_cli.main(
+                    ["status", "--config", "/tmp/config", "--format", "compact"]
+                ),
+                0,
+            )
+        legacy = json.loads(output.getvalue())
+        self.assertIsNone(legacy["run"]["proposer_reasoning_effort"])
 
     def test_policy_worker_error_bounding(self) -> None:
         result = ResearchPolicyResult(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping
+from typing import Literal, Mapping
 
 
 @dataclass(frozen=True)
@@ -16,6 +16,7 @@ class OpenCodeModelSpec:
     display_name: str
     context_tokens: int
     output_tokens: int
+    reasoning_effort: Literal["high", "max"]
 
 
 DEFAULT_OPENCODE_MODEL = "deepseek/deepseek-v4-pro"
@@ -28,6 +29,7 @@ OPENCODE_MODEL_SPECS: Mapping[str, OpenCodeModelSpec] = MappingProxyType(
             display_name="DeepSeek V4 Pro",
             context_tokens=1_000_000,
             output_tokens=65_536,
+            reasoning_effort="max",
         ),
         "deepseek/deepseek-v4-flash": OpenCodeModelSpec(
             qualified_id="deepseek/deepseek-v4-flash",
@@ -35,6 +37,7 @@ OPENCODE_MODEL_SPECS: Mapping[str, OpenCodeModelSpec] = MappingProxyType(
             display_name="DeepSeek V4 Flash",
             context_tokens=1_000_000,
             output_tokens=65_536,
+            reasoning_effort="high",
         ),
     }
 )

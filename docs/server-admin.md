@@ -79,11 +79,13 @@ kernel-autoresearch-admin adopt-baseline \
 confirmation 和内容寻址 artifact 时才会发布新 pin。未确认实验、缺失 artifact、
 dirty tree、活动 run 或任一 hash 不一致都会失败关闭。
 
-## Flash 65K canary
+## Flash high-reasoning canary
 
-本版本把 Pro/Flash 的项目侧 output token ceiling 都提高到 65,536，仍保持
-thinking enabled、max reasoning、三步、20 分钟与 2 MiB 宿主输出限制。首次更新
-后先验证 Flash 不再出现纯 reasoning 截断：
+Pro/Flash 的项目侧 output token ceiling 均为 65,536，thinking 均保持 enabled；
+Pro 固定使用 max reasoning，Flash 固定使用 high reasoning。此前 Flash/max 的
+live canary 在约 32K reasoning token 后以 `reason=length`、`output=0` 结束，因此
+本版本用更受控的 Flash/high 验证能否为 ProposalV1 留出最终文本。OpenCode 三步、
+20 分钟与 2 MiB 宿主输出限制保持不变。更新后应连续运行两次 proposal-only：
 
 ```bash
 kernel-autoresearch start \
@@ -92,6 +94,8 @@ kernel-autoresearch start \
   --format compact
 ```
 
-期望状态为 `PROPOSAL_READY`，审计 NDJSON 中应出现 text event 且 output token
-大于 0，不应产生 GPU history。若 65K 仍以 `reason=length` 结束，停止继续扩容；
-保留 raw NDJSON，下一批单独评估 Flash 的 `reasoningEffort=high`。
+每次期望状态均为 `PROPOSAL_READY`，doctor/compact 输出应显示 Flash/high，生成的
+`opencode.json` 应显示 `reasoningEffort=high`。审计 NDJSON 中必须出现 text event
+且 output token 大于 0，不应产生 GPU history。若 Flash/high 仍以
+`reason=length`、`output=0` 结束，停止 rollout 和预算扩容并保留 raw NDJSON；
+关闭 thinking 或继续使用 Pro/max 必须作为下一批独立人工决策，不能自动 fallback。

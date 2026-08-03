@@ -593,6 +593,7 @@ def _static_checks(manifest: AdminManifest) -> dict[str, Any]:
             raise ControlledRuntimeError(f"pinned {role} image is not present locally")
         images[role] = image
     generated_models: dict[str, str] = {}
+    generated_model_settings: dict[str, dict[str, Any]] = {}
     with tempfile.TemporaryDirectory(prefix="kar-admin-opencode-") as temporary:
         for name in ("pro", "flash"):
             path = Path(temporary) / f"{name}.json"
@@ -619,13 +620,18 @@ def _static_checks(manifest: AdminManifest) -> dict[str, Any]:
                 value["permission"] != {"*": "deny"}
                 or agent["permission"] != {"*": "deny"}
                 or agent["steps"] != OPENCODE_PROPOSER_STEPS
-                or agent["reasoningEffort"] != "max"
+                or agent["reasoningEffort"] != spec.reasoning_effort
                 or agent["thinking"] != {"type": "enabled"}
                 or not value["tools"]
                 or any(value["tools"].values())
             ):
                 raise ControlledRuntimeError("OpenCode proposer boundary mismatch")
             generated_models[name] = model
+            generated_model_settings[name] = {
+                "model": model,
+                "reasoning_effort": spec.reasoning_effort,
+                "output_tokens": spec.output_tokens,
+            }
     active = _active_run_error(primary)
     if active:
         raise ControlledRuntimeError(active)
@@ -637,6 +643,7 @@ def _static_checks(manifest: AdminManifest) -> dict[str, Any]:
     return {
         "identity": identity,
         "models": generated_models,
+        "model_settings": generated_model_settings,
         "images": images,
         "secret": {
             "path": str(primary.deepseek_key_file),
@@ -727,12 +734,20 @@ def _doctor_configs(configs: Mapping[str, ControllerConfig]) -> dict[str, Any]:
             )
         if payload.get("proposer_model") != configs[name].opencode_model:
             raise ControlledRuntimeError(f"{name} doctor model identity mismatch")
+        spec = OPENCODE_MODEL_SPECS[configs[name].opencode_model]
+        if payload.get("proposer_reasoning_effort") != spec.reasoning_effort:
+            raise ControlledRuntimeError(
+                f"{name} doctor reasoning effort identity mismatch"
+            )
         probe = payload.get("c500_probe") or {}
         if probe.get("environment", {}).get("compile_probe_status") != "PASSED":
             raise ControlledRuntimeError(f"{name} C500 compile probe did not pass")
         results[name] = {
             "status": payload["status"],
             "proposer_model": payload["proposer_model"],
+            "proposer_reasoning_effort": payload[
+                "proposer_reasoning_effort"
+            ],
             "environment": probe.get("environment"),
         }
     return results

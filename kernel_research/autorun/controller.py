@@ -26,6 +26,7 @@ from ..evaluation import record_external_result
 from ..history import ExperimentRecord, HistoryStore
 from ..research_policy import validate_research_candidate_bounded
 from .errors import ControlledRuntimeError
+from .model_catalog import resolve_opencode_model
 from .models import ControllerConfig
 from .opencode import OpenCodeProposer
 from .proposal import ProposalRequest, Proposer
@@ -613,10 +614,12 @@ class ResearchController:
                 != "PASSED"
             ):
                 errors.append("C500 compile doctor did not pass")
+        proposer_model = resolve_opencode_model(self.config.opencode_model)
         return {
             "schema_version": 1,
             "command": "doctor",
             "proposer_model": self.config.opencode_model,
+            "proposer_reasoning_effort": proposer_model.reasoning_effort,
             "status": "SUCCESS" if not errors else "FAILED",
             "errors": errors,
             "identity": identity,

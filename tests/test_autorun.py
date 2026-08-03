@@ -275,6 +275,20 @@ class PolicyTests(unittest.TestCase):
 
 
 class ConfigAndArgvTests(unittest.TestCase):
+    def test_model_catalog_pins_reasoning_effort_by_model(self) -> None:
+        self.assertEqual(
+            OPENCODE_MODEL_SPECS[
+                "deepseek/deepseek-v4-pro"
+            ].reasoning_effort,
+            "max",
+        )
+        self.assertEqual(
+            OPENCODE_MODEL_SPECS[
+                "deepseek/deepseek-v4-flash"
+            ].reasoning_effort,
+            "high",
+        )
+
     def test_opencode_model_allowlist_defaults_and_rejects_aliases(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -480,7 +494,9 @@ class ConfigAndArgvTests(unittest.TestCase):
                     self.assertEqual(value["permission"], {"*": "deny"})
                     agent = value["agent"]["kernel-proposer"]
                     self.assertEqual(agent["steps"], 3)
-                    self.assertEqual(agent["reasoningEffort"], "max")
+                    self.assertEqual(
+                        agent["reasoningEffort"], spec.reasoning_effort
+                    )
                     self.assertEqual(
                         agent["thinking"], {"type": "enabled"}
                     )

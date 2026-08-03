@@ -489,7 +489,7 @@ def write_opencode_config(path: Path, config: ControllerConfig) -> None:
                 "steps": OPENCODE_PROPOSER_STEPS,
                 "model": config.opencode_model,
                 "permission": {"*": "deny"},
-                "reasoningEffort": "max",
+                "reasoningEffort": model.reasoning_effort,
                 "thinking": {"type": "enabled"},
                 "prompt": (
                     "Return only the strict ProposalV1 JSON requested by the "
