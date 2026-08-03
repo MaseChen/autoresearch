@@ -90,7 +90,11 @@ class AdminFixture:
             "state_dir": str(self.state),
             "controller_dir": str(self.controller),
             "checkpoint_dir": str(self.runtime / "checkpoints"),
-            "docker_binary": "/bin/echo",
+            # The fixture never invokes this as Docker.  Use the current
+            # interpreter because it is guaranteed to be an executable,
+            # canonical absolute path on both macOS and Linux; /bin/echo is
+            # non-canonical on usr-merged Ubuntu images (/bin -> /usr/bin).
+            "docker_binary": str(Path(sys.executable).resolve()),
             "proposer_image": "local/proposer@sha256:" + "1" * 64,
             "evaluator_image": "local/evaluator@sha256:" + "2" * 64,
             "deepseek_key_file": str(self.secret),
