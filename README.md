@@ -185,6 +185,13 @@ doctor output and compact run status are all audited independently. If a new
 run still terminates at exactly 32K, stop rollout and inspect the Docker argv;
 if it reaches the 384K cap, do not increase it automatically.
 
+For a normally stopped bare-JSON response, the transport parser can recover
+only two observed EOF punctuation faults: one missing final outer `}` or one
+exact extra trailing `"}`. It never edits Proposal fields or kernel source,
+never applies to fenced/length-truncated output, and records every successful
+repair as `PROPOSER_TRANSPORT_RECOVERY` while retaining the original NDJSON.
+All other JSON errors keep the existing one-retry, fail-closed behavior.
+
 The example deliberately sets `acknowledge_gpu_passthrough_risk` to `false`.
 `doctor` remains available, but candidate GPU evaluation through `start` or
 `resume` is blocked until it is explicitly set to `true` for an authorized
@@ -392,9 +399,9 @@ of at least 85% for `autorun/controller.py`, `autorun/runtime.py`, and
 `autorun/store.py`. The server-administration release also requires at least
 85% branch-aware coverage for `autorun/admin.py`.
 
-The 384K/max release passes 137 Python 3.10 tests with 83.79% total
-branch-aware coverage; `autorun/admin.py` is 85.59% and the controller,
-runtime, store and admin modules all remain above their required gates.
+The 384K/max release with bounded JSON-tail recovery passes 141 Python 3.10
+tests with 83.91% total branch-aware coverage; the controller, runtime, store
+and admin modules remain above their required gates.
 
 ## Current limitations
 

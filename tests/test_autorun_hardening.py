@@ -24,12 +24,16 @@ from kernel_research.autorun.model_catalog import OPENCODE_MODEL_SPECS
 from kernel_research.autorun.models import ProposalV1
 from kernel_research.autorun.opencode import OpenCodeProposer
 from kernel_research.autorun.proposal import (
+    APPEND_FINAL_OBJECT_BRACE,
+    DROP_EXACT_TRAILING_QUOTE_BRACE,
+    ProposalFormatError,
     ProposalRequest,
     ProposerFormatRetryExhaustedError,
     ProposerOutputTokenLimitError,
     ProposerStepLimitError,
     build_prompt,
     parse_opencode_ndjson,
+    parse_opencode_ndjson_result,
 )
 from kernel_research.autorun.runtime import CommandResult, CommandRunner
 from kernel_research.autorun.states import Stage
@@ -69,6 +73,34 @@ OUTPUT_LIMIT_FIXTURE = (
     Path(__file__).with_name("fixtures")
     / "opencode_flash_output_limit.ndjson"
 )
+
+
+def _proposal_ndjson(
+    text: str,
+    *,
+    reason: str = "stop",
+    reasoning_tokens: int = 18_963,
+    output_tokens: int = 3_844,
+) -> str:
+    return "\n".join(
+        json.dumps(event)
+        for event in (
+            {"type": "step_start", "part": {"type": "step-start"}},
+            {"type": "text", "part": {"text": text}},
+            {
+                "type": "step_finish",
+                "part": {
+                    "reason": reason,
+                    "tokens": {
+                        "total": reasoning_tokens + output_tokens + 11_830,
+                        "input": 11_830,
+                        "reasoning": reasoning_tokens,
+                        "output": output_tokens,
+                    },
+                },
+            },
+        )
+    )
 
 
 class RecordingCommandRunner(CommandRunner):
@@ -334,6 +366,242 @@ class FixedRunner:
 
 
 class AdapterAndCacheTests(unittest.TestCase):
+    def test_bounded_transport_recovery_is_strict_and_semantic(self) -> None:
+        valid_text = json.dumps(_proposal_value(), separators=(",", ":"))
+        strict = parse_opencode_ndjson_result(
+            _proposal_ndjson(valid_text),
+            expected_parent_hash=SEED_HASH,
+        )
+        self.assertIsNone(strict.transport_recovery)
+
+        cases = (
+            (
+                valid_text[:-1],
+                APPEND_FINAL_OBJECT_BRACE,
+                18_963,
+                3_844,
+            ),
+            (
+                valid_text + '"}',
+                DROP_EXACT_TRAILING_QUOTE_BRACE,
+                29_537,
+                3_480,
+            ),
+        )
+        for text, expected_recovery, reasoning, output in cases:
+            with self.subTest(recovery=expected_recovery):
+                result = parse_opencode_ndjson_result(
+                    _proposal_ndjson(
+                        text,
+                        reasoning_tokens=reasoning,
+                        output_tokens=output,
+                    ),
+                    expected_parent_hash=SEED_HASH,
+                )
+                self.assertEqual(
+                    result.transport_recovery, expected_recovery
+                )
+                self.assertEqual(result.proposal.kernel_source, SEED)
+                self.assertEqual(result.proposal.candidate_hash, SEED_HASH)
+
+        semantic_errors = []
+        invalid_parent = _proposal_value()
+        invalid_parent["parent_candidate_hash"] = "0" * 64
+        semantic_errors.append((invalid_parent, "parent_candidate_hash"))
+        unknown_field = _proposal_value()
+        unknown_field["unknown"] = True
+        semantic_errors.append((unknown_field, "unknown fields"))
+        empty_source = _proposal_value()
+        empty_source["kernel_source"] = ""
+        semantic_errors.append((empty_source, "kernel_source"))
+        for value, message in semantic_errors:
+            with self.subTest(semantic=message), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                parse_opencode_ndjson_result(
+                    _proposal_ndjson(
+                        json.dumps(value, separators=(",", ":"))[:-1]
+                    ),
+                    expected_parent_hash=SEED_HASH,
+                )
+
+    def test_transport_recovery_rejects_non_eof_and_unsafe_contexts(
+        self,
+    ) -> None:
+        valid_text = json.dumps(_proposal_value(), separators=(",", ":"))
+        unsafe = (
+            _proposal_ndjson(valid_text[:-1], reason="length"),
+            _proposal_ndjson(f"```json\n{valid_text[:-1]}\n```"),
+            _proposal_ndjson(valid_text + "x"),
+            json.dumps({"type": "text", "part": {"text": valid_text[:-1]}}),
+            _proposal_ndjson(valid_text.replace('"hypothesis":', '"hypothesis"')),
+        )
+        expected_errors = (
+            ProposerOutputTokenLimitError,
+            ProposalFormatError,
+            ProposalFormatError,
+            ProposalFormatError,
+            ProposalFormatError,
+        )
+        for index, (raw, error_type) in enumerate(
+            zip(unsafe, expected_errors), 1
+        ):
+            with self.subTest(index=index), self.assertRaises(error_type):
+                parse_opencode_ndjson_result(
+                    raw,
+                    expected_parent_hash=SEED_HASH,
+                    configured_output_token_cap=384_000,
+                )
+
+        earlier_length = json.dumps(
+            {
+                "type": "step_finish",
+                "part": {
+                    "reason": "length",
+                    "tokens": {"reasoning": 32_000, "output": 0},
+                },
+            }
+        ) + "\n" + _proposal_ndjson(valid_text[:-1])
+        result = parse_opencode_ndjson_result(
+            earlier_length,
+            expected_parent_hash=SEED_HASH,
+            configured_output_token_cap=384_000,
+        )
+        self.assertEqual(
+            result.transport_recovery, APPEND_FINAL_OBJECT_BRACE
+        )
+
+    def test_adapter_recovers_first_or_retry_attempt_without_mutating_raw(
+        self,
+    ) -> None:
+        valid_text = json.dumps(_proposal_value(), separators=(",", ":"))
+        recovered_outputs = (
+            (
+                [_proposal_ndjson(valid_text[:-1])],
+                APPEND_FINAL_OBJECT_BRACE,
+                1,
+            ),
+            (
+                [
+                    json.dumps(
+                        {"type": "text", "part": {"text": "not JSON"}}
+                    ),
+                    _proposal_ndjson(
+                        valid_text + '"}',
+                        reasoning_tokens=29_537,
+                        output_tokens=3_480,
+                    ),
+                ],
+                DROP_EXACT_TRAILING_QUOTE_BRACE,
+                2,
+            ),
+        )
+        for index, (outputs, recovery, call_count) in enumerate(
+            recovered_outputs, 1
+        ):
+            with self.subTest(
+                recovery=recovery
+            ), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = _config(root)
+                runner = FixedRunner(
+                    [CommandResult((), 0, output, "") for output in outputs]
+                )
+                adapter = OpenCodeProposer(
+                    config,
+                    run_id=str(index) * 32,
+                    iteration_index=1,
+                    run_dir=root / "run",
+                    runner=runner,  # type: ignore[arg-type]
+                )
+                request = ProposalRequest(
+                    parent_candidate_hash=SEED_HASH,
+                    accepted_kernel=SEED,
+                    program_markdown="Only kernel.py.",
+                    environment={},
+                    accepted_case_p50_us={},
+                    recent_experiments=(),
+                    session_feedback=(),
+                )
+                proposal = adapter.propose(request)
+                self.assertEqual(proposal.candidate_hash, SEED_HASH)
+                self.assertEqual(len(runner.argv), call_count)
+                self.assertEqual(
+                    adapter.attempts[-1]["transport_recovery"], recovery
+                )
+                self.assertEqual(adapter.attempts[-1]["outcome"], "SUCCESS")
+                self.assertEqual(
+                    adapter.raw_path.read_text(encoding="utf-8"),
+                    outputs[-1],
+                )
+
+    def test_controller_audits_recovery_before_proposal_only_validation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = _config(root)
+            (config.repository_dir / "program.md").write_text(
+                "Only kernel.py.", encoding="utf-8"
+            )
+            _baseline(config.state_dir)
+            source = _with_different_block_size_n(SEED)
+            text = json.dumps(
+                _proposal_value(source), separators=(",", ":")
+            )[:-1]
+            raw = _proposal_ndjson(text)
+            runner = FixedRunner([CommandResult((), 0, raw, "")])
+            evaluator = FakeEvaluator()
+            controller = ResearchController(
+                config,
+                evaluator=evaluator,
+                proposer_factory=lambda run_id, index, run_dir: OpenCodeProposer(
+                    config,
+                    run_id=run_id,
+                    iteration_index=index,
+                    run_dir=run_dir,
+                    runner=runner,  # type: ignore[arg-type]
+                ),
+            )
+            run_id = "transport-recovery-run"
+            with ControllerStore(controller.controller_db) as store:
+                store.create_run(
+                    run_id=run_id,
+                    deadline_epoch=time.time() + 3600,
+                    config=config.redacted_dict(),
+                    initial_best_hash=SEED_HASH,
+                )
+            result = controller._run_loop(run_id, proposal_only=True)
+            self.assertEqual(result["status"], "PROPOSAL_READY")
+            self.assertEqual(evaluator.stages, [])
+            with ControllerStore(controller.controller_db) as store:
+                iteration = store.latest_iteration(run_id)
+                events = store.list_events(run_id)
+            self.assertEqual(iteration["outcome"], "PROPOSAL_VALIDATED")
+            recovery = next(
+                event
+                for event in events
+                if event["event"] == "PROPOSER_TRANSPORT_RECOVERY"
+            )
+            expected_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+            self.assertEqual(
+                recovery["details"]["candidate_hash"], expected_hash
+            )
+            self.assertEqual(
+                recovery["details"]["attempts"],
+                [
+                    {
+                        "attempt": 1,
+                        "transport_recovery": APPEND_FINAL_OBJECT_BRACE,
+                        "raw_output_path": iteration["raw_output_path"],
+                    }
+                ],
+            )
+            self.assertEqual(
+                Path(iteration["raw_output_path"]).read_text(encoding="utf-8"),
+                raw,
+            )
+
     def test_opencode_adapter_uses_selected_model_without_fallback(self) -> None:
         request = ProposalRequest(
             parent_candidate_hash=SEED_HASH,

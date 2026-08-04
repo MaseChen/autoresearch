@@ -110,6 +110,13 @@ is then evaluated
 in order: policy → smoke → quick → full primary → unchanged-hash full
 confirmation. Only host-validated results are copied into the trusted history.
 
+Bare JSON that terminates with `reason=stop` may receive one of two audited,
+transport-only recoveries before schema validation: append one missing final
+outer `}`, or remove one exact trailing `"}` after an otherwise complete
+object. No Proposal field or kernel-source character may change. Fenced JSON,
+length-truncated output and every other syntax error remain fail-closed; raw
+NDJSON is always preserved.
+
 The autonomous controller never writes the repository's `kernel.py` and never
 runs Git commit or push. A promoted staged artifact remains in runtime state
 for a trusted operator to inspect and materialize later.

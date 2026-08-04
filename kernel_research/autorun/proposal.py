@@ -38,6 +38,18 @@ class ProposerFormatRetryExhaustedError(ValueError):
     """Both strictly bounded Proposal JSON attempts failed syntax parsing."""
 
 
+APPEND_FINAL_OBJECT_BRACE = "APPEND_FINAL_OBJECT_BRACE"
+DROP_EXACT_TRAILING_QUOTE_BRACE = "DROP_EXACT_TRAILING_QUOTE_BRACE"
+
+
+@dataclass(frozen=True)
+class ProposalParseResult:
+    """A strict ProposalV1 plus any bounded transport-only recovery."""
+
+    proposal: ProposalV1
+    transport_recovery: str | None
+
+
 @dataclass(frozen=True)
 class ProposalRequest:
     parent_candidate_hash: str
@@ -55,22 +67,71 @@ class Proposer(ABC):
         """Return one complete candidate proposal."""
 
 
-def parse_proposal_text(text: str, *, expected_parent_hash: str) -> ProposalV1:
-    """Parse either one JSON object or exactly one ``json`` fenced object."""
-
+def _proposal_payload(text: str) -> tuple[str, bool]:
     fenced = FENCED_JSON_RE.fullmatch(text)
     payload = fenced.group(1) if fenced else text.strip()
     if "```" in payload:
         raise ProposalFormatError(
             "proposal contains malformed or additional fenced content"
         )
+    return payload, fenced is not None
+
+
+def _format_error(exc: json.JSONDecodeError) -> ProposalFormatError:
+    return ProposalFormatError(f"proposal is not valid JSON: {exc}")
+
+
+def _transport_recovery_candidate(
+    payload: str, exc: json.JSONDecodeError
+) -> tuple[str, str] | None:
+    if (
+        exc.msg == "Expecting ',' delimiter"
+        and exc.pos == len(payload)
+    ):
+        return APPEND_FINAL_OBJECT_BRACE, payload + "}"
+    if exc.msg == "Extra data" and payload[exc.pos:] == '"}':
+        return DROP_EXACT_TRAILING_QUOTE_BRACE, payload[: exc.pos]
+    return None
+
+
+def _parse_proposal_text_result(
+    text: str,
+    *,
+    expected_parent_hash: str,
+    allow_transport_recovery: bool,
+) -> ProposalParseResult:
+    payload, fenced = _proposal_payload(text)
     try:
         value = json.loads(payload)
     except json.JSONDecodeError as exc:
-        raise ProposalFormatError(
-            f"proposal is not valid JSON: {exc}"
-        ) from exc
-    return ProposalV1.from_value(value, expected_parent_hash=expected_parent_hash)
+        if not allow_transport_recovery or fenced:
+            raise _format_error(exc) from exc
+        candidate = _transport_recovery_candidate(payload, exc)
+        if candidate is None:
+            raise _format_error(exc) from exc
+        recovery, repaired_payload = candidate
+        try:
+            value = json.loads(repaired_payload)
+        except json.JSONDecodeError:
+            raise _format_error(exc) from exc
+        proposal = ProposalV1.from_value(
+            value, expected_parent_hash=expected_parent_hash
+        )
+        return ProposalParseResult(proposal, recovery)
+    proposal = ProposalV1.from_value(
+        value, expected_parent_hash=expected_parent_hash
+    )
+    return ProposalParseResult(proposal, None)
+
+
+def parse_proposal_text(text: str, *, expected_parent_hash: str) -> ProposalV1:
+    """Strictly parse one JSON object or exactly one ``json`` fenced object."""
+
+    return _parse_proposal_text_result(
+        text,
+        expected_parent_hash=expected_parent_hash,
+        allow_transport_recovery=False,
+    ).proposal
 
 
 def _contains_forbidden_event(value: Any) -> str | None:
@@ -102,11 +163,11 @@ class _LengthFinish:
 
 
 def _length_finish(event: Mapping[str, Any]) -> _LengthFinish | None:
-    event_type = str(event.get("type", "")).lower().replace("-", "_")
-    part = event.get("part")
-    if event_type != "step_finish" or not isinstance(part, Mapping):
+    reason = _step_finish_reason(event)
+    if reason != "length":
         return None
-    if str(part.get("reason", "")).lower() != "length":
+    part = event.get("part")
+    if not isinstance(part, Mapping):
         return None
     tokens = part.get("tokens")
     if not isinstance(tokens, Mapping):
@@ -119,6 +180,14 @@ def _length_finish(event: Mapping[str, Any]) -> _LengthFinish | None:
     return _LengthFinish(
         token("reasoning"), token("output"), token("total")
     )
+
+
+def _step_finish_reason(event: Mapping[str, Any]) -> str | None:
+    event_type = str(event.get("type", "")).lower().replace("-", "_")
+    part = event.get("part")
+    if event_type != "step_finish" or not isinstance(part, Mapping):
+        return None
+    return str(part.get("reason", "")).lower()
 
 
 def _output_limit_error(
@@ -147,17 +216,18 @@ def _output_limit_error(
     )
 
 
-def parse_opencode_ndjson(
+def parse_opencode_ndjson_result(
     raw: str,
     *,
     expected_parent_hash: str,
     configured_output_token_cap: int | None = None,
-) -> ProposalV1:
-    """Extract final text from OpenCode JSON events and reject tool/error events."""
+) -> ProposalParseResult:
+    """Extract a Proposal and bounded transport audit from OpenCode events."""
 
     text_parts: list[str] = []
     event_count = 0
     length_finish: _LengthFinish | None = None
+    terminal_reason: str | None = None
     for line_number, line in enumerate(raw.splitlines(), 1):
         if not line.strip():
             continue
@@ -173,9 +243,10 @@ def parse_opencode_ndjson(
             raise ValueError(f"OpenCode emitted forbidden {forbidden}")
         if not isinstance(event, dict):
             raise ValueError("OpenCode event must be an object")
-        observed_finish = _length_finish(event)
-        if observed_finish is not None:
-            length_finish = observed_finish
+        observed_reason = _step_finish_reason(event)
+        if observed_reason is not None:
+            terminal_reason = observed_reason
+            length_finish = _length_finish(event)
         event_type = str(event.get("type", "")).lower()
         part = event.get("part")
         if (
@@ -203,8 +274,12 @@ def parse_opencode_ndjson(
         raise ValueError("OpenCode produced no final text event")
     final_text = "".join(text_parts)
     try:
-        return parse_proposal_text(
-            final_text, expected_parent_hash=expected_parent_hash
+        return _parse_proposal_text_result(
+            final_text,
+            expected_parent_hash=expected_parent_hash,
+            allow_transport_recovery=(
+                length_finish is None and terminal_reason == "stop"
+            ),
         )
     except ProposalFormatError as exc:
         if length_finish is not None:
@@ -232,6 +307,21 @@ def parse_opencode_ndjson(
         raise
 
 
+def parse_opencode_ndjson(
+    raw: str,
+    *,
+    expected_parent_hash: str,
+    configured_output_token_cap: int | None = None,
+) -> ProposalV1:
+    """Compatibility wrapper returning only the strict ProposalV1 value."""
+
+    return parse_opencode_ndjson_result(
+        raw,
+        expected_parent_hash=expected_parent_hash,
+        configured_output_token_cap=configured_output_token_cap,
+    ).proposal
+
+
 def build_prompt(request: ProposalRequest) -> str:
     """Build the complete one-shot context supplied to an untrusted proposer."""
 
@@ -248,6 +338,8 @@ def build_prompt(request: ProposalRequest) -> str:
     sections: Iterable[str] = (
         "You are a Fused MoE Triton kernel proposal engine.",
         "Return exactly one ProposalV1 JSON object and no other text.",
+        "The first byte must be '{'. Close kernel_source and the outer JSON "
+        "object exactly once; the final byte must be '}' with nothing after it.",
         "The only fields are schema_version=1, parent_candidate_hash, "
         "hypothesis (1..1000 characters), rationale (1..8000 characters), "
         "and kernel_source (the complete non-empty file, at most 256 KiB).",

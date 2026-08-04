@@ -905,6 +905,27 @@ class ResearchController:
                         )
             except Exception as exc:
                 raise ProposerFailure(f"{type(exc).__name__}: {exc}") from exc
+            recoveries = [
+                {
+                    "attempt": attempt.get("attempt"),
+                    "transport_recovery": attempt.get(
+                        "transport_recovery"
+                    ),
+                    "raw_output_path": attempt.get("raw_output_path"),
+                }
+                for attempt in attempts
+                if attempt.get("transport_recovery") is not None
+            ]
+            if recoveries:
+                store.add_event(
+                    run_id,
+                    "PROPOSER_TRANSPORT_RECOVERY",
+                    {
+                        "candidate_hash": proposal.candidate_hash,
+                        "attempts": recoveries,
+                    },
+                    iteration_id=iteration_id,
+                )
             if self._candidate_seen(store, proposal.candidate_hash):
                 run = store.get_run(run_id)
                 store.update_run(

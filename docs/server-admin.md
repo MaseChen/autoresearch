@@ -101,3 +101,8 @@ kernel-autoresearch start \
 若仍精确在 32K 结束，检查 Docker argv 中的实验变量；若 token 已超过 32K 后发生
 20 分钟 timeout，说明 cap 已解除，应另行评估超时；若精确耗尽 384K，则停止扩容。
 任何情形都不得自动关闭 thinking、切换模型或 fallback。
+
+正常 `reason=stop` 的裸JSON若仅缺最外层最后一个 `}`，或在完整对象后精确多出
+`"}`，控制器会执行唯一允许的尾部结构恢复。原始NDJSON不会被覆盖，并会增加
+`PROPOSER_TRANSPORT_RECOVERY`审计事件。统计canary时应区分strict success与
+transport recovery；其他JSON错误、fence或`reason=length`仍必须失败关闭。

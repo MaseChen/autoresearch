@@ -15,7 +15,7 @@ from .proposal import (
     Proposer,
     ProposerFormatRetryExhaustedError,
     build_prompt,
-    parse_opencode_ndjson,
+    parse_opencode_ndjson_result,
 )
 from .runtime import (
     CommandResult,
@@ -100,7 +100,9 @@ class OpenCodeProposer(Proposer):
                     f"({prior_format_error}). Generate it again from scratch. "
                     "Return one bare JSON object, correctly JSON-escape the "
                     "complete kernel_source string, and return no fence, "
-                    "summary, or other text."
+                    "summary, or other text. The first byte must be '{'. "
+                    "Close kernel_source and the outer object exactly once; "
+                    "the final byte must be '}' with nothing after it."
                 )
             (
                 self.prompt_path,
@@ -157,7 +159,7 @@ class OpenCodeProposer(Proposer):
                     f"OpenCode container exited with code {result.returncode}"
                 )
             try:
-                proposal = parse_opencode_ndjson(
+                parsed = parse_opencode_ndjson_result(
                     safe_stdout,
                     expected_parent_hash=request.parent_candidate_hash,
                     configured_output_token_cap=(
@@ -179,5 +181,9 @@ class OpenCodeProposer(Proposer):
                 attempt_record["error"] = str(exc)
                 raise
             attempt_record["outcome"] = "SUCCESS"
-            return proposal
+            if parsed.transport_recovery is not None:
+                attempt_record["transport_recovery"] = (
+                    parsed.transport_recovery
+                )
+            return parsed.proposal
         raise AssertionError("proposal attempt loop ended unexpectedly")
