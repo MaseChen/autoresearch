@@ -620,6 +620,10 @@ class ResearchController:
             "command": "doctor",
             "proposer_model": self.config.opencode_model,
             "proposer_reasoning_effort": proposer_model.reasoning_effort,
+            "proposer_declared_output_tokens": proposer_model.output_tokens,
+            "proposer_request_output_token_cap": (
+                proposer_model.request_output_token_cap
+            ),
             "status": "SUCCESS" if not errors else "FAILED",
             "errors": errors,
             "identity": identity,

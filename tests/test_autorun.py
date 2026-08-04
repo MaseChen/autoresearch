@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from kernel_research.autorun.controller import ResearchController, gpu_lock
 from kernel_research.autorun.model_catalog import (
@@ -275,19 +276,12 @@ class PolicyTests(unittest.TestCase):
 
 
 class ConfigAndArgvTests(unittest.TestCase):
-    def test_model_catalog_pins_reasoning_effort_by_model(self) -> None:
-        self.assertEqual(
-            OPENCODE_MODEL_SPECS[
-                "deepseek/deepseek-v4-pro"
-            ].reasoning_effort,
-            "max",
-        )
-        self.assertEqual(
-            OPENCODE_MODEL_SPECS[
-                "deepseek/deepseek-v4-flash"
-            ].reasoning_effort,
-            "high",
-        )
+    def test_model_catalog_pins_max_reasoning_and_384k_by_model(self) -> None:
+        for qualified_id, spec in OPENCODE_MODEL_SPECS.items():
+            with self.subTest(qualified_id=qualified_id):
+                self.assertEqual(spec.reasoning_effort, "max")
+                self.assertEqual(spec.output_tokens, 384_000)
+                self.assertEqual(spec.request_output_token_cap, 384_000)
 
     def test_opencode_model_allowlist_defaults_and_rejects_aliases(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -414,6 +408,16 @@ class ConfigAndArgvTests(unittest.TestCase):
             self.assertIn("OPENCODE_DISABLE_DEFAULT_PLUGINS=1", joined)
             self.assertIn("OPENCODE_DISABLE_LSP_DOWNLOAD=1", joined)
             self.assertIn("OPENCODE_DISABLE_MODELS_FETCH=1", joined)
+            self.assertIn(
+                "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=384000",
+                proposal_args,
+            )
+            self.assertEqual(
+                proposal_args.count(
+                    "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=384000"
+                ),
+                1,
+            )
             candidate = root / "candidate.py"
             baseline = root / "baseline.py"
             candidate.write_text(SEED, encoding="utf-8")
@@ -486,10 +490,20 @@ class ConfigAndArgvTests(unittest.TestCase):
                     self.assertEqual(provider["name"], spec.display_name)
                     self.assertEqual(
                         provider["limit"],
-                        {"context": 1_000_000, "output": 65_536},
+                        {
+                            "context": spec.context_tokens,
+                            "output": spec.output_tokens,
+                        },
                     )
                     self.assertEqual(
                         argv[argv.index("--model") + 1], qualified_id
+                    )
+                    self.assertEqual(
+                        argv.count(
+                            "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX="
+                            f"{spec.request_output_token_cap}"
+                        ),
+                        1,
                     )
                     self.assertEqual(value["permission"], {"*": "deny"})
                     agent = value["agent"]["kernel-proposer"]
@@ -506,6 +520,34 @@ class ConfigAndArgvTests(unittest.TestCase):
                             for enabled in value["tools"].values()
                         )
                     )
+
+    def test_host_output_cap_environment_cannot_override_model_spec(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            config = _config(root)
+            path = root / "opencode.json"
+            write_opencode_config(path, config)
+            with mock.patch.dict(
+                os.environ,
+                {"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": "1"},
+            ):
+                argv = proposer_argv(
+                    config,
+                    name="proposal-name",
+                    run_id="run",
+                    opencode_config=path,
+                )
+            self.assertNotIn(
+                "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1", argv
+            )
+            self.assertEqual(
+                argv.count(
+                    "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=384000"
+                ),
+                1,
+            )
 
     def test_config_rejects_capability_and_path_expansion(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

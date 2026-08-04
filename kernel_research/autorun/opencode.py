@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ..constants import MAX_PROPOSER_FORMAT_ATTEMPTS
 from .errors import ControlledRuntimeError
+from .model_catalog import resolve_opencode_model
 from .models import ControllerConfig, ProposalV1
 from .proposal import (
     ProposalRequest,
@@ -72,6 +73,7 @@ class OpenCodeProposer(Proposer):
     def propose(self, request: ProposalRequest) -> ProposalV1:
         opencode_config = self.run_dir / "opencode.json"
         write_opencode_config(opencode_config, self.config)
+        model = resolve_opencode_model(self.config.opencode_model)
         base_prompt = build_prompt(request)
         secret = self.config.deepseek_key_file.read_text(encoding="utf-8")
         deadline = time.monotonic() + self.config.proposer_timeout_sec
@@ -158,6 +160,9 @@ class OpenCodeProposer(Proposer):
                 proposal = parse_opencode_ndjson(
                     safe_stdout,
                     expected_parent_hash=request.parent_candidate_hash,
+                    configured_output_token_cap=(
+                        model.request_output_token_cap
+                    ),
                 )
             except ProposalFormatError as exc:
                 attempt_record["outcome"] = "FORMAT_ERROR"

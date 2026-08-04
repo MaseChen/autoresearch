@@ -140,6 +140,12 @@ def compact_status_payload(
             "proposer_reasoning_effort": preflight.get(
                 "proposer_reasoning_effort"
             ),
+            "proposer_declared_output_tokens": preflight.get(
+                "proposer_declared_output_tokens"
+            ),
+            "proposer_request_output_token_cap": preflight.get(
+                "proposer_request_output_token_cap"
+            ),
             "deadline_epoch": run.get("deadline_epoch"),
             "stop_reason": run.get("stop_reason"),
             "stop_requested": run.get("stop_requested"),

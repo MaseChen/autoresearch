@@ -169,18 +169,21 @@ aliases and other providers are rejected, and API/network failure never causes
 an automatic Pro↔Flash fallback. This keeps every proposal attributable to one
 model even when provider connectivity is unstable.
 
-Both audited models use a one-million-token context window and a project-side
-65,536-token model-output ceiling. Thinking remains enabled, with `max`
-reasoning effort for Pro and `high` reasoning effort for Flash. The Flash
-setting is deliberately model-specific: a live Flash/max canary consumed about
-32K reasoning tokens and ended with `reason=length`, `output=0`, despite the
-65K model-output ceiling. The host still independently limits OpenCode to three
-steps, 20 minutes, 2 MiB of captured output and a 256 KiB kernel source. A
+Both audited models use a one-million-token context window, a 384,000-token
+declared model-output limit, thinking enabled, and `max` reasoning effort.
+OpenCode 1.17.7 otherwise silently clamps each request to 32,000 tokens even
+when `limit.output` is larger, so the trusted host also injects
+`OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=384000` into the proposer container.
+This value comes only from the immutable model catalog and is not a controller
+configuration or inherited host-environment option. The host still independently
+limits OpenCode to three steps, 20 minutes, 2 MiB of captured output and a
+256 KiB kernel source. A
 `step_finish` with `reason=length` and no complete Proposal is reported as
 `PROPOSER_OUTPUT_TOKEN_LIMIT`; it is not treated as malformed JSON, retried, or
-silently sent to the other model. If Flash/high repeats the pure-reasoning
-failure, stop its rollout for an explicit operator decision; do not raise the
-limit, disable thinking or fall back to Pro automatically.
+silently sent to the other model. The generated config, runtime request cap,
+doctor output and compact run status are all audited independently. If a new
+run still terminates at exactly 32K, stop rollout and inspect the Docker argv;
+if it reaches the 384K cap, do not increase it automatically.
 
 The example deliberately sets `acknowledge_gpu_passthrough_risk` to `false`.
 `doctor` remains available, but candidate GPU evaluation through `start` or
@@ -389,9 +392,9 @@ of at least 85% for `autorun/controller.py`, `autorun/runtime.py`, and
 `autorun/store.py`. The server-administration release also requires at least
 85% branch-aware coverage for `autorun/admin.py`.
 
-The Flash high-reasoning/admin release passes 136 Python 3.10 tests with 83.75%
-total branch-aware coverage; `autorun/admin.py` is 85.48%. The preceding
-Flash-output/admin release recorded 135 tests and 83.68%.
+The 384K/max release passes 137 Python 3.10 tests with 83.79% total
+branch-aware coverage; `autorun/admin.py` is 85.59% and the controller,
+runtime, store and admin modules all remain above their required gates.
 
 ## Current limitations
 

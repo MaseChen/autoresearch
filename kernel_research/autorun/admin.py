@@ -27,9 +27,12 @@ from ..constants import OPENCODE_PROPOSER_STEPS
 from ..history import HistoryStore
 from .controller import ResearchController, gpu_lock
 from .errors import ControlledRuntimeError
-from .model_catalog import OPENCODE_MODEL_SPECS
+from .model_catalog import (
+    OPENCODE_MODEL_SPECS,
+    OPENCODE_OUTPUT_TOKEN_MAX_ENV,
+)
 from .models import CONFIG_FIELDS, ControllerConfig
-from .runtime import CommandRunner, write_opencode_config
+from .runtime import CommandRunner, proposer_argv, write_opencode_config
 from .states import TERMINAL_RUN_STATUSES
 from .store import ControllerStore
 
@@ -626,11 +629,43 @@ def _static_checks(manifest: AdminManifest) -> dict[str, Any]:
                 or any(value["tools"].values())
             ):
                 raise ControlledRuntimeError("OpenCode proposer boundary mismatch")
+            argv = proposer_argv(
+                configs[name],
+                name=f"kar-admin-{name}",
+                run_id=f"admin-{name}",
+                opencode_config=path,
+            )
+            docker_env = [
+                argv[index + 1]
+                for index, item in enumerate(argv[:-1])
+                if item == "--env"
+            ]
+            output_cap_env = [
+                item
+                for item in docker_env
+                if item.startswith(f"{OPENCODE_OUTPUT_TOKEN_MAX_ENV}=")
+            ]
+            expected_output_cap_env = (
+                f"{OPENCODE_OUTPUT_TOKEN_MAX_ENV}="
+                f"{spec.request_output_token_cap}"
+            )
+            if output_cap_env != [expected_output_cap_env]:
+                raise ControlledRuntimeError(
+                    "OpenCode request output token cap mismatch"
+                )
+            if argv[argv.index("--model") + 1] != model:
+                raise ControlledRuntimeError(
+                    "OpenCode Docker model identity mismatch"
+                )
             generated_models[name] = model
             generated_model_settings[name] = {
                 "model": model,
                 "reasoning_effort": spec.reasoning_effort,
                 "output_tokens": spec.output_tokens,
+                "declared_output_tokens": spec.output_tokens,
+                "request_output_token_cap": (
+                    spec.request_output_token_cap
+                ),
             }
     active = _active_run_error(primary)
     if active:
@@ -739,6 +774,17 @@ def _doctor_configs(configs: Mapping[str, ControllerConfig]) -> dict[str, Any]:
             raise ControlledRuntimeError(
                 f"{name} doctor reasoning effort identity mismatch"
             )
+        if payload.get("proposer_declared_output_tokens") != spec.output_tokens:
+            raise ControlledRuntimeError(
+                f"{name} doctor declared output identity mismatch"
+            )
+        if (
+            payload.get("proposer_request_output_token_cap")
+            != spec.request_output_token_cap
+        ):
+            raise ControlledRuntimeError(
+                f"{name} doctor request output cap identity mismatch"
+            )
         probe = payload.get("c500_probe") or {}
         if probe.get("environment", {}).get("compile_probe_status") != "PASSED":
             raise ControlledRuntimeError(f"{name} C500 compile probe did not pass")
@@ -747,6 +793,12 @@ def _doctor_configs(configs: Mapping[str, ControllerConfig]) -> dict[str, Any]:
             "proposer_model": payload["proposer_model"],
             "proposer_reasoning_effort": payload[
                 "proposer_reasoning_effort"
+            ],
+            "proposer_declared_output_tokens": payload[
+                "proposer_declared_output_tokens"
+            ],
+            "proposer_request_output_token_cap": payload[
+                "proposer_request_output_token_cap"
             ],
             "environment": probe.get("environment"),
         }

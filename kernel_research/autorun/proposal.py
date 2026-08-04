@@ -98,6 +98,7 @@ def _contains_forbidden_event(value: Any) -> str | None:
 class _LengthFinish:
     reasoning_tokens: int | None
     output_tokens: int | None
+    total_tokens: int | None
 
 
 def _length_finish(event: Mapping[str, Any]) -> _LengthFinish | None:
@@ -109,16 +110,20 @@ def _length_finish(event: Mapping[str, Any]) -> _LengthFinish | None:
         return None
     tokens = part.get("tokens")
     if not isinstance(tokens, Mapping):
-        return _LengthFinish(None, None)
+        return _LengthFinish(None, None, None)
 
     def token(name: str) -> int | None:
         value = tokens.get(name)
         return value if type(value) is int and value >= 0 else None
 
-    return _LengthFinish(token("reasoning"), token("output"))
+    return _LengthFinish(
+        token("reasoning"), token("output"), token("total")
+    )
 
 
-def _output_limit_error(finish: _LengthFinish) -> str:
+def _output_limit_error(
+    finish: _LengthFinish, *, configured_output_token_cap: int | None
+) -> str:
     reasoning = (
         "unknown"
         if finish.reasoning_tokens is None
@@ -127,15 +132,26 @@ def _output_limit_error(finish: _LengthFinish) -> str:
     output = (
         "unknown" if finish.output_tokens is None else str(finish.output_tokens)
     )
+    total = (
+        "unknown" if finish.total_tokens is None else str(finish.total_tokens)
+    )
+    cap = (
+        "unknown"
+        if configured_output_token_cap is None
+        else str(configured_output_token_cap)
+    )
     return (
         "PROPOSER_OUTPUT_TOKEN_LIMIT: OpenCode exhausted the model output "
         f"token budget before a complete ProposalV1 (reasoning={reasoning}, "
-        f"output={output})"
+        f"output={output}, total={total}, configured_cap={cap})"
     )
 
 
 def parse_opencode_ndjson(
-    raw: str, *, expected_parent_hash: str
+    raw: str,
+    *,
+    expected_parent_hash: str,
+    configured_output_token_cap: int | None = None,
 ) -> ProposalV1:
     """Extract final text from OpenCode JSON events and reject tool/error events."""
 
@@ -179,7 +195,10 @@ def parse_opencode_ndjson(
     if not text_parts:
         if length_finish is not None:
             raise ProposerOutputTokenLimitError(
-                _output_limit_error(length_finish)
+                _output_limit_error(
+                    length_finish,
+                    configured_output_token_cap=configured_output_token_cap,
+                )
             )
         raise ValueError("OpenCode produced no final text event")
     final_text = "".join(text_parts)
@@ -190,7 +209,10 @@ def parse_opencode_ndjson(
     except ProposalFormatError as exc:
         if length_finish is not None:
             raise ProposerOutputTokenLimitError(
-                _output_limit_error(length_finish)
+                _output_limit_error(
+                    length_finish,
+                    configured_output_token_cap=configured_output_token_cap,
+                )
             ) from exc
         first_line = final_text.lstrip().splitlines()[0].strip()
         if STEP_LIMIT_FALLBACK_RE.fullmatch(first_line):
@@ -202,7 +224,10 @@ def parse_opencode_ndjson(
     except ValueError as exc:
         if length_finish is not None:
             raise ProposerOutputTokenLimitError(
-                _output_limit_error(length_finish)
+                _output_limit_error(
+                    length_finish,
+                    configured_output_token_cap=configured_output_token_cap,
+                )
             ) from exc
         raise
 

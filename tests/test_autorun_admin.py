@@ -394,18 +394,32 @@ class AdminVerificationAndUpdateTests(unittest.TestCase):
                 static["static"]["model_settings"]["flash"][
                     "reasoning_effort"
                 ],
-                "high",
+                "max",
             )
             self.assertEqual(
-                static["static"]["model_settings"]["flash"]["output_tokens"],
-                65_536,
+                static["static"]["model_settings"]["flash"][
+                    "output_tokens"
+                ],
+                384_000,
+            )
+            self.assertEqual(
+                static["static"]["model_settings"]["flash"][
+                    "declared_output_tokens"
+                ],
+                384_000,
+            )
+            self.assertEqual(
+                static["static"]["model_settings"]["flash"][
+                    "request_output_token_cap"
+                ],
+                384_000,
             )
 
             real_write = admin.write_opencode_config
 
             for wrong_model, wrong_effort in (
                 (admin.PRO_MODEL, "high"),
-                (admin.FLASH_MODEL, "max"),
+                (admin.FLASH_MODEL, "high"),
             ):
                 def write_wrong_effort(path, config):
                     real_write(path, config)
@@ -434,6 +448,36 @@ class AdminVerificationAndUpdateTests(unittest.TestCase):
                     ),
                 ):
                     admin.verify(manifest, "static")
+
+            real_argv = admin.proposer_argv
+
+            def argv_with_wrong_output_cap(*args, **kwargs):
+                argv = real_argv(*args, **kwargs)
+                expected = (
+                    "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=384000"
+                )
+                argv[argv.index(expected)] = (
+                    "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=32000"
+                )
+                return argv
+
+            with (
+                mock.patch.object(
+                    ControllerConfig, "validate_host", return_value=[]
+                ),
+                mock.patch.object(admin, "_active_containers", return_value=[]),
+                mock.patch.object(admin, "_run", side_effect=inspect_images),
+                mock.patch.object(
+                    admin,
+                    "proposer_argv",
+                    side_effect=argv_with_wrong_output_cap,
+                ),
+                self.assertRaisesRegex(
+                    ControlledRuntimeError,
+                    "request output token cap mismatch",
+                ),
+            ):
+                admin.verify(manifest, "static")
 
             with (
                 mock.patch.object(admin, "_static_checks", return_value={"ok": True}),
@@ -491,6 +535,10 @@ class AdminVerificationAndUpdateTests(unittest.TestCase):
                     "errors": [],
                     "proposer_model": config.opencode_model,
                     "proposer_reasoning_effort": spec.reasoning_effort,
+                    "proposer_declared_output_tokens": spec.output_tokens,
+                    "proposer_request_output_token_cap": (
+                        spec.request_output_token_cap
+                    ),
                     "c500_probe": {
                         "environment": {"compile_probe_status": "PASSED"}
                     },
@@ -504,7 +552,15 @@ class AdminVerificationAndUpdateTests(unittest.TestCase):
                 result = admin._doctor_configs(configs)
             self.assertEqual(result["flash"]["status"], "SUCCESS")
             self.assertEqual(
-                result["flash"]["proposer_reasoning_effort"], "high"
+                result["flash"]["proposer_reasoning_effort"], "max"
+            )
+            self.assertEqual(
+                result["flash"]["proposer_declared_output_tokens"],
+                384_000,
+            )
+            self.assertEqual(
+                result["flash"]["proposer_request_output_token_cap"],
+                384_000,
             )
 
             failures = (
@@ -522,6 +578,8 @@ class AdminVerificationAndUpdateTests(unittest.TestCase):
                         "status": "SUCCESS",
                         "proposer_model": admin.PRO_MODEL,
                         "proposer_reasoning_effort": "high",
+                        "proposer_declared_output_tokens": 384_000,
+                        "proposer_request_output_token_cap": 384_000,
                         "c500_probe": {"environment": {"compile_probe_status": "PASSED"}},
                     },
                     "reasoning effort identity",
@@ -531,6 +589,30 @@ class AdminVerificationAndUpdateTests(unittest.TestCase):
                         "status": "SUCCESS",
                         "proposer_model": admin.PRO_MODEL,
                         "proposer_reasoning_effort": "max",
+                        "proposer_declared_output_tokens": 65_536,
+                        "proposer_request_output_token_cap": 384_000,
+                        "c500_probe": {"environment": {"compile_probe_status": "PASSED"}},
+                    },
+                    "declared output identity",
+                ),
+                (
+                    {
+                        "status": "SUCCESS",
+                        "proposer_model": admin.PRO_MODEL,
+                        "proposer_reasoning_effort": "max",
+                        "proposer_declared_output_tokens": 384_000,
+                        "proposer_request_output_token_cap": 32_000,
+                        "c500_probe": {"environment": {"compile_probe_status": "PASSED"}},
+                    },
+                    "request output cap identity",
+                ),
+                (
+                    {
+                        "status": "SUCCESS",
+                        "proposer_model": admin.PRO_MODEL,
+                        "proposer_reasoning_effort": "max",
+                        "proposer_declared_output_tokens": 384_000,
+                        "proposer_request_output_token_cap": 384_000,
                         "c500_probe": {"environment": {"compile_probe_status": "FAILED"}},
                     },
                     "compile probe",

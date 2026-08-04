@@ -79,13 +79,14 @@ kernel-autoresearch-admin adopt-baseline \
 confirmation 和内容寻址 artifact 时才会发布新 pin。未确认实验、缺失 artifact、
 dirty tree、活动 run 或任一 hash 不一致都会失败关闭。
 
-## Flash high-reasoning canary
+## Flash 384K/max canary
 
-Pro/Flash 的项目侧 output token ceiling 均为 65,536，thinking 均保持 enabled；
-Pro 固定使用 max reasoning，Flash 固定使用 high reasoning。此前 Flash/max 的
-live canary 在约 32K reasoning token 后以 `reason=length`、`output=0` 结束，因此
-本版本用更受控的 Flash/high 验证能否为 ProposalV1 留出最终文本。OpenCode 三步、
-20 分钟与 2 MiB 宿主输出限制保持不变。更新后应连续运行两次 proposal-only：
+Pro/Flash 的模型声明 output 和 OpenCode 请求 cap 均固定为 384,000，thinking 均
+保持 enabled，reasoning effort 均为 max。OpenCode 1.17.7 单独读取
+`limit.output` 仍会把请求截在 32K，因此可信控制器会向 proposer 容器显式注入
+`OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=384000`。该值不能由普通配置或宿主同名
+环境变量覆盖。OpenCode 三步、20 分钟与 2 MiB 宿主输出限制保持不变。更新后应
+连续运行五次全新 proposal-only：
 
 ```bash
 kernel-autoresearch start \
@@ -94,8 +95,9 @@ kernel-autoresearch start \
   --format compact
 ```
 
-每次期望状态均为 `PROPOSAL_READY`，doctor/compact 输出应显示 Flash/high，生成的
-`opencode.json` 应显示 `reasoningEffort=high`。审计 NDJSON 中必须出现 text event
-且 output token 大于 0，不应产生 GPU history。若 Flash/high 仍以
-`reason=length`、`output=0` 结束，停止 rollout 和预算扩容并保留 raw NDJSON；
-关闭 thinking 或继续使用 Pro/max 必须作为下一批独立人工决策，不能自动 fallback。
+至少四次应达到 `PROPOSAL_READY`。doctor/compact 输出应显示 Flash/max、声明 output
+384000 和请求 cap 384000；生成的 `opencode.json` 应显示
+`reasoningEffort=max`、`limit.output=384000`。不应产生 GPU history 或遗留容器。
+若仍精确在 32K 结束，检查 Docker argv 中的实验变量；若 token 已超过 32K 后发生
+20 分钟 timeout，说明 cap 已解除，应另行评估超时；若精确耗尽 384K，则停止扩容。
+任何情形都不得自动关闭 thinking、切换模型或 fallback。

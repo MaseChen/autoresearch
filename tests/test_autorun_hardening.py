@@ -521,9 +521,36 @@ class AdapterAndCacheTests(unittest.TestCase):
         raw = OUTPUT_LIMIT_FIXTURE.read_text(encoding="utf-8")
         with self.assertRaisesRegex(
             ProposerOutputTokenLimitError,
-            r"^PROPOSER_OUTPUT_TOKEN_LIMIT:.*reasoning=32000, output=0\)$",
+            (
+                r"^PROPOSER_OUTPUT_TOKEN_LIMIT:.*reasoning=32000, output=0, "
+                r"total=43211, configured_cap=384000\)$"
+            ),
         ):
-            parse_opencode_ndjson(raw, expected_parent_hash=SEED_HASH)
+            parse_opencode_ndjson(
+                raw,
+                expected_parent_hash=SEED_HASH,
+                configured_output_token_cap=384_000,
+            )
+
+        for token_limit in (65_536, 384_000):
+            with self.subTest(token_limit=token_limit):
+                value = json.loads(raw.splitlines()[-1])
+                value["part"]["tokens"].update(
+                    {
+                        "total": token_limit + 100,
+                        "reasoning": token_limit,
+                        "output": 0,
+                    }
+                )
+                with self.assertRaisesRegex(
+                    ProposerOutputTokenLimitError,
+                    f"reasoning={token_limit}, output=0",
+                ):
+                    parse_opencode_ndjson(
+                        json.dumps(value),
+                        expected_parent_hash=SEED_HASH,
+                        configured_output_token_cap=384_000,
+                    )
 
         partial = raw.replace(
             '{"type":"step_finish"',

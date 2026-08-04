@@ -18,7 +18,10 @@ from ..constants import (
     OPENCODE_PROPOSER_STEPS,
     PROPOSER_PID_LIMIT,
 )
-from .model_catalog import resolve_opencode_model
+from .model_catalog import (
+    OPENCODE_OUTPUT_TOKEN_MAX_ENV,
+    resolve_opencode_model,
+)
 from .models import ControllerConfig
 
 
@@ -238,6 +241,7 @@ def proposer_argv(
     run_id: str,
     opencode_config: Path,
 ) -> list[str]:
+    model = resolve_opencode_model(config.opencode_model)
     argv = _common_security_argv(
         config,
         name=name,
@@ -287,6 +291,11 @@ def proposer_argv(
             "OPENCODE_DISABLE_LSP_DOWNLOAD=1",
             "--env",
             "OPENCODE_DISABLE_MODELS_FETCH=1",
+            "--env",
+            (
+                f"{OPENCODE_OUTPUT_TOKEN_MAX_ENV}="
+                f"{model.request_output_token_cap}"
+            ),
             "--workdir",
             "/home/opencode",
             "--entrypoint",

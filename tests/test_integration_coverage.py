@@ -347,6 +347,12 @@ class ControllerPublicSurfaceTests(unittest.TestCase):
                 doctor["proposer_model"], "deepseek/deepseek-v4-pro"
             )
             self.assertEqual(doctor["proposer_reasoning_effort"], "max")
+            self.assertEqual(
+                doctor["proposer_declared_output_tokens"], 384_000
+            )
+            self.assertEqual(
+                doctor["proposer_request_output_token_cap"], 384_000
+            )
 
     def test_resume_rejects_opencode_model_drift_in_both_directions(
         self,
@@ -1143,7 +1149,9 @@ class CliAndWorkerTests(unittest.TestCase):
                 },
                 "preflight": {
                     "large": True,
-                    "proposer_reasoning_effort": "high",
+                    "proposer_reasoning_effort": "max",
+                    "proposer_declared_output_tokens": 384_000,
+                    "proposer_request_output_token_cap": 384_000,
                 },
             },
             "iterations": [
@@ -1214,7 +1222,15 @@ class CliAndWorkerTests(unittest.TestCase):
                     "deepseek/deepseek-v4-flash",
                 )
                 self.assertEqual(
-                    value["run"]["proposer_reasoning_effort"], "high"
+                    value["run"]["proposer_reasoning_effort"], "max"
+                )
+                self.assertEqual(
+                    value["run"]["proposer_declared_output_tokens"],
+                    384_000,
+                )
+                self.assertEqual(
+                    value["run"]["proposer_request_output_token_cap"],
+                    384_000,
                 )
                 self.assertEqual(
                     value["iterations"][0]["result_summary"][
@@ -1238,6 +1254,12 @@ class CliAndWorkerTests(unittest.TestCase):
             )
         legacy = json.loads(output.getvalue())
         self.assertIsNone(legacy["run"]["proposer_reasoning_effort"])
+        self.assertIsNone(
+            legacy["run"]["proposer_declared_output_tokens"]
+        )
+        self.assertIsNone(
+            legacy["run"]["proposer_request_output_token_cap"]
+        )
 
     def test_policy_worker_error_bounding(self) -> None:
         result = ResearchPolicyResult(
