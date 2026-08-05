@@ -10,7 +10,7 @@ The first milestone is intentionally split in two:
 - **macOS mock mode** validates the control plane without importing PyTorch or
   Triton. It never invents latency and never promotes a candidate.
 - **MetaX C500 mode** is the only mode allowed to claim kernel correctness or
-  performance. The current accepted `88b9eb6f…` 128×128 tile kernel has
+  performance. The current accepted `5749c934…` shape-aware 128×128 tile kernel has
   completed smoke, quick, full primary and full confirmation on C500; each new
   server still establishes its own accepted full baseline before comparisons.
 
@@ -146,10 +146,10 @@ Copy [`config/autorun.example.json`](config/autorun.example.json) outside the
 repository and replace the proposer image reference and `expected_git_commit`.
 Every configured path must be absolute and canonical; both images must use a
 repository digest (`name@sha256:...`). The current baseline kernel hash is
-`88b9eb6f612dbe47e2e59498fd8c45df305e832524155dafb310cc98b26cf9b9`.
-Its accepted provenance commit is
-`03fd62cf3a32b907c9e2d88f8b4ac9b1c65a087c`; the controller commit is the newer
-exact `git rev-parse HEAD` value placed in the deployment config.
+`5749c9345cc0a2d6e40d211471a34d18ff67414b2449aa72e5ec04150e1d8be2`.
+It was promoted by C500 full primary experiment 72 and confirmation experiment
+73. The repository commit containing it is the exact `git rev-parse HEAD`
+value placed in the deployment config during explicit baseline adoption.
 
 The proposer supports exactly two audited DeepSeek model IDs:
 
@@ -400,7 +400,7 @@ of at least 85% for `autorun/controller.py`, `autorun/runtime.py`, and
 85% branch-aware coverage for `autorun/admin.py`.
 
 The 384K/max release with bounded JSON-tail recovery passes 141 Python 3.10
-tests with 83.91% total branch-aware coverage; the controller, runtime, store
+tests with 83.84% total branch-aware coverage; the controller, runtime, store
 and admin modules remain above their required gates.
 
 ## Current limitations

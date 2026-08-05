@@ -15,6 +15,13 @@ import triton.language as tl
 
 _EXPERT_TILE_ROWS = 128
 
+# Column-major CTA ordering (program_id(0) = output-column tile) is used only
+# for launches with at least this many 128-row expert tiles.  The full-suite
+# decode launches have 32-64 expert tiles and the prefill launches ~228-496
+# (decode:prefill wall-time ratios of 7.12-7.75 with equal K/N per case pair),
+# so this threshold separates the two regimes with at least 2x margin.
+_COLUMN_MAJOR_MIN_EXPERT_TILES = 128
+
 
 @triton.jit
 def fused_moe_i8_tn_kernel(
@@ -41,16 +48,30 @@ def fused_moe_i8_tn_kernel(
     stride_on,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    COLUMN_MAJOR: tl.constexpr,
 ):
-    """Compute one 128-row expert tile by one output-column tile."""
+    """Compute one 128-row expert tile by one output-column tile.
 
-    pid_m = tl.program_id(axis=0)
-    pid_n = tl.program_id(axis=1)
+    ``COLUMN_MAJOR`` selects which grid axis enumerates the output-column
+    tile.  With ``COLUMN_MAJOR=True``, program_id(0) is the column tile and
+    program_id(1) is the 128-row expert tile, so consecutively scheduled CTAs
+    stream consecutive 128-column B tiles from one expert slab.  Otherwise
+    program_id(0) is the expert tile and program_id(1) the column tile (the
+    accepted layout).  The per-CTA work item ``(expert tile, column tile)`` is
+    identical in both orders; only the launch/scheduling order changes.
+    """
+
+    if COLUMN_MAJOR:
+        pid_n = tl.program_id(axis=0)
+        pid_m = tl.program_id(axis=1)
+    else:
+        pid_m = tl.program_id(axis=0)
+        pid_n = tl.program_id(axis=1)
 
     # A program never crosses an expert boundary: pid_m is exactly the index
     # into expert_ids, whose entries each describe one 128-row routed tile.
     expert_id = tl.load(expert_ids_ptr + pid_m)
-    # The full-suite B tensor spans up to 7.52e9 int8 elements. Cast before
+    # The full-suite B tensor spans up to 7.52e9 int8 elements.  Cast before
     # multiplying so mcTriton cannot overflow the expert base in int32.
     b_expert_ptr = b_ptr + expert_id.to(tl.int64) * stride_be
     offs_m = pid_m * 128 + tl.arange(0, 128)
@@ -212,7 +233,16 @@ def run_kernel(
 
     block_size_n = 128
     block_size_k = 128
-    grid = (em // _EXPERT_TILE_ROWS, triton.cdiv(n, block_size_n))
+    num_expert_tiles = em // _EXPERT_TILE_ROWS
+    num_column_tiles = triton.cdiv(n, block_size_n)
+    column_major = (
+        num_expert_tiles >= _COLUMN_MAJOR_MIN_EXPERT_TILES
+        and num_column_tiles >= 2
+    )
+    if column_major:
+        grid = (num_column_tiles, num_expert_tiles)
+    else:
+        grid = (num_expert_tiles, num_column_tiles)
     fused_moe_i8_tn_kernel[grid](
         a,
         b_col_major,
@@ -237,6 +267,7 @@ def run_kernel(
         out.stride(1),
         BLOCK_SIZE_N=block_size_n,
         BLOCK_SIZE_K=block_size_k,
+        COLUMN_MAJOR=column_major,
         num_warps=16,
         num_stages=2,
     )

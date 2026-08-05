@@ -84,7 +84,7 @@ full case。
 在原 C500 环境中，我们把 `BLOCK_SIZE_K` 从 32 单变量提升到 64。确认实验
 相对 BLOCK_K=32 基线的几何平均 speedup 为 **1.722×**，四个 case 的确认
 speedup 分别约为 **1.658×、1.769×、1.651×、1.818×**，全部正确且无回退，
-随后晋级为当前 seed：
+随后晋级为上一代 seed：
 
 ```text
 kernel SHA-256:
@@ -93,8 +93,21 @@ kernel SHA-256:
 
 上述 1.722× 是原服务器同环境交错基线结果。服务器资源丢失后，新服务器已
 重新完成 doctor、smoke、quick 和 full；后续 128×128 tile 候选又通过
-full primary 与 confirmation，晋级为当前 accepted baseline。不能把旧环境的
-speedup 直接当作新环境的对比结果。
+full primary 与 confirmation。当前 accepted baseline 由 Flash/max 自动研究
+run `5266440817ba402fb14378c23e62c9b2` 产生，通过 expert-tile 数量选择CTA
+grid顺序：decode保持原顺序，prefill使用column-major顺序。其身份与确认结果为：
+
+```text
+kernel SHA-256:
+5749c9345cc0a2d6e40d211471a34d18ff67414b2449aa72e5ec04150e1d8be2
+
+primary experiment: 72, speedup: 1.05916x
+confirmation experiment: 73, speedup: 1.05597x
+confirmation worst-case regression: 0.2365%
+```
+
+四个confirmation case正确率均为1.0，每个case保存30个candidate与30个交错
+baseline样本。不能把旧环境的speedup直接当作新环境的对比结果。
 
 提案器现在允许在 run 配置中选择 `deepseek/deepseek-v4-pro` 或
 `deepseek/deepseek-v4-flash`。模型是不可变实验身份，同一 run 的 resume 不得

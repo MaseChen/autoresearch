@@ -1397,8 +1397,36 @@ class KernelWrapperTests(unittest.TestCase):
         self.assertEqual(grid, (2, 1))
         self.assertEqual(kwargs["BLOCK_SIZE_N"], 128)
         self.assertEqual(kwargs["BLOCK_SIZE_K"], 128)
+        self.assertFalse(kwargs["COLUMN_MAJOR"])
         self.assertEqual(kwargs["num_warps"], 16)
         self.assertEqual(kwargs["num_stages"], 2)
+
+        prefill_a = Tensor((32768, 7168), "int8", (7168, 1))
+        prefill_b = Tensor(
+            (256, 4096, 7168),
+            "int8",
+            (4096 * 7168, 7168, 1),
+        )
+        prefill_scale_a = Tensor((32768,), "float32", (1,))
+        prefill_scale_b = Tensor((256, 4096), "float32", (4096, 1))
+        prefill_weights = Tensor((32768,), "float32", (1,))
+        prefill_token_ids = Tensor((32768,), "int32", (1,))
+        prefill_expert_ids = Tensor((256,), "int32", (1,))
+        prefill_out = Tensor((32768, 4096), "bfloat16", (4096, 1))
+        module.run_kernel(
+            prefill_a,
+            prefill_b,
+            prefill_scale_a,
+            prefill_scale_b,
+            prefill_weights,
+            prefill_token_ids,
+            prefill_expert_ids,
+            8,
+            prefill_out,
+        )
+        grid, _args, kwargs = kernel.launches[-1]
+        self.assertEqual(grid, (32, 256))
+        self.assertTrue(kwargs["COLUMN_MAJOR"])
         with self.assertRaisesRegex(ValueError, "topk"):
             module.run_kernel(
                 a,
