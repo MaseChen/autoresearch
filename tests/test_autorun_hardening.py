@@ -28,6 +28,7 @@ from kernel_research.autorun.proposal import (
     DROP_EXACT_TRAILING_QUOTE_BRACE,
     ProposalFormatError,
     ProposalRequest,
+    ProposerConstraintRetryExhaustedError,
     ProposerFormatRetryExhaustedError,
     ProposerOutputTokenLimitError,
     ProposerStepLimitError,
@@ -998,6 +999,214 @@ class AdapterAndCacheTests(unittest.TestCase):
                 float(runner.kwargs[1]["timeout_sec"]), 1100.0
             )
 
+    def test_constraint_retry_succeeds_with_shared_budgets_and_audit(
+        self,
+    ) -> None:
+        for field, limit in (("hypothesis", 1000), ("rationale", 8000)):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = _config(root)
+                overlong = _proposal_value()
+                overlong[field] = "x" * (limit + 1)
+                valid = _proposal_value()
+                outputs = (
+                    _proposal_ndjson(json.dumps(overlong)),
+                    _proposal_ndjson(json.dumps(valid)),
+                )
+                runner = FixedRunner(
+                    [
+                        CommandResult((), 0, outputs[0], "secret first"),
+                        CommandResult((), 0, outputs[1], "secret second"),
+                    ]
+                )
+                adapter = OpenCodeProposer(
+                    config,
+                    run_id="1" * 32,
+                    iteration_index=1,
+                    run_dir=root / "run",
+                    runner=runner,  # type: ignore[arg-type]
+                )
+                request = ProposalRequest(
+                    parent_candidate_hash=SEED_HASH,
+                    accepted_kernel=SEED,
+                    program_markdown="Only kernel.py.",
+                    environment={},
+                    accepted_case_p50_us={},
+                    recent_experiments=(),
+                    session_feedback=(),
+                )
+                with mock.patch(
+                    "kernel_research.autorun.opencode.time.monotonic",
+                    side_effect=[1000.0, 1000.0, 1100.0],
+                ):
+                    proposal = adapter.propose(request)
+
+                self.assertEqual(proposal.candidate_hash, SEED_HASH)
+                self.assertEqual(len(runner.argv), 2)
+                self.assertEqual(
+                    [item["outcome"] for item in adapter.attempts],
+                    ["CONSTRAINT_ERROR", "SUCCESS"],
+                )
+                first = adapter.attempts[0]
+                self.assertEqual(first["field"], field)
+                self.assertEqual(first["actual_length"], limit + 1)
+                self.assertEqual(first["hard_limit"], limit)
+                self.assertEqual(
+                    first["error_code"], f"{field.upper()}_TOO_LONG"
+                )
+                self.assertEqual(
+                    adapter.attempts[1]["retry_trigger"],
+                    "FIELD_LENGTH_ERROR",
+                )
+                retry_prompt = (
+                    root / "run" / "prompts" / "001.retry-1.txt"
+                ).read_text(encoding="utf-8")
+                self.assertIn("COMPLIANCE RETRY", retry_prompt)
+                self.assertIn(f"contained {limit + 1} characters", retry_prompt)
+                self.assertIn("at most 600 characters", retry_prompt)
+                self.assertIn("at most 6000 characters", retry_prompt)
+                self.assertNotIn("x" * (limit + 1), retry_prompt)
+                for stderr_path in (
+                    root / "run" / "raw" / "001.stderr.txt",
+                    root / "run" / "raw" / "001.retry-1.stderr.txt",
+                ):
+                    stderr = stderr_path.read_text(encoding="utf-8")
+                    self.assertNotIn("secret", stderr)
+                    self.assertIn("[REDACTED_SECRET]", stderr)
+                first_limit = int(runner.kwargs[0]["max_output_bytes"])
+                second_limit = int(runner.kwargs[1]["max_output_bytes"])
+                used = len(outputs[0].encode("utf-8")) + len(
+                    "secret first".encode("utf-8")
+                )
+                self.assertEqual(
+                    second_limit,
+                    first_limit - used,
+                )
+                self.assertEqual(
+                    float(runner.kwargs[1]["timeout_sec"]), 1100.0
+                )
+
+    def test_constraint_and_format_retries_share_two_attempts(self) -> None:
+        malformed = json.dumps(
+            {"type": "text", "part": {"text": "not JSON"}}
+        )
+        overlong_hypothesis = _proposal_value()
+        overlong_hypothesis["hypothesis"] = "x" * 1001
+        overlong_rationale = _proposal_value()
+        overlong_rationale["rationale"] = "x" * 8001
+        cases = (
+            (
+                _proposal_ndjson(json.dumps(overlong_hypothesis)),
+                _proposal_ndjson(json.dumps(overlong_rationale)),
+                ProposerConstraintRetryExhaustedError,
+                "FIELD_LENGTH_ERROR",
+            ),
+            (
+                malformed,
+                _proposal_ndjson(json.dumps(overlong_hypothesis)),
+                ProposerConstraintRetryExhaustedError,
+                "FORMAT_ERROR",
+            ),
+            (
+                _proposal_ndjson(json.dumps(overlong_hypothesis)),
+                malformed,
+                ProposerFormatRetryExhaustedError,
+                "FIELD_LENGTH_ERROR",
+            ),
+        )
+        for first, second, error_type, retry_trigger in cases:
+            with self.subTest(
+                error=error_type.__name__, trigger=retry_trigger
+            ), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = _config(root)
+                runner = FixedRunner(
+                    [
+                        CommandResult((), 0, first, ""),
+                        CommandResult((), 0, second, ""),
+                    ]
+                )
+                adapter = OpenCodeProposer(
+                    config,
+                    run_id="2" * 32,
+                    iteration_index=1,
+                    run_dir=root / "run",
+                    runner=runner,  # type: ignore[arg-type]
+                )
+                request = ProposalRequest(
+                    parent_candidate_hash=SEED_HASH,
+                    accepted_kernel=SEED,
+                    program_markdown="Only kernel.py.",
+                    environment={},
+                    accepted_case_p50_us={},
+                    recent_experiments=(),
+                    session_feedback=(),
+                )
+                with self.assertRaises(error_type):
+                    adapter.propose(request)
+                self.assertEqual(len(runner.argv), 2)
+                self.assertEqual(
+                    adapter.attempts[1]["retry_trigger"], retry_trigger
+                )
+
+        semantic = _proposal_value()
+        semantic["parent_candidate_hash"] = "0" * 64
+        overlong_with_empty_source = _proposal_value()
+        overlong_with_empty_source["hypothesis"] = "x" * 1001
+        overlong_with_empty_source["kernel_source"] = ""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = _config(root)
+            runner = FixedRunner(
+                [
+                    CommandResult(
+                        (),
+                        0,
+                        _proposal_ndjson(json.dumps(overlong_hypothesis)),
+                        "",
+                    ),
+                    CommandResult(
+                        (), 0, _proposal_ndjson(json.dumps(semantic)), ""
+                    ),
+                ]
+            )
+            adapter = OpenCodeProposer(
+                config,
+                run_id="3" * 32,
+                iteration_index=1,
+                run_dir=root / "run",
+                runner=runner,  # type: ignore[arg-type]
+            )
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                adapter.propose(request)
+            self.assertEqual(len(runner.argv), 2)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = _config(root)
+            runner = FixedRunner(
+                [
+                    CommandResult(
+                        (),
+                        0,
+                        _proposal_ndjson(
+                            json.dumps(overlong_with_empty_source)
+                        ),
+                        "",
+                    )
+                ]
+            )
+            adapter = OpenCodeProposer(
+                config,
+                run_id="4" * 32,
+                iteration_index=1,
+                run_dir=root / "run",
+                runner=runner,  # type: ignore[arg-type]
+            )
+            with self.assertRaisesRegex(ValueError, "kernel_source"):
+                adapter.propose(request)
+            self.assertEqual(len(runner.argv), 1)
+
     def test_format_retry_exhaustion_and_non_format_failures_do_not_retry(
         self,
     ) -> None:
@@ -1038,15 +1247,19 @@ class AdapterAndCacheTests(unittest.TestCase):
 
         semantic = _proposal_value()
         semantic["parent_candidate_hash"] = "0" * 64
+        unknown = _proposal_value()
+        unknown["unknown"] = True
+        empty_source = _proposal_value()
+        empty_source["kernel_source"] = ""
+        oversized_source = _proposal_value()
+        oversized_source["kernel_source"] = "x" * (256 * 1024 + 1)
         non_retry_outputs = (
             json.dumps({"type": "tool_use", "name": "bash"}),
             json.dumps({"type": "error", "message": "provider failed"}),
-            json.dumps(
-                {
-                    "type": "text",
-                    "part": {"text": json.dumps(semantic)},
-                }
-            ),
+            _proposal_ndjson(json.dumps(semantic)),
+            _proposal_ndjson(json.dumps(unknown)),
+            _proposal_ndjson(json.dumps(empty_source)),
+            _proposal_ndjson(json.dumps(oversized_source)),
         )
         for index, output in enumerate(non_retry_outputs, 1):
             with self.subTest(index=index), tempfile.TemporaryDirectory() as temporary:
@@ -1152,6 +1365,99 @@ class AdapterAndCacheTests(unittest.TestCase):
                     "001.retry-1.ndjson"
                 )
             )
+
+    def test_controller_audits_constraint_retry_without_gpu_work(
+        self,
+    ) -> None:
+        scenarios = ((False, "PROPOSAL_READY"), (True, "FAILED"))
+        for exhaust, expected_status in scenarios:
+            with self.subTest(
+                exhaust=exhaust
+            ), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = _config(root)
+                (config.repository_dir / "program.md").write_text(
+                    "Only kernel.py.", encoding="utf-8"
+                )
+                _baseline(config.state_dir)
+                source = _with_different_block_size_n(SEED)
+                first = _proposal_value(source=source)
+                first["hypothesis"] = "x" * 1001
+                second = _proposal_value(source=source)
+                if exhaust:
+                    second["rationale"] = "x" * 8001
+                runner = FixedRunner(
+                    [
+                        CommandResult(
+                            (), 0, _proposal_ndjson(json.dumps(first)), ""
+                        ),
+                        CommandResult(
+                            (), 0, _proposal_ndjson(json.dumps(second)), ""
+                        ),
+                    ]
+                )
+                evaluator = FakeEvaluator()
+                controller = ResearchController(
+                    config,
+                    evaluator=evaluator,
+                    proposer_factory=lambda run_id, index, run_dir: OpenCodeProposer(
+                        config,
+                        run_id=run_id,
+                        iteration_index=index,
+                        run_dir=run_dir,
+                        runner=runner,  # type: ignore[arg-type]
+                    ),
+                )
+                run_id = f"constraint-retry-{'fail' if exhaust else 'pass'}"
+                with ControllerStore(controller.controller_db) as store:
+                    store.create_run(
+                        run_id=run_id,
+                        deadline_epoch=time.time() + 3600,
+                        config=config.redacted_dict(),
+                        initial_best_hash=SEED_HASH,
+                    )
+                result = controller._run_loop(run_id, proposal_only=True)
+                self.assertEqual(result["status"], expected_status)
+                self.assertEqual(evaluator.stages, [])
+                with ControllerStore(controller.controller_db) as store:
+                    iteration = store.latest_iteration(run_id)
+                    events = store.list_events(run_id)
+                retry = next(
+                    event
+                    for event in events
+                    if event["event"] == "PROPOSER_CONSTRAINT_RETRY"
+                )
+                self.assertFalse(
+                    any(
+                        event["event"] == "PROPOSER_FORMAT_RETRY"
+                        for event in events
+                    )
+                )
+                attempts = retry["details"]["attempts"]
+                self.assertEqual(len(attempts), 2)
+                self.assertEqual(
+                    attempts[0]["error_code"], "HYPOTHESIS_TOO_LONG"
+                )
+                self.assertNotIn("x" * 1001, json.dumps(retry["details"]))
+                self.assertEqual(
+                    attempts[1]["retry_trigger"], "FIELD_LENGTH_ERROR"
+                )
+                self.assertEqual(iteration["experiment_ids"], {})
+                if exhaust:
+                    self.assertEqual(result["consecutive_failures"], 1)
+                    self.assertEqual(result["valid_candidates"], 0)
+                    self.assertIsNone(iteration["candidate_hash"])
+                    self.assertIn(
+                        "PROPOSER_CONSTRAINT_RETRY_EXHAUSTED",
+                        iteration["error"],
+                    )
+                else:
+                    expected_hash = hashlib.sha256(
+                        source.encode("utf-8")
+                    ).hexdigest()
+                    self.assertEqual(result["valid_candidates"], 1)
+                    self.assertEqual(iteration["candidate_hash"], expected_hash)
+                    self.assertEqual(iteration["outcome"], "PROPOSAL_VALIDATED")
 
     def test_output_token_limit_counts_once_and_never_calls_evaluator(
         self,
@@ -1551,6 +1857,9 @@ class FeedbackAndStatusTests(unittest.TestCase):
             self.assertNotIn('"recent_experiments"', prompt)
             self.assertNotIn("rationale-must-not-enter-feedback", prompt)
             self.assertNotIn("latency_samples_us", prompt)
+            self.assertIn("one concise sentence", prompt)
+            self.assertIn("Target at most 600 characters", prompt)
+            self.assertIn("Target rationale at most 6000 characters", prompt)
             with ControllerStore(controller.controller_db) as store:
                 with self.assertRaisesRegex(ValueError, "non-negative"):
                     store.list_recent_scientific_iterations(

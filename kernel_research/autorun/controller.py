@@ -897,9 +897,18 @@ class ResearchController:
                     store.update_iteration(iteration_id, **updated_paths)
                     attempts = getattr(proposer, "attempts", ())
                     if len(attempts) > 1:
+                        retry_trigger = attempts[1].get("retry_trigger")
+                        retry_event = {
+                            "FORMAT_ERROR": "PROPOSER_FORMAT_RETRY",
+                            "FIELD_LENGTH_ERROR": "PROPOSER_CONSTRAINT_RETRY",
+                        }.get(retry_trigger)
+                        if retry_event is None:
+                            raise AssertionError(
+                                "proposal retry is missing a known trigger"
+                            )
                         store.add_event(
                             run_id,
-                            "PROPOSER_FORMAT_RETRY",
+                            retry_event,
                             {"attempts": list(attempts)},
                             iteration_id=iteration_id,
                         )

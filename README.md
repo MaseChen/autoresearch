@@ -192,6 +192,15 @@ never applies to fenced/length-truncated output, and records every successful
 repair as `PROPOSER_TRANSPORT_RECOVERY` while retaining the original NDJSON.
 All other JSON errors keep the existing one-retry, fail-closed behavior.
 
+Proposal metadata keeps strict decoded-character limits: `hypothesis` is at
+most 1,000 characters and `rationale` at most 8,000. The proposer prompt targets
+a one-sentence hypothesis of at most 600 characters and rationale of at most
+6,000, leaving deliberate headroom. Only a structurally valid Proposal that
+exceeds either hard limit receives one fresh compliance retry; it shares the
+same two-attempt, 20-minute and 2 MiB budgets with JSON-format retry. The host
+does not truncate or move fields, and audits the retry as
+`PROPOSER_CONSTRAINT_RETRY`.
+
 The example deliberately sets `acknowledge_gpu_passthrough_risk` to `false`.
 `doctor` remains available, but candidate GPU evaluation through `start` or
 `resume` is blocked until it is explicitly set to `true` for an authorized
@@ -399,9 +408,9 @@ of at least 85% for `autorun/controller.py`, `autorun/runtime.py`, and
 `autorun/store.py`. The server-administration release also requires at least
 85% branch-aware coverage for `autorun/admin.py`.
 
-The 384K/max release with bounded JSON-tail recovery passes 141 Python 3.10
-tests with 83.84% total branch-aware coverage; the controller, runtime, store
-and admin modules remain above their required gates.
+The 384K/max release with bounded JSON-tail and Proposal-length recovery passes
+145 Python 3.10+ tests with 83.92% total branch-aware coverage; the controller,
+runtime, store and admin modules remain above their required gates.
 
 ## Current limitations
 

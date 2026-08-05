@@ -5,12 +5,17 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from ..constants import MAX_PROPOSER_FORMAT_ATTEMPTS
-from .errors import ControlledRuntimeError
+from ..constants import (
+    MAX_PROPOSER_ATTEMPTS,
+    PROPOSAL_HYPOTHESIS_RETRY_TARGET,
+    PROPOSAL_RATIONALE_RETRY_TARGET,
+)
+from .errors import ControlledRuntimeError, ProposalFieldLengthError
 from .model_catalog import resolve_opencode_model
 from .models import ControllerConfig, ProposalV1
 from .proposal import (
     ProposalRequest,
+    ProposerConstraintRetryExhaustedError,
     ProposalFormatError,
     Proposer,
     ProposerFormatRetryExhaustedError,
@@ -79,8 +84,9 @@ class OpenCodeProposer(Proposer):
         deadline = time.monotonic() + self.config.proposer_timeout_sec
         remaining_output = self.config.proposer_max_output_bytes
         prior_format_error: str | None = None
+        prior_constraint_error: ProposalFieldLengthError | None = None
 
-        for attempt in range(1, MAX_PROPOSER_FORMAT_ATTEMPTS + 1):
+        for attempt in range(1, MAX_PROPOSER_ATTEMPTS + 1):
             remaining_time = deadline - time.monotonic()
             if remaining_time <= 0:
                 raise ControlledRuntimeError(
@@ -93,7 +99,9 @@ class OpenCodeProposer(Proposer):
                     "output byte limit"
                 )
             prompt = base_prompt
+            retry_trigger: str | None = None
             if prior_format_error is not None:
+                retry_trigger = "FORMAT_ERROR"
                 prompt += (
                     "\n\nFORMAT RETRY: The previous response was rejected "
                     "because it was not syntactically valid ProposalV1 JSON "
@@ -103,6 +111,25 @@ class OpenCodeProposer(Proposer):
                     "summary, or other text. The first byte must be '{'. "
                     "Close kernel_source and the outer object exactly once; "
                     "the final byte must be '}' with nothing after it."
+                )
+            elif prior_constraint_error is not None:
+                retry_trigger = "FIELD_LENGTH_ERROR"
+                prompt += (
+                    "\n\nCOMPLIANCE RETRY: The previous ProposalV1 was "
+                    "structurally valid, but "
+                    f"{prior_constraint_error.field} contained "
+                    f"{prior_constraint_error.actual_length} characters and "
+                    f"exceeded its hard limit of "
+                    f"{prior_constraint_error.hard_limit}. Regenerate the "
+                    "complete ProposalV1 from scratch. Write hypothesis as "
+                    "one sentence of at most "
+                    f"{PROPOSAL_HYPOTHESIS_RETRY_TARGET} characters and keep "
+                    "rationale at most "
+                    f"{PROPOSAL_RATIONALE_RETRY_TARGET} characters. Move "
+                    "evidence and "
+                    "implementation detail into rationale. Do not truncate "
+                    "or omit kernel_source, and do not return the previous "
+                    "response."
                 )
             (
                 self.prompt_path,
@@ -116,6 +143,8 @@ class OpenCodeProposer(Proposer):
                 "stderr_path": str(self.stderr_path),
                 "outcome": "RUNNING",
             }
+            if retry_trigger is not None:
+                attempt_record["retry_trigger"] = retry_trigger
             self.attempts.append(attempt_record)
             self._write_prompt(prompt)
             argv = proposer_argv(
@@ -170,11 +199,36 @@ class OpenCodeProposer(Proposer):
                 attempt_record["outcome"] = "FORMAT_ERROR"
                 attempt_record["error"] = str(exc)
                 prior_format_error = str(exc)
-                if attempt == MAX_PROPOSER_FORMAT_ATTEMPTS:
+                if attempt == MAX_PROPOSER_ATTEMPTS:
                     raise ProposerFormatRetryExhaustedError(
                         "PROPOSER_FORMAT_RETRY_EXHAUSTED: OpenCode produced "
-                        "invalid ProposalV1 JSON in both bounded attempts"
+                        "invalid ProposalV1 JSON after exhausting its two "
+                        "bounded attempts"
                     ) from exc
+                prior_constraint_error = None
+                continue
+            except ProposalFieldLengthError as exc:
+                attempt_record.update(
+                    {
+                        "outcome": "CONSTRAINT_ERROR",
+                        "error": str(exc),
+                        "error_code": exc.error_code,
+                        "field": exc.field,
+                        "actual_length": exc.actual_length,
+                        "hard_limit": exc.hard_limit,
+                        "retry_target": exc.retry_target,
+                    }
+                )
+                if attempt == MAX_PROPOSER_ATTEMPTS:
+                    raise ProposerConstraintRetryExhaustedError(
+                        "PROPOSER_CONSTRAINT_RETRY_EXHAUSTED: OpenCode "
+                        "produced an overlong ProposalV1 field after "
+                        f"exhausting its two bounded attempts "
+                        f"(field={exc.field}, actual={exc.actual_length}, "
+                        f"hard_limit={exc.hard_limit})"
+                    ) from exc
+                prior_constraint_error = exc
+                prior_format_error = None
                 continue
             except ValueError as exc:
                 attempt_record["outcome"] = "PROPOSAL_ERROR"

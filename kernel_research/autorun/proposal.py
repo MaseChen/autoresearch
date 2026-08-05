@@ -8,7 +8,14 @@ import json
 import re
 from typing import Any, Iterable, Mapping
 
-from ..constants import MAX_FEEDBACK_CANDIDATES, OPENCODE_PROPOSER_STEPS
+from ..constants import (
+    MAX_FEEDBACK_CANDIDATES,
+    OPENCODE_PROPOSER_STEPS,
+    PROPOSAL_HYPOTHESIS_HARD_LIMIT,
+    PROPOSAL_HYPOTHESIS_RETRY_TARGET,
+    PROPOSAL_RATIONALE_HARD_LIMIT,
+    PROPOSAL_RATIONALE_RETRY_TARGET,
+)
 from .models import ProposalV1
 
 
@@ -36,6 +43,10 @@ class ProposalFormatError(ValueError):
 
 class ProposerFormatRetryExhaustedError(ValueError):
     """Both strictly bounded Proposal JSON attempts failed syntax parsing."""
+
+
+class ProposerConstraintRetryExhaustedError(ValueError):
+    """The bounded retry ended with another overlong Proposal field."""
 
 
 APPEND_FINAL_OBJECT_BRACE = "APPEND_FINAL_OBJECT_BRACE"
@@ -341,10 +352,19 @@ def build_prompt(request: ProposalRequest) -> str:
         "The first byte must be '{'. Close kernel_source and the outer JSON "
         "object exactly once; the final byte must be '}' with nothing after it.",
         "The only fields are schema_version=1, parent_candidate_hash, "
-        "hypothesis (1..1000 characters), rationale (1..8000 characters), "
+        f"hypothesis (1..{PROPOSAL_HYPOTHESIS_HARD_LIMIT} characters), "
+        f"rationale (1..{PROPOSAL_RATIONALE_HARD_LIMIT} characters), "
         "and kernel_source (the complete non-empty file, at most 256 KiB).",
-        "Make one falsifiable optimization hypothesis. Preserve correctness, "
-        "the run_kernel interface, and the int64-safe B expert base.",
+        "Write hypothesis as one concise sentence containing exactly one "
+        "falsifiable optimization change, its expected performance effect, "
+        "and a brief mechanism. Target at most "
+        f"{PROPOSAL_HYPOTHESIS_RETRY_TARGET} characters. Do not aim near the "
+        f"{PROPOSAL_HYPOTHESIS_HARD_LIMIT}-character hard limit.",
+        "Put historical evidence, implementation details, affected cases, "
+        "correctness constraints, and acceptance reasoning in rationale. "
+        f"Target rationale at most {PROPOSAL_RATIONALE_RETRY_TARGET} "
+        "characters. Preserve correctness, the run_kernel interface, and "
+        "the int64-safe B expert base.",
         "Do not request tools and do not describe edits: kernel_source must be "
         "the complete replacement kernel.py.",
         "Proposal metadata:\n"

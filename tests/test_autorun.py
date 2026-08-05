@@ -17,6 +17,7 @@ import unittest
 from unittest import mock
 
 from kernel_research.autorun.controller import ResearchController, gpu_lock
+from kernel_research.autorun.errors import ProposalFieldLengthError
 from kernel_research.autorun.model_catalog import (
     DEFAULT_OPENCODE_MODEL,
     OPENCODE_MODEL_SPECS,
@@ -38,7 +39,13 @@ from kernel_research.autorun.runtime import (
 )
 from kernel_research.autorun.store import ControllerStore
 from kernel_research.cli import main as evaluator_main
-from kernel_research.constants import OPENCODE_PROPOSER_STEPS
+from kernel_research.constants import (
+    OPENCODE_PROPOSER_STEPS,
+    PROPOSAL_HYPOTHESIS_HARD_LIMIT,
+    PROPOSAL_HYPOTHESIS_RETRY_TARGET,
+    PROPOSAL_RATIONALE_HARD_LIMIT,
+    PROPOSAL_RATIONALE_RETRY_TARGET,
+)
 from kernel_research.evaluation import record_external_result
 from kernel_research.history import HistoryStore
 from kernel_research.research_policy import validate_research_candidate
@@ -245,6 +252,57 @@ class ProposalTests(unittest.TestCase):
             _proposal_value(), expected_parent_hash=SEED_HASH
         )
         self.assertNotIn("kernel_source", proposal.to_dict(include_source=False))
+
+    def test_proposal_length_boundaries_use_decoded_unicode_characters(
+        self,
+    ) -> None:
+        boundaries = (
+            (
+                "hypothesis",
+                (600, 999, PROPOSAL_HYPOTHESIS_HARD_LIMIT),
+                PROPOSAL_HYPOTHESIS_HARD_LIMIT,
+                PROPOSAL_HYPOTHESIS_RETRY_TARGET,
+            ),
+            (
+                "rationale",
+                (6000, 7999, PROPOSAL_RATIONALE_HARD_LIMIT),
+                PROPOSAL_RATIONALE_HARD_LIMIT,
+                PROPOSAL_RATIONALE_RETRY_TARGET,
+            ),
+        )
+        for field, accepted_lengths, hard_limit, retry_target in boundaries:
+            for length in accepted_lengths:
+                with self.subTest(field=field, length=length):
+                    value = _proposal_value()
+                    value[field] = "界" * length
+                    proposal = ProposalV1.from_value(
+                        value, expected_parent_hash=SEED_HASH
+                    )
+                    self.assertEqual(len(getattr(proposal, field)), length)
+
+            value = _proposal_value()
+            value[field] = "界" * (hard_limit + 1)
+            with self.subTest(field=field, length=hard_limit + 1):
+                with self.assertRaises(ProposalFieldLengthError) as raised:
+                    ProposalV1.from_value(
+                        value, expected_parent_hash=SEED_HASH
+                    )
+                error = raised.exception
+                self.assertEqual(error.field, field)
+                self.assertEqual(error.actual_length, hard_limit + 1)
+                self.assertEqual(error.hard_limit, hard_limit)
+                self.assertEqual(error.retry_target, retry_target)
+                self.assertEqual(error.error_code, f"{field.upper()}_TOO_LONG")
+
+        escaped_hypothesis = ("界\n\"" * 333) + "x"
+        self.assertEqual(len(escaped_hypothesis), 1000)
+        value = _proposal_value()
+        value["hypothesis"] = escaped_hypothesis
+        proposal = parse_proposal_text(
+            json.dumps(value, ensure_ascii=True),
+            expected_parent_hash=SEED_HASH,
+        )
+        self.assertEqual(proposal.hypothesis, escaped_hypothesis)
 
 
 class PolicyTests(unittest.TestCase):

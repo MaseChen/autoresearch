@@ -110,12 +110,26 @@ is then evaluated
 in order: policy → smoke → quick → full primary → unchanged-hash full
 confirmation. Only host-validated results are copied into the trusted history.
 
+Write `hypothesis` as one concise sentence containing one falsifiable change,
+its expected performance effect and a brief mechanism. Its hard limit remains
+1000 decoded Unicode characters, but target at most 600 and do not aim near the
+hard limit. Put historical evidence, implementation detail, affected cases,
+correctness constraints and acceptance reasoning in `rationale`; its hard limit
+is 8000 characters and its target is at most 6000.
+
 Bare JSON that terminates with `reason=stop` may receive one of two audited,
 transport-only recoveries before schema validation: append one missing final
 outer `}`, or remove one exact trailing `"}` after an otherwise complete
 object. No Proposal field or kernel-source character may change. Fenced JSON,
 length-truncated output and every other syntax error remain fail-closed; raw
 NDJSON is always preserved.
+
+A structurally valid Proposal whose `hypothesis` or `rationale` exceeds its hard
+limit receives at most one fresh, full-Proposal compliance retry. That retry and
+the JSON-format retry share the same two-attempt, time and output budgets. The
+controller never truncates, moves or rewrites fields, and every compliance retry
+is recorded as `PROPOSER_CONSTRAINT_RETRY`. All other schema errors fail without
+a retry.
 
 The autonomous controller never writes the repository's `kernel.py` and never
 runs Git commit or push. A promoted staged artifact remains in runtime state

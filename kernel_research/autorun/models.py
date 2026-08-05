@@ -22,7 +22,12 @@ from ..constants import (
     MAX_PROPOSER_CPUS,
     MAX_PROPOSER_OUTPUT_BYTES,
     MAX_PROPOSER_TIMEOUT_SEC,
+    PROPOSAL_HYPOTHESIS_HARD_LIMIT,
+    PROPOSAL_HYPOTHESIS_RETRY_TARGET,
+    PROPOSAL_RATIONALE_HARD_LIMIT,
+    PROPOSAL_RATIONALE_RETRY_TARGET,
 )
+from .errors import ProposalFieldLengthError
 from .model_catalog import DEFAULT_OPENCODE_MODEL, resolve_opencode_model
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -145,16 +150,26 @@ class ProposalV1:
         source = obj["kernel_source"]
         if not isinstance(hypothesis, str) or not hypothesis.strip():
             raise ValueError("hypothesis must be a non-empty string")
-        if len(hypothesis) > 1000:
-            raise ValueError("hypothesis exceeds 1000 characters")
         if not isinstance(rationale, str) or not rationale.strip():
             raise ValueError("rationale must be a non-empty string")
-        if len(rationale) > 8000:
-            raise ValueError("rationale exceeds 8000 characters")
         if not isinstance(source, str) or not source.strip():
             raise ValueError("kernel_source must be a non-empty string")
         if len(source.encode("utf-8")) > 256 * 1024:
             raise ValueError("kernel_source exceeds 256 KiB")
+        if len(hypothesis) > PROPOSAL_HYPOTHESIS_HARD_LIMIT:
+            raise ProposalFieldLengthError(
+                field="hypothesis",
+                actual_length=len(hypothesis),
+                hard_limit=PROPOSAL_HYPOTHESIS_HARD_LIMIT,
+                retry_target=PROPOSAL_HYPOTHESIS_RETRY_TARGET,
+            )
+        if len(rationale) > PROPOSAL_RATIONALE_HARD_LIMIT:
+            raise ProposalFieldLengthError(
+                field="rationale",
+                actual_length=len(rationale),
+                hard_limit=PROPOSAL_RATIONALE_HARD_LIMIT,
+                retry_target=PROPOSAL_RATIONALE_RETRY_TARGET,
+            )
         return cls(1, parent, hypothesis, rationale, source)
 
     def to_dict(self, *, include_source: bool = True) -> dict[str, Any]:
