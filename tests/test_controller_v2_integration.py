@@ -17,6 +17,7 @@ from kernel_research.autorun.proposal import ProposalRequest, Proposer, build_pr
 from kernel_research.autorun.store import ControllerStore
 from kernel_research.constants import MAX_FEEDBACK_CANDIDATES
 from kernel_research.history import HistoryStore
+from kernel_research.history import _V2_TO_V3_MIGRATION_CAPABILITY
 from kernel_research.platform.artifacts import ArtifactId
 from kernel_research.platform.canonical import canonical_sha256
 from kernel_research.platform.identity import (
@@ -40,6 +41,8 @@ from test_autorun import (
     _proposal_value,
     _with_different_block_size_n,
 )
+from test_history_v3 import SOURCE as LEGACY_SOURCE
+from test_history_v3 import _create_legacy_database
 
 
 class AuditedStaticProposer(Proposer):
@@ -107,6 +110,57 @@ class EchoFaultEvaluator(FakeEvaluator):
 
 
 class ControllerV2IntegrationTests(unittest.TestCase):
+    def test_migrated_legacy_source_is_reused_without_metadata_rebinding(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = _config(root)
+            generated = _create_legacy_database(config.state_dir, 2)
+            generated.replace(config.state_dir / "history.sqlite3")
+
+            with HistoryStore(
+                config.state_dir / "history.sqlite3",
+                state_dir=config.state_dir,
+                _v2_to_v3_migration_capability=(
+                    _V2_TO_V3_MIGRATION_CAPABILITY
+                ),
+            ) as history:
+                record = history.list_experiments()[0]
+                artifact_before = history.get_candidate_artifact(
+                    record.artifact_id
+                )
+
+            self.assertIsNotNone(artifact_before)
+            assert artifact_before is not None
+            self.assertEqual(
+                artifact_before.artifact_kind, "legacy_source_v1"
+            )
+            self.assertEqual(
+                artifact_before.manifest["format"],
+                "legacy_python_source_v1",
+            )
+
+            materialized = ResearchController(
+                config
+            )._experiment_source_path(record)
+            self.assertEqual(
+                materialized.read_text(encoding="utf-8"), LEGACY_SOURCE
+            )
+            self.assertEqual(
+                materialized,
+                config.state_dir / record.artifact_path,
+            )
+
+            with HistoryStore(
+                config.state_dir / "history.sqlite3",
+                state_dir=config.state_dir,
+            ) as history:
+                artifact_after = history.get_candidate_artifact(
+                    record.artifact_id
+                )
+            self.assertEqual(artifact_after, artifact_before)
+
     def _controller(
         self,
         root: Path,

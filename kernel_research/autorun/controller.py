@@ -2251,20 +2251,52 @@ class ResearchController:
         """Return a verified, immutable source object usable by the evaluator."""
 
         source = self._experiment_source(record)
+        source_bytes = source.encode("utf-8")
         source_artifact_id = str(ArtifactId.source_sha256(record.candidate_hash))
+        current_manifest = {
+            "format": "python_source_v1",
+            "entrypoint": "kernel.py",
+            "media_type": "text/x-python",
+        }
         with HistoryStore(
             self.history_db, state_dir=self.config.state_dir
         ) as history:
-            artifact = history.store_candidate_artifact(
-                source,
-                artifact_id=source_artifact_id,
-                artifact_kind="source_text_v1",
-                manifest={
-                    "format": "python_source_v1",
-                    "entrypoint": "kernel.py",
-                    "media_type": "text/x-python",
-                },
-            )
+            artifact = history.get_candidate_artifact(source_artifact_id)
+            if artifact is None:
+                artifact = history.store_candidate_artifact(
+                    source_bytes,
+                    artifact_id=source_artifact_id,
+                    artifact_kind="source_text_v1",
+                    manifest=current_manifest,
+                )
+            else:
+                legacy_manifest = {
+                    "format": "legacy_python_source_v1",
+                    "entrypoint": Path(artifact.object_path).name,
+                }
+                supported_metadata = (
+                    artifact.artifact_kind == "source_text_v1"
+                    and artifact.manifest == current_manifest
+                ) or (
+                    artifact.artifact_kind == "legacy_source_v1"
+                    and artifact.manifest == legacy_manifest
+                )
+                if not supported_metadata:
+                    raise ControllerDataIntegrityError(
+                        "baseline source artifact metadata is unsupported"
+                    )
+                try:
+                    persisted = history.read_candidate_artifact(
+                        source_artifact_id
+                    )
+                except (KeyError, RuntimeError) as exc:
+                    raise ControllerDataIntegrityError(
+                        "baseline source artifact is missing or corrupted"
+                    ) from exc
+                if persisted != source_bytes:
+                    raise ControllerDataIntegrityError(
+                        "baseline source artifact bytes differ from History"
+                    )
         path = self.config.state_dir / artifact.object_path
         if not path.is_file() or _sha256_file(path) != record.candidate_hash:
             raise ControllerDataIntegrityError(
