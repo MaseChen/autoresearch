@@ -8,7 +8,7 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import sqlite3
 import subprocess
@@ -261,7 +261,7 @@ class DockerEvaluator:
             "operator_abi_binding": None,
             "toolchain_binding": None,
             "evaluator_image": self.config.evaluator_image,
-            "framework_commit": self.config.expected_git_commit,
+            "framework_commit": self.config.resolved_framework_git_commit,
             "build_flags": [],
         }
         if request_identity is not None:
@@ -302,7 +302,7 @@ class DockerEvaluator:
         cache_dir = (
             self.config.evaluator_cache_dir
             / evaluator_digest
-            / self.config.expected_git_commit
+            / self.config.resolved_framework_git_commit
             / cache_leaf
         )
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -316,7 +316,7 @@ class DockerEvaluator:
             self.controller_dir
             / "cache-manifests"
             / evaluator_digest
-            / self.config.expected_git_commit
+            / self.config.resolved_framework_git_commit
         )
         manifest_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = manifest_dir / f"{cache_leaf}.json"
@@ -625,6 +625,87 @@ def _run_git_blob(repository: Path, revision_path: str) -> bytes:
             + completed.stderr.decode("utf-8", errors="replace").strip()
         )
     return completed.stdout
+
+
+def _git_framework_files(
+    repository: Path, commit: str
+) -> dict[PurePosixPath, tuple[bytes, int]]:
+    """Read the exact committed evaluator framework without a worktree.
+
+    The deployment commit may advance when an operator adopts a new
+    ``kernel.py``.  Evaluator code remains sourced from the independently
+    frozen framework commit, so candidate bytes can never silently relabel the
+    execution environment.
+    """
+
+    listed = subprocess.run(
+        [
+            "git",
+            "ls-tree",
+            "-r",
+            "-z",
+            "--full-tree",
+            commit,
+            "--",
+            "kernel_research",
+        ],
+        cwd=repository,
+        check=False,
+        capture_output=True,
+        timeout=30,
+        shell=False,
+    )
+    if listed.returncode != 0:
+        raise ControlledRuntimeError(
+            "could not read frozen framework Git tree: "
+            + listed.stderr.decode("utf-8", errors="replace").strip()
+        )
+    files: dict[PurePosixPath, tuple[bytes, int]] = {}
+    for encoded in listed.stdout.split(b"\0"):
+        if not encoded:
+            continue
+        try:
+            metadata, raw_path = encoded.split(b"\t", 1)
+            mode, object_type, object_id = metadata.decode("ascii").split()
+            path_text = raw_path.decode("utf-8")
+        except (UnicodeError, ValueError) as exc:
+            raise ControlledRuntimeError(
+                "frozen framework Git tree contains an invalid entry"
+            ) from exc
+        path = PurePosixPath(path_text)
+        if (
+            object_type != "blob"
+            or mode not in {"100644", "100755"}
+            or path.is_absolute()
+            or not path.parts
+            or path.parts[0] != "kernel_research"
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            raise ControlledRuntimeError(
+                "frozen framework Git tree contains an unsafe entry"
+            )
+        relative = PurePosixPath(*path.parts[1:])
+        if not relative.parts or relative in files:
+            raise ControlledRuntimeError(
+                "frozen framework Git tree contains a duplicate entry"
+            )
+        blob = subprocess.run(
+            ["git", "cat-file", "blob", object_id],
+            cwd=repository,
+            check=False,
+            capture_output=True,
+            timeout=30,
+            shell=False,
+        )
+        if blob.returncode != 0:
+            raise ControlledRuntimeError(
+                "could not read frozen framework Git blob: "
+                + blob.stderr.decode("utf-8", errors="replace").strip()
+            )
+        files[relative] = (blob.stdout, 0o755 if mode == "100755" else 0o644)
+    if not files:
+        raise ControlledRuntimeError("frozen framework Git tree is empty")
+    return files
 
 
 def _sqlite_backup(source: Path, destination: Path) -> None:
@@ -1802,7 +1883,7 @@ class ResearchController:
             },
             framework={
                 "binding_basis": "verified-git-commit",
-                "git_commit": self.config.expected_git_commit,
+                "git_commit": self.config.resolved_framework_git_commit,
             },
             operator_abi={
                 "operator_profile": namespace.operator.to_dict(),
@@ -2312,6 +2393,7 @@ class ResearchController:
             raise ControlledRuntimeError(
                 f"repository HEAD {commit} does not match expected commit"
             )
+        framework_commit = self.config.resolved_framework_git_commit
         status = _run_git(
             self.config.repository_dir,
             "status",
@@ -2334,8 +2416,27 @@ class ResearchController:
                 "accepted history baseline is not allowed by this controller run"
             )
         artifact = self._experiment_source_path(best)
+        framework_check = subprocess.run(
+            [
+                "git",
+                "merge-base",
+                "--is-ancestor",
+                framework_commit,
+                commit,
+            ],
+            cwd=self.config.repository_dir,
+            check=False,
+            capture_output=True,
+            timeout=10,
+            shell=False,
+        )
+        if framework_check.returncode != 0:
+            raise ControlledRuntimeError(
+                "framework_git_commit is not an ancestor of the deployment commit"
+            )
         return {
             "git_commit": commit,
+            "framework_git_commit": framework_commit,
             "kernel_hash": kernel_hash,
             "baseline_experiment_id": best.id,
             "baseline_hash": best.candidate_hash,
@@ -2343,31 +2444,55 @@ class ResearchController:
         }
 
     def _prepare_framework(self) -> Path:
-        """Create a commit-keyed evaluator view containing only trusted code."""
+        """Materialize the exact evaluator framework commit from Git blobs."""
 
+        framework_commit = self.config.resolved_framework_git_commit
         destination = (
             self.config.controller_dir
             / "framework"
-            / self.config.expected_git_commit
+            / framework_commit
         )
         package_destination = destination / "kernel_research"
+        expected = _git_framework_files(
+            self.config.repository_dir, framework_commit
+        )
         if package_destination.exists():
-            if _tree_hash(package_destination) != _tree_hash(
-                self.config.repository_dir / "kernel_research"
+            if (
+                destination.is_symlink()
+                or package_destination.is_symlink()
+                or any(
+                    path.is_symlink()
+                    for path in package_destination.rglob("*")
+                )
             ):
+                raise ControlledRuntimeError(
+                    "trusted framework snapshot contains a symlink"
+                )
+            actual = {
+                PurePosixPath(path.relative_to(package_destination).as_posix()): (
+                    path.read_bytes(),
+                    path.stat().st_mode & 0o777,
+                )
+                for path in package_destination.rglob("*")
+                if path.is_file()
+                and "__pycache__" not in path.parts
+                and path.suffix not in {".pyc", ".pyo"}
+            }
+            if actual != expected:
                 raise ControlledRuntimeError(
                     "trusted framework snapshot hash mismatch"
                 )
             return destination
-        source = self.config.repository_dir / "kernel_research"
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.parent / f".tmp-{uuid.uuid4().hex}"
         try:
-            shutil.copytree(
-                source,
-                temporary / "kernel_research",
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
-            )
+            package_temporary = temporary / "kernel_research"
+            package_temporary.mkdir(parents=True)
+            for relative, (content, mode) in expected.items():
+                target = package_temporary.joinpath(*relative.parts)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+                target.chmod(mode)
             os.replace(temporary, destination)
         finally:
             if temporary.exists():

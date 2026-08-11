@@ -335,6 +335,32 @@ class PolicyTests(unittest.TestCase):
 
 
 class ConfigAndArgvTests(unittest.TestCase):
+    def test_framework_commit_is_explicit_and_defaults_to_deployment_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            value = _config(root).redacted_dict()
+            value["gpu_devices"] = [
+                "/dev/mxcd",
+                "/dev/dri/card2",
+                "/dev/dri/renderD129",
+            ]
+            path = root / "framework-config.json"
+
+            expected = value["expected_git_commit"]
+            self.assertEqual(value["framework_git_commit"], expected)
+            value.pop("framework_git_commit")
+            path.write_text(json.dumps(value), encoding="utf-8")
+            loaded = ControllerConfig.load(path)
+            self.assertEqual(loaded.resolved_framework_git_commit, expected)
+            self.assertEqual(
+                loaded.redacted_dict()["framework_git_commit"], expected
+            )
+
+            value["framework_git_commit"] = "not-a-commit"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "framework_git_commit"):
+                ControllerConfig.load(path)
+
     def test_model_catalog_pins_max_reasoning_and_384k_by_model(self) -> None:
         for qualified_id, spec in OPENCODE_MODEL_SPECS.items():
             with self.subTest(qualified_id=qualified_id):
@@ -499,8 +525,44 @@ class ConfigAndArgvTests(unittest.TestCase):
                 self.assertIn(f"{device}:{device}", joined)
             self.assertIn("/candidate/kernel.py", joined)
             self.assertIn("/baseline/kernel.py", joined)
+            self.assertIn(
+                str(
+                    config.controller_dir
+                    / "framework"
+                    / config.resolved_framework_git_commit
+                ),
+                joined,
+            )
             self.assertNotIn("--request-identity", eval_args)
             self.assertNotIn(EVALUATOR_REQUEST_IDENTITY_CONTAINER_PATH, joined)
+
+            frozen_framework = "7" * 40
+            split_identity_config = replace(
+                config,
+                framework_git_commit=frozen_framework,
+            )
+            split_identity_args = evaluator_argv(
+                split_identity_config,
+                name="eval-split-identity",
+                run_id="run",
+                candidate_path=candidate,
+                suite="full",
+                baseline_path=baseline,
+                cache_dir=config.evaluator_cache_dir / "candidate-split",
+            )
+            split_joined = " ".join(split_identity_args)
+            self.assertIn(
+                str(config.controller_dir / "framework" / frozen_framework),
+                split_joined,
+            )
+            self.assertNotIn(
+                str(
+                    config.controller_dir
+                    / "framework"
+                    / config.expected_git_commit
+                ),
+                split_joined,
+            )
 
             request_identity = root / "request-identity.json"
             request_identity.write_text("{}", encoding="utf-8")

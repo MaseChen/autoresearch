@@ -68,6 +68,7 @@ CONFIG_FIELDS = frozenset(
         "gpu_devices",
         "evaluator_cache_dir",
         "expected_git_commit",
+        "framework_git_commit",
         "expected_kernel_hash",
         "opencode_model",
         "max_candidates",
@@ -272,6 +273,7 @@ class ControllerConfig:
     evaluator_cache_dir: Path
     expected_git_commit: str
     expected_kernel_hash: str
+    framework_git_commit: str | None = None
     opencode_model: str = DEFAULT_OPENCODE_MODEL
     max_candidates: int = 5
     max_hours: float = 6.0
@@ -335,6 +337,14 @@ class ControllerConfig:
             or not re.fullmatch(r"[0-9a-f]{40}", commit)
         ):
             raise ValueError("expected_git_commit must be 40 lowercase hex digits")
+        framework_commit = obj.get("framework_git_commit", commit)
+        if (
+            not isinstance(framework_commit, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", framework_commit)
+        ):
+            raise ValueError(
+                "framework_git_commit must be 40 lowercase hex digits"
+            )
         kernel_hash = obj["expected_kernel_hash"]
         if not isinstance(kernel_hash, str) or not SHA256_RE.fullmatch(kernel_hash):
             raise ValueError("expected_kernel_hash must be 64 lowercase hex digits")
@@ -495,6 +505,7 @@ class ControllerConfig:
             evaluator_cache_dir=evaluator_cache_dir,
             expected_git_commit=commit,
             expected_kernel_hash=kernel_hash,
+            framework_git_commit=framework_commit,
             opencode_model=opencode_model,
             max_candidates=max_candidates,
             max_hours=max_hours,
@@ -568,6 +579,17 @@ class ControllerConfig:
                         )
         return errors
 
+    @property
+    def resolved_framework_git_commit(self) -> str:
+        """Return the evaluator-framework revision for old in-memory fixtures.
+
+        Persisted configs always normalize this field during ``load``.  The
+        fallback keeps direct ``ControllerConfig`` construction compatible
+        while still making serialized snapshots explicit.
+        """
+
+        return self.framework_git_commit or self.expected_git_commit
+
     def redacted_dict(self) -> dict[str, Any]:
         return {
             "schema_version": 1,
@@ -582,6 +604,7 @@ class ControllerConfig:
             "gpu_devices": [str(path) for path in self.gpu_devices],
             "evaluator_cache_dir": str(self.evaluator_cache_dir),
             "expected_git_commit": self.expected_git_commit,
+            "framework_git_commit": self.resolved_framework_git_commit,
             "expected_kernel_hash": self.expected_kernel_hash,
             "opencode_model": self.opencode_model,
             "max_candidates": self.max_candidates,

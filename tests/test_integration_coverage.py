@@ -559,9 +559,61 @@ class ControllerPublicSurfaceTests(unittest.TestCase):
             package = config.repository_dir / "kernel_research"
             package.mkdir()
             (package / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+            environment = {
+                **dict(os.environ),
+                "GIT_AUTHOR_NAME": "Fixture",
+                "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+                "GIT_COMMITTER_NAME": "Fixture",
+                "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+            }
+            subprocess.run(
+                ["git", "init"],
+                cwd=config.repository_dir,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "add", "."], cwd=config.repository_dir, check=True
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "framework fixture"],
+                cwd=config.repository_dir,
+                check=True,
+                capture_output=True,
+                env=environment,
+            )
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=config.repository_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            config = replace(
+                config,
+                expected_git_commit=commit,
+                framework_git_commit=commit,
+            )
+            controller = ResearchController(config, evaluator=FakeEvaluator())
             controller._prepare_framework()
             (package / "module.py").write_text("VALUE = 2\n", encoding="utf-8")
+            # Working-tree drift cannot change the commit-materialized view.
+            controller._prepare_framework()
+            snapshot = (
+                config.controller_dir
+                / "framework"
+                / commit
+                / "kernel_research"
+                / "module.py"
+            )
+            self.assertEqual(snapshot.read_text(encoding="utf-8"), "VALUE = 1\n")
+            snapshot.write_text("tampered\n", encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "snapshot hash"):
+                controller._prepare_framework()
+            snapshot_root = snapshot.parents[1]
+            shutil.rmtree(snapshot_root)
+            snapshot_root.symlink_to(config.repository_dir, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, "contains a symlink"):
                 controller._prepare_framework()
 
             empty_state = root / "missing-state"

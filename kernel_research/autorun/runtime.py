@@ -327,7 +327,7 @@ def _evaluator_base_argv(
     framework_dir = (
         config.controller_dir
         / "framework"
-        / config.expected_git_commit
+        / config.resolved_framework_git_commit
     )
     argv = _common_security_argv(
         config,

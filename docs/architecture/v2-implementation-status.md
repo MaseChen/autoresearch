@@ -30,6 +30,10 @@ autonomous evaluation or promotion.
   beside the three durable runtime contexts. Its namespace, parent baseline,
   primary/confirmation relation, execution environment, authoritative bundle
   CAS, Git commit, and `kernel.py` bytes must continue to agree at Run start.
+- The full deployment commit and evaluator framework commit are independent
+  pins. Adoption accepts only one direct `kernel.py`-only Git commit and keeps
+  the evaluator framework, cache, and execution-environment binding frozen to
+  the exact framework Git tree materialized inside the container.
 - OJ feedback and profiling evidence are advisory. Neither may change local
   promotion, Campaign lineage, Git, or a deployment pin.
 - Benchmark execution consumes its ledger-derived frozen feedback snapshot;

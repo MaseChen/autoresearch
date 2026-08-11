@@ -108,19 +108,17 @@ class CurrentEvidenceFixture:
         self.manifest = manifest
         self.candidate = candidate
         self.candidate_hash = admin._sha256_bytes(candidate.encode("utf-8"))
-        (fixture.repo / "kernel.py").write_text(candidate, encoding="utf-8")
-        _command("git", "add", "kernel.py", cwd=fixture.repo)
-        _command("git", "commit", "-m", "current V2 candidate", cwd=fixture.repo)
-        self.commit = _command("git", "rev-parse", "HEAD", cwd=fixture.repo)
 
         configured = ControllerConfig.load(manifest.pro_config)
-        target_config = replace(
-            configured,
-            expected_git_commit=self.commit,
-            expected_kernel_hash=self.candidate_hash,
-        )
+        self.framework_commit = configured.resolved_framework_git_commit
+        target_config = configured
+        if not target_environment_matches:
+            target_config = replace(
+                configured,
+                framework_git_commit="f" * 40,
+            )
         resolved_environment = ResearchController(
-            target_config if target_environment_matches else configured
+            target_config
         )._resolved_execution_environment(CURRENT_RESEARCH_NAMESPACE)
         environment = (
             resolved_environment
@@ -311,6 +309,13 @@ class CurrentEvidenceFixture:
                     metadata={"baseline_experiment_id": baseline.id},
                 )
 
+        # Match the production order: immutable evidence exists before the
+        # operator reviews and commits the candidate source.
+        (fixture.repo / "kernel.py").write_text(candidate, encoding="utf-8")
+        _command("git", "add", "kernel.py", cwd=fixture.repo)
+        _command("git", "commit", "-m", "current V2 candidate", cwd=fixture.repo)
+        self.commit = _command("git", "rev-parse", "HEAD", cwd=fixture.repo)
+
 
 class AdminDeploymentV2Tests(unittest.TestCase):
     def test_current_adoption_writes_atomic_pin_and_ordinary_run_uses_current(self) -> None:
@@ -337,6 +342,16 @@ class AdminDeploymentV2Tests(unittest.TestCase):
             self.assertEqual(pin.baseline_ref.source, "deployment")
             self.assertEqual(pin.baseline_ref.artifact_id.value, evidence.bundle_id)
             self.assertEqual(report["evidence_digest"], pin.evidence_digest)
+            self.assertEqual(
+                report["framework_git_commit"], evidence.framework_commit
+            )
+            self.assertEqual(report["deployment_git_commit"], evidence.commit)
+            adopted_config = ControllerConfig.load(manifest.pro_config)
+            self.assertEqual(
+                adopted_config.resolved_framework_git_commit,
+                evidence.framework_commit,
+            )
+            self.assertEqual(adopted_config.expected_git_commit, evidence.commit)
             self.assertEqual(
                 admin._identity(manifest)["baseline_experiment_id"],
                 evidence.confirmation.id,
@@ -366,6 +381,43 @@ class AdminDeploymentV2Tests(unittest.TestCase):
             self.assertTrue(run["workflow_snapshot"]["scientifically_comparable"])
             self.assertNotIn("compatibility_mode", run["workflow_snapshot"])
 
+    def test_adoption_commit_bridge_rejects_extra_paths_and_extra_commits(self) -> None:
+        for mutation, message in (
+            ("extra-path", "change exactly kernel.py"),
+            ("extra-commit", "directly descend"),
+        ):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                fixture = AdminFixture(Path(temporary))
+                manifest = fixture.bootstrap()
+                evidence = CurrentEvidenceFixture(
+                    fixture,
+                    manifest,
+                    SEED + f"\n# bridge {mutation}\n",
+                )
+                (fixture.repo / "README.md").write_text(
+                    f"{mutation}\n", encoding="utf-8"
+                )
+                _command("git", "add", "README.md", cwd=fixture.repo)
+                if mutation == "extra-path":
+                    _command(
+                        "git", "commit", "--amend", "--no-edit", cwd=fixture.repo
+                    )
+                else:
+                    _command(
+                        "git", "commit", "-m", "unrelated follow-up", cwd=fixture.repo
+                    )
+                with (
+                    mock.patch.object(
+                        admin, "_active_containers", return_value=[]
+                    ),
+                    self.assertRaisesRegex(ControlledRuntimeError, message),
+                ):
+                    admin.adopt_baseline(
+                        manifest,
+                        candidate_hash=evidence.candidate_hash,
+                        namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                        doctor=False,
+                    )
     def test_bundle_object_is_authoritative_and_corruption_fails_closed(self) -> None:
         for failure in ("missing", "tampered", "source-tampered"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
@@ -817,7 +869,7 @@ class AdminDeploymentV2Tests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "symlink"):
                 DeploymentBaselinePin.load(linked_dir / "pin.json")
 
-    def test_resolved_pin_cannot_be_rebound_to_another_git_commit(self) -> None:
+    def test_resolved_pin_rebinds_deployment_but_not_framework_commit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = AdminFixture(Path(temporary))
             manifest = fixture.bootstrap()
@@ -833,27 +885,41 @@ class AdminDeploymentV2Tests(unittest.TestCase):
                     namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
                     doctor=False,
                 )
-            before = {
-                path: path.read_bytes()
-                for path in (
-                    *admin._config_targets(manifest).values(),
-                    fixture.runtime / DEPLOYMENT_BASELINE_FILENAME,
-                )
-            }
+            old_config = ControllerConfig.load(manifest.pro_config)
+            old_pin = DeploymentBaselinePin.load(
+                fixture.runtime / DEPLOYMENT_BASELINE_FILENAME
+            )
             (fixture.repo / "README.md").write_text(
                 "new framework commit\n", encoding="utf-8"
             )
             _command("git", "add", "README.md", cwd=fixture.repo)
             _command("git", "commit", "-m", "framework change", cwd=fixture.repo)
-            with (
-                mock.patch.object(admin, "_active_containers", return_value=[]),
-                self.assertRaisesRegex(
-                    ControlledRuntimeError, "bound to another Git commit"
-                ),
+            new_commit = _command("git", "rev-parse", "HEAD", cwd=fixture.repo)
+            with self.assertRaisesRegex(
+                ControlledRuntimeError, "cannot cross a framework commit"
+            ):
+                admin._deployment_pin_for_commit(
+                    old_config,
+                    git_commit=new_commit,
+                    framework_git_commit=new_commit,
+                )
+            with mock.patch.object(
+                admin, "_active_containers", return_value=[]
             ):
                 admin.sync(manifest)
+            updated = ControllerConfig.load(manifest.pro_config)
+            updated_pin = DeploymentBaselinePin.load(
+                fixture.runtime / DEPLOYMENT_BASELINE_FILENAME
+            )
+            self.assertEqual(updated.expected_git_commit, new_commit)
             self.assertEqual(
-                {path: path.read_bytes() for path in before}, before
+                updated.resolved_framework_git_commit,
+                old_config.resolved_framework_git_commit,
+            )
+            self.assertEqual(updated_pin.git_commit, new_commit)
+            self.assertEqual(
+                updated_pin.execution_environment,
+                old_pin.execution_environment,
             )
 
     def test_current_start_rereads_authoritative_bundle_after_adoption(self) -> None:

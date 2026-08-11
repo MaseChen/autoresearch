@@ -199,11 +199,13 @@ class AdminManifestAndSyncTests(unittest.TestCase):
             )
             environment = manifest.environment_file.read_text(encoding="utf-8")
             self.assertIn("AUTORESEARCH_FLASH_CONFIG", environment)
+            self.assertIn("AUTORESEARCH_FRAMEWORK_COMMIT", environment)
             self.assertIn(fixture.commit, environment)
             self.assertNotIn("test-secret", environment)
             base = json.loads(manifest.base_config.read_text(encoding="utf-8"))
             self.assertNotIn("opencode_model", base)
             self.assertEqual(base["expected_kernel_hash"], SEED_HASH)
+            self.assertEqual(base["framework_git_commit"], fixture.commit)
 
     def test_bootstrap_adopts_current_commit_but_not_a_new_kernel_pin(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -217,6 +219,7 @@ class AdminManifestAndSyncTests(unittest.TestCase):
             manifest = fixture.bootstrap()
             pro = json.loads(manifest.pro_config.read_text(encoding="utf-8"))
             self.assertEqual(pro["expected_git_commit"], current)
+            self.assertEqual(pro["framework_git_commit"], old_commit)
             self.assertEqual(pro["expected_kernel_hash"], SEED_HASH)
 
     def test_bootstrap_rejects_an_unproven_kernel_pin(self) -> None:

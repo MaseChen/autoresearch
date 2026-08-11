@@ -26,8 +26,9 @@ kernel-autoresearch-admin verify \
 ```
 
 `bootstrap` 固定当前 branch、tracking upstream 和宿主 Python 绝对路径；生成
-的 manifest、五份配置与 `env.sh` 均为 0600。`env.sh` 只含路径、commit 和
-kernel hash，不包含 API key 内容。以后每个 tmux pane 只需要 source 该文件。
+的 manifest、五份配置与 `env.sh` 均为 0600。`env.sh` 只含路径、deployment
+commit、framework commit 和 kernel hash，不包含 API key 内容。以后每个 tmux
+pane 只需要 source 该文件。
 
 ## 三档验证
 
@@ -60,6 +61,12 @@ upstream 漂移都会立即拒绝。它执行固定 argv 的 fetch，证明目�
 后代后才 `merge --ff-only`。Git 前进后由更新后源码的子进程执行 CPU 测试、
 editable host 安装、临时配置同步和可选 doctor，最后才原子发布配置组。
 
+部署 Git 身份与 evaluator framework 身份永久分离。`expected_git_commit` 固定
+完整工作树和 `kernel.py`；`framework_git_commit` 固定由 evaluator 容器实际挂载
+的 `kernel_research` Git tree、编译缓存和 ExecutionEnvironment。普通 update/sync
+保留现有 framework commit，不会把控制面更新伪装成新的科学环境。框架升级必须
+另行重新验证 baseline，不得通过修改配置字段绕过。
+
 如果 post-update 失败，工具不会 reset 或回滚 Git；正式配置仍固定旧 commit，
 因此研究控制器会安全拒绝启动。修正临时问题后重复同一 `update` 即可继续完成。
 
@@ -72,12 +79,19 @@ editable host 安装、临时配置同步和可选 doctor，最后才原子发�
 kernel-autoresearch-admin adopt-baseline \
   --manifest "$AUTORESEARCH_MANIFEST" \
   --candidate-hash 64位小写SHA256 \
+  --namespace 精确的内置namespace_id \
   --doctor
 ```
 
 只有当参数 hash 同时匹配工作树、HEAD Git blob、accepted C500 full
 confirmation 和内容寻址 artifact 时才会发布新 pin。未确认实验、缺失 artifact、
 dirty tree、活动 run 或任一 hash 不一致都会失败关闭。
+
+首次采纳还要求候选 commit 是当前已部署 commit 的唯一直接子提交，并且 Git diff
+只包含 `kernel.py`。候选 commit 不改变 `framework_git_commit`；evaluator framework
+从该冻结 commit 的 Git blobs 重新物化，而不是从当前工作树复制。这使实际顺序
+`评测未提交候选 → 人工审查 → 仅提交 kernel.py → adopt` 保持同一科学环境，同时
+继续拒绝夹带框架、配置或文档改动的候选提交。
 
 ## Flash 384K/max canary
 
