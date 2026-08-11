@@ -87,6 +87,31 @@ kernel-autoresearch-admin adopt-baseline \
 confirmation 和内容寻址 artifact 时才会发布新 pin。未确认实验、缺失 artifact、
 dirty tree、活动 run 或任一 hash 不一致都会失败关闭。
 
+从 V2 迁移到 V3 的旧实验没有可证明的执行环境，身份会保持
+`LEGACY_UNKNOWN`。这类实验不能直接作为 V2 baseline 采纳依据，也不得通过修改
+数据库或配置给旧证据补标签。若一个旧环境下已确认的候选仍要采纳，先在候选尚未
+写入 Git 时执行一次受信重新资格评测：
+
+```bash
+kernel-autoresearch-admin requalify-adoption \
+  --manifest "$AUTORESEARCH_MANIFEST" \
+  --candidate-hash 64位小写SHA256 \
+  --candidate-path /绝对路径/候选.py \
+  --namespace 精确的legacy内置namespace_id
+```
+
+该命令先在当前固定镜像、framework、toolchain、ABI 和 build flags 下，将已部署
+baseline 与自身做一次完整 full 评测，生成新的 resolved baseline seed；随后让指定
+候选依次经过 POLICY、SMOKE、QUICK、FULL_PRIMARY 和 CONFIRMATION。它持有 Admin
+maintenance fence 与 GPU1 锁，拒绝活动 Campaign/Run、候选字节漂移和非 Docker
+Evaluator。每次外部动作均先写 Controller intent；GPU 启动后没有完整持久证据时
+结果固定为 `UNKNOWN_OUTCOME`，不会自动重试。已有完整证据时只按 UID 幂等对账。
+
+`requalify-adoption` 只生成新证据，不修改 `kernel.py`、Git、正式配置或
+`deployment-baseline.json`。只有它返回 `PROMOTED`、新 Run checkpoint 已验证且人工
+审阅仍通过后，才把同一候选字节提交为唯一的 `kernel.py` 变更，再运行上面的严格
+`adopt-baseline`。旧 primary/confirmation 继续只读保留，不会被重写。
+
 首次采纳还要求候选 commit 是当前已部署 commit 的唯一直接子提交，并且 Git diff
 只包含 `kernel.py`。候选 commit 不改变 `framework_git_commit`；evaluator framework
 从该冻结 commit 的 Git blobs 重新物化，而不是从当前工作树复制。这使实际顺序
