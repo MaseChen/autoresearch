@@ -607,6 +607,9 @@ class ControllerPublicSurfaceTests(unittest.TestCase):
                 / "module.py"
             )
             self.assertEqual(snapshot.read_text(encoding="utf-8"), "VALUE = 1\n")
+            snapshot.chmod(0o664)
+            controller._prepare_framework()
+            self.assertEqual(snapshot.stat().st_mode & 0o777, 0o644)
             snapshot.write_text("tampered\n", encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "snapshot hash"):
                 controller._prepare_framework()

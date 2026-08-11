@@ -2479,9 +2479,39 @@ class ResearchController:
                 and path.suffix not in {".pyc", ".pyo"}
             }
             if actual != expected:
-                raise ControlledRuntimeError(
-                    "trusted framework snapshot hash mismatch"
-                )
+                actual_bytes = {
+                    relative: content
+                    for relative, (content, _mode) in actual.items()
+                }
+                expected_bytes = {
+                    relative: content
+                    for relative, (content, _mode) in expected.items()
+                }
+                if actual_bytes != expected_bytes:
+                    raise ControlledRuntimeError(
+                        "trusted framework snapshot hash mismatch"
+                    )
+                # Snapshots created before framework/deployment identity was
+                # split used copytree(), which preserved host group-write
+                # bits even though Git records only executable vs regular.
+                # Normalize only after proving the complete path set and all
+                # file bytes exactly match the frozen Git tree.
+                for relative, (_content, mode) in expected.items():
+                    package_destination.joinpath(*relative.parts).chmod(mode)
+                normalized = {
+                    relative: (
+                        content,
+                        package_destination.joinpath(
+                            *relative.parts
+                        ).stat().st_mode
+                        & 0o777,
+                    )
+                    for relative, (content, _mode) in actual.items()
+                }
+                if normalized != expected:
+                    raise ControlledRuntimeError(
+                        "trusted framework snapshot mode normalization failed"
+                    )
             return destination
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.parent / f".tmp-{uuid.uuid4().hex}"
