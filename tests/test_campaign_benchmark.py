@@ -57,7 +57,7 @@ def write_runtime_config(root: Path) -> Path:
         "state_dir": str(root / "state"),
         "controller_dir": str(root / "controller"),
         "checkpoint_dir": str(root / "checkpoints"),
-        "docker_binary": "/bin/true",
+        "docker_binary": str(Path("/bin/true").resolve()),
         "proposer_image": "local/proposer@sha256:" + "1" * 64,
         "evaluator_image": "local/evaluator@sha256:" + "2" * 64,
         "deepseek_key_file": str(root / "secret"),
