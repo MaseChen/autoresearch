@@ -9,6 +9,7 @@ import json
 import math
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -24,7 +25,11 @@ from ..constants import (
     MAX_EVALUATOR_TIMEOUT_SEC,
     MAX_FEEDBACK_CANDIDATES,
 )
-from ..evaluation import record_external_result, record_noise_external_result
+from ..evaluation import (
+    record_baseline_qualification_result,
+    record_external_result,
+    record_noise_external_result,
+)
 from ..history import ExperimentRecord, HistoryStore
 from ..noise import SQLITE_MAX_INT, trusted_noise_baseline_source
 from ..platform.artifacts import ArtifactId
@@ -579,6 +584,37 @@ def _atomic_write_bytes(path: Path, content: bytes) -> None:
             temporary_path.unlink()
 
 
+def _strict_json_object_bytes(
+    raw: bytes, *, label: str, max_bytes: int
+) -> dict[str, Any]:
+    if len(raw) > max_bytes:
+        raise ValueError(f"{label} exceeds its size limit")
+
+    def reject_constant(value: str) -> Any:
+        raise ValueError(f"non-finite JSON number is forbidden: {value}")
+
+    def strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, child in pairs:
+            if key in value:
+                raise ValueError(f"{label} contains duplicate object keys")
+            value[key] = child
+        return value
+
+    try:
+        decoded = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=strict_object,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise ValueError(f"{label} is not strict UTF-8 JSON") from exc
+    if type(decoded) is not dict:
+        raise ValueError(f"{label} is not a JSON object")
+    canonical_json_text(decoded)
+    return decoded
+
+
 def _tree_hash(path: Path) -> str:
     digest = hashlib.sha256()
     for item in sorted(
@@ -1017,7 +1053,7 @@ class ResearchController:
             if (
                 isinstance(guarded_snapshot, Mapping)
                 and guarded_snapshot.get("evidence_operation")
-                == "noise-collect"
+                in {"noise-collect", "adoption-requalification"}
             ):
                 # This is deliberately the last trusted-host check before
                 # DockerEvaluator invokes runner.run.  The enclosing canonical
@@ -4416,6 +4452,505 @@ class ResearchController:
                     history_cutoff=history_cutoff,
                 )
             return self._run_loop(run_id, proposal_only=proposal_only)
+
+    def requalify_candidate_for_adoption(
+        self,
+        *,
+        candidate_path: str | os.PathLike[str],
+        candidate_hash: str,
+        namespace_id: str,
+    ) -> dict[str, Any]:
+        """Create fresh resolved evidence without changing deployment state.
+
+        This one-cycle migration bridge first measures the exact accepted
+        legacy baseline against itself.  Only that identical-artifact full
+        result may seed a resolved BaselineRef.  The supplied candidate then
+        traverses the normal POLICY/SMOKE/QUICK/FULL/CONFIRMATION workflow.
+        Git and the deployment pin remain administrator-owned and untouched.
+        """
+
+        if namespace_id != LEGACY_RESEARCH_NAMESPACE.namespace_id:
+            raise ValueError(
+                "initial requalification is restricted to the exact LEGACY namespace"
+            )
+        if (
+            not isinstance(candidate_hash, str)
+            or re.fullmatch(r"[0-9a-f]{64}", candidate_hash) is None
+        ):
+            raise ValueError("candidate_hash must be 64 lowercase hex digits")
+        if not isinstance(self.evaluator, DockerEvaluator):
+            raise ControlledRuntimeError(
+                "production requalification requires DockerEvaluator"
+            )
+        self.evaluator.before_container_start = self._before_docker_container
+        supplied = Path(candidate_path)
+        if supplied.is_symlink():
+            raise ValueError("requalification candidate must not be a symlink")
+        try:
+            supplied = supplied.resolve(strict=True)
+            candidate_bytes = supplied.read_bytes()
+            candidate_source = candidate_bytes.decode("utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ValueError(
+                f"requalification candidate cannot be read exactly: {exc}"
+            ) from exc
+        if not supplied.is_file():
+            raise ValueError("requalification candidate must be a regular file")
+        if hashlib.sha256(candidate_bytes).hexdigest() != candidate_hash:
+            raise ValueError("candidate_path bytes do not match candidate_hash")
+
+        target = _trusted_target(LEGACY_RESEARCH_NAMESPACE)
+        policy = target.validate_candidate(candidate_source)
+        if not policy.valid or policy.sha256 != candidate_hash:
+            raise ValueError("requalification candidate fails trusted policy")
+
+        self._prepare_runtime_dirs()
+        self._require_gpu_risk_acknowledgement()
+        with gpu_lock(self.config.controller_dir / "gpu1.lock"):
+            self._assert_noise_resource_available()
+            pin = self._deployment_pin()
+            if pin is None:
+                raise ControlledRuntimeError(
+                    "requalification requires an explicit legacy deployment pin"
+                )
+            if pin.execution_environment.is_resolved:
+                raise ControlledRuntimeError(
+                    "deployment baseline is already resolved; requalification is unnecessary"
+                )
+            preflight = self.doctor(run_id="preflight")
+            if preflight["status"] != "SUCCESS":
+                raise ControlledRuntimeError(
+                    "requalification preflight failed: "
+                    + "; ".join(preflight["errors"])
+                )
+            baseline = self._best()
+            legacy_ref = pin.baseline_ref
+            if legacy_ref.execution_environment.is_resolved:
+                raise ControllerDataIntegrityError(
+                    "legacy requalification parent unexpectedly has resolved evidence"
+                )
+            runtime_environment = self._resolved_execution_environment(
+                LEGACY_RESEARCH_NAMESPACE
+            )
+            qualification_uid = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    "kernel-research/baseline-qualification/v1/"
+                    f"{baseline.experiment_uid}/{runtime_environment.digest}/"
+                    f"{candidate_hash}",
+                )
+            )
+            qualification_ref = BaselineRef.create(
+                namespace=LEGACY_RESEARCH_NAMESPACE,
+                artifact_id=baseline.artifact_id,
+                source="deployment",
+                revision=f"qualification-{qualification_uid}",
+                execution_environment=runtime_environment,
+            )
+            bundle = CandidateBundle.single_file(
+                content=candidate_source,
+                path=target.language.entrypoint,
+                limits=target.language.bundle_limits,
+            )
+            operation_uid = uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "kernel-research/adoption-requalification/v1/"
+                f"{qualification_uid}/{bundle.artifact_id}",
+            )
+            run_id = "requal-" + operation_uid.hex
+            with ControllerStore(self.controller_db) as active_store:
+                active_rows = active_store.connection.execute(
+                    "SELECT id FROM runs WHERE status = 'RUNNING' AND id != ?",
+                    (run_id,),
+                ).fetchall()
+                try:
+                    existing_run = active_store.get_run(run_id)
+                except ValueError:
+                    existing_run = None
+            if active_rows:
+                raise ControlledRuntimeError(
+                    "requalification is forbidden while another Run is active"
+                )
+            history_cutoff = (
+                self._history_cutoff()
+                if existing_run is None
+                else existing_run["history_cutoff"]
+            )
+            snapshot = self._workflow_snapshot(
+                baseline=baseline,
+                history_cutoff=history_cutoff,
+                namespace=LEGACY_RESEARCH_NAMESPACE,
+                baseline_ref=qualification_ref,
+            )
+            material = dict(snapshot)
+            material.pop("snapshot_digest", None)
+            material.update(
+                {
+                    "evidence_operation": "adoption-requalification",
+                    "legacy_parent_experiment_uid": baseline.experiment_uid,
+                    "qualification_experiment_uid": qualification_uid,
+                    "candidate_artifact_id": str(bundle.artifact_id),
+                }
+            )
+            snapshot = {
+                **material,
+                "snapshot_digest": canonical_sha256(material),
+            }
+            run_dir = self.config.controller_dir / "runs" / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            run_dir.chmod(0o700)
+            candidate_dir = run_dir / "candidates"
+            candidate_dir.mkdir(parents=True, exist_ok=True)
+            candidate_file = candidate_dir / f"{candidate_hash}.py"
+            if candidate_file.exists():
+                if (
+                    candidate_file.is_symlink()
+                    or candidate_file.read_bytes() != candidate_bytes
+                ):
+                    raise ControllerDataIntegrityError(
+                        "persisted requalification candidate differs from the request"
+                    )
+            else:
+                candidate_file.write_bytes(candidate_bytes)
+                candidate_file.chmod(0o600)
+            with HistoryStore(
+                self.history_db, state_dir=self.config.state_dir
+            ) as history:
+                history.store_candidate_bundle(bundle)
+                history.store_candidate_artifact(
+                    candidate_source,
+                    artifact_id=str(ArtifactId.source_sha256(candidate_hash)),
+                    artifact_kind="source_text_v1",
+                    manifest={
+                        "format": "python_source_v1",
+                        "entrypoint": target.language.entrypoint,
+                        "media_type": "text/x-python",
+                    },
+                )
+
+            qualification_identity = ExperimentIdentity.create(
+                experiment_uid=qualification_uid,
+                namespace=LEGACY_RESEARCH_NAMESPACE,
+                mode="DISCOVERY",
+                candidate_artifact_id=baseline.artifact_id,
+                parent_artifact_id=baseline.artifact_id,
+                baseline=qualification_ref,
+                execution_environment=runtime_environment,
+                stage="baseline_qualification",
+                suite="full",
+                replicate_kind="qualification",
+                replicate_index=0,
+                proposer_profile=None,
+                prompt_digest=None,
+                feedback_digest=None,
+                history_cutoff=history_cutoff,
+                run_id=run_id,
+                iteration=1,
+            )
+            with ControllerStore(self.controller_db) as store:
+                try:
+                    run = store.get_run(run_id)
+                except ValueError:
+                    run = store.create_run(
+                        run_id=run_id,
+                        deadline_epoch=self.clock()
+                        + self.config.max_hours * 3600,
+                        config=self.config.redacted_dict(),
+                        initial_best_hash=baseline.candidate_hash,
+                        preflight=preflight,
+                        namespace_id=LEGACY_RESEARCH_NAMESPACE.namespace_id,
+                        resolved_config_digest=str(snapshot["snapshot_digest"]),
+                        workflow_snapshot=snapshot,
+                        baseline_ref=qualification_ref.to_dict(),
+                        history_cutoff=history_cutoff,
+                    )
+                if run["workflow_snapshot"] != snapshot:
+                    raise ControllerDataIntegrityError(
+                        "requalification run identity conflicts with its deterministic ID"
+                    )
+                iterations = store.list_iterations(run_id)
+                iteration = (
+                    store.create_iteration(run_id, 1, baseline.candidate_hash)
+                    if not iterations
+                    else iterations[0]
+                )
+                if len(iterations) > 1:
+                    raise ControllerDataIntegrityError(
+                        "requalification run has multiple iterations"
+                    )
+                attempts = [
+                    item
+                    for item in store.list_evaluation_attempts(
+                        run_id, iteration_id=int(iteration["id"])
+                    )
+                    if item["stage"] == "baseline_qualification"
+                ]
+                if len(attempts) > 1:
+                    raise ControllerDataIntegrityError(
+                        "requalification has multiple baseline qualification attempts"
+                    )
+                attempt = (
+                    attempts[0]
+                    if attempts
+                    else store.create_evaluation_attempt(
+                        experiment_uid=qualification_uid,
+                        run_id=run_id,
+                        iteration_id=int(iteration["id"]),
+                        stage="baseline_qualification",
+                        suite="full",
+                        replicate_kind="qualification",
+                        replicate_index=0,
+                        candidate_artifact_id=baseline.artifact_id,
+                        parent_artifact_id=baseline.artifact_id,
+                        baseline_ref=qualification_ref.to_dict(),
+                        condition_digest=qualification_identity.condition_digest,
+                        request=qualification_identity.to_dict(),
+                    )
+                )
+                with HistoryStore(
+                    self.history_db, state_dir=self.config.state_dir
+                ) as history:
+                    qualification = history.get_experiment_by_uid(
+                        qualification_uid
+                    )
+                raw_path = (
+                    run_dir / "results" / "001" / "baseline_qualification.validated.json"
+                )
+                if qualification is None:
+                    baseline_path = self._experiment_source_path(baseline)
+                    baseline_source = baseline_path.read_text(encoding="utf-8")
+                    launched = False
+                    if attempt["status"] == "RUNNING":
+                        if not raw_path.is_file():
+                            store.finish_evaluation_attempt(
+                                qualification_uid,
+                                status="UNKNOWN_OUTCOME",
+                                result={},
+                                error=(
+                                    "controller restarted without complete baseline "
+                                    "qualification evidence"
+                                ),
+                            )
+                            raise UnknownGPUOutcome(
+                                "baseline qualification has an unknown GPU outcome"
+                            )
+                        try:
+                            raw = _strict_json_object_bytes(
+                                raw_path.read_bytes(),
+                                label="persisted qualification evidence",
+                                max_bytes=EVALUATOR_OUTPUT_LIMIT_BYTES,
+                            )
+                        except (
+                            OSError,
+                            ValueError,
+                            TypeError,
+                            RecursionError,
+                        ) as exc:
+                            store.finish_evaluation_attempt(
+                                qualification_uid,
+                                status="UNKNOWN_OUTCOME",
+                                result={},
+                                error=f"persisted qualification evidence is invalid: {exc}",
+                            )
+                            raise UnknownGPUOutcome(
+                                "baseline qualification has invalid persisted GPU evidence"
+                            ) from exc
+                    elif attempt["status"] == "PENDING":
+                        if raw_path.exists():
+                            raise ControllerDataIntegrityError(
+                                "pending baseline qualification has unexpected "
+                                "persisted evidence"
+                            )
+                        store.start_evaluation_attempt(qualification_uid)
+                        launched = True
+                        try:
+                            raw = self.evaluator.evaluate(
+                                candidate_path=baseline_path,
+                                suite="full",
+                                baseline_path=baseline_path,
+                                run_id=run_id,
+                                iteration_index=1,
+                                stage="baseline_qualification",
+                                request_identity=qualification_identity.to_dict(),
+                            )
+                        except BaseException as exc:
+                            store.finish_evaluation_attempt(
+                                qualification_uid,
+                                status="UNKNOWN_OUTCOME",
+                                result={},
+                                error=(
+                                    f"{type(exc).__name__}: qualification action "
+                                    "interrupted"
+                                ),
+                            )
+                            raise
+                    elif attempt["status"] == "UNKNOWN_OUTCOME":
+                        raise UnknownGPUOutcome(
+                            "baseline qualification has an unknown GPU outcome "
+                            "and cannot restart"
+                        )
+                    else:
+                        raise ControllerDataIntegrityError(
+                            "terminal qualification attempt has no History evidence"
+                        )
+                    try:
+                        self._validate_evaluator_echo(
+                            raw,
+                            identity=qualification_identity,
+                            candidate_hash=baseline.candidate_hash,
+                            suite="full",
+                            baseline_hash=baseline.candidate_hash,
+                            backend=target.device.evaluator_backend(),
+                        )
+                    except Exception as exc:
+                        store.finish_evaluation_attempt(
+                            qualification_uid,
+                            status="UNKNOWN_OUTCOME",
+                            result=dict(raw),
+                            error=f"qualification evaluator echo is invalid: {exc}",
+                        )
+                        raise UnknownGPUOutcome(
+                            "baseline qualification returned untrusted GPU evidence"
+                        ) from exc
+                    if launched:
+                        try:
+                            encoded = (
+                                json.dumps(
+                                    raw,
+                                    sort_keys=True,
+                                    ensure_ascii=False,
+                                    indent=2,
+                                    allow_nan=False,
+                                )
+                                + "\n"
+                            ).encode("utf-8")
+                            _atomic_write_bytes(raw_path, encoded)
+                        except (OSError, TypeError, ValueError) as exc:
+                            store.finish_evaluation_attempt(
+                                qualification_uid,
+                                status="UNKNOWN_OUTCOME",
+                                result={},
+                                error=(
+                                    "qualification evidence could not be persisted: "
+                                    f"{exc}"
+                                ),
+                            )
+                            raise UnknownGPUOutcome(
+                                "baseline qualification evidence is not durable"
+                            ) from exc
+                    try:
+                        qualification = record_baseline_qualification_result(
+                            candidate_source=baseline_source,
+                            result=raw,
+                            state_dir=self.config.state_dir,
+                            note=f"requalification:{run_id}:baseline",
+                            identity=qualification_identity,
+                            baseline_experiment_id=baseline.id,
+                            git_revision=self.config.expected_git_commit[:12],
+                        )
+                    except Exception as exc:
+                        store.finish_evaluation_attempt(
+                            qualification_uid,
+                            status="FAILED",
+                            result=dict(raw),
+                            error=f"qualification evidence could not be recorded: {exc}",
+                        )
+                        raise ControllerDataIntegrityError(
+                            "trusted baseline qualification evidence could not be "
+                            "recorded"
+                        ) from exc
+                if qualification is None:  # pragma: no cover
+                    raise ControllerDataIntegrityError(
+                        "baseline qualification record disappeared"
+                    )
+                self._validate_uid_reconciliation(
+                    persisted=qualification,
+                    identity=qualification_identity,
+                    attempt=attempt,
+                    candidate_hash=baseline.candidate_hash,
+                    backend=target.device.evaluator_backend(),
+                    suite="full",
+                    stage="baseline_qualification",
+                )
+                if attempt["status"] == "PENDING":
+                    store.start_evaluation_attempt(qualification_uid)
+                current_attempt = store.get_evaluation_attempt_by_uid(
+                    qualification_uid
+                )
+                if current_attempt is not None and current_attempt["status"] == "RUNNING":
+                    store.finish_evaluation_attempt(
+                        qualification_uid,
+                        status="SUCCEEDED",
+                        result=dict(qualification.result),
+                        error=qualification.error_summary,
+                    )
+                store.link_history_experiment(
+                    qualification_uid, qualification.id
+                )
+                if (
+                    qualification.status != "SUCCESS"
+                    or not qualification.promotable
+                    or qualification.artifact_id != baseline.artifact_id
+                    or qualification.result.get("promotion", {}).get("phase")
+                    != "baseline"
+                ):
+                    store.update_run_with_event(
+                        run_id,
+                        "RUN_FINISHED",
+                        {"reason": "baseline qualification failed"},
+                        status="FAILED",
+                        stop_reason="baseline qualification failed",
+                    )
+                    raise ControlledRuntimeError(
+                        "baseline qualification did not produce eligible evidence"
+                    )
+                iteration = store.get_iteration(int(iteration["id"]))
+                experiment_ids = dict(iteration.get("experiment_ids") or {})
+                experiment_ids["baseline_qualification"] = qualification.id
+                if not iteration.get("candidate_hash"):
+                    store.update_iteration_with_event(
+                        int(iteration["id"]),
+                        "BASELINE_QUALIFIED",
+                        {
+                            "experiment_id": qualification.id,
+                            "experiment_uid": qualification.experiment_uid,
+                        },
+                        experiment_ids=experiment_ids,
+                    )
+                    iteration = store.accept_candidate(
+                        int(iteration["id"]),
+                        candidate_hash=candidate_hash,
+                        hypothesis="operator-selected candidate requalification",
+                        rationale=(
+                            "fresh resolved evidence required after legacy migration"
+                        ),
+                        candidate_path=str(candidate_file),
+                    )
+                outcome = self._process_iteration(
+                    store=store,
+                    run_id=run_id,
+                    iteration=store.get_iteration(int(iteration["id"])),
+                    run_dir=run_dir,
+                )
+                completed = store.get_run(run_id)
+                if completed["status"] == "RUNNING" and outcome != "STOP":
+                    completed = store.update_run_with_event(
+                        run_id,
+                        "RUN_FINISHED",
+                        {"reason": "requalification candidate did not promote"},
+                        status="FAILED",
+                        stop_reason="requalification candidate did not promote",
+                    )
+                return {
+                    "schema_version": 1,
+                    "status": completed["status"],
+                    "run_id": run_id,
+                    "qualification_experiment_id": qualification.id,
+                    "qualification_experiment_uid": qualification.experiment_uid,
+                    "candidate_hash": candidate_hash,
+                    "execution_environment": runtime_environment.to_dict(),
+                    "run": completed,
+                }
 
     def collect_noise(
         self,

@@ -34,6 +34,7 @@ LEGACY_EVALUATION_PROTOCOL_ID = LEGACY_C500_EVALUATION_PROTOCOL_ID
 LEGACY_EXPECTED_C500_CASES = LEGACY_C500_CASE_IDS
 EXPECTED_C500_CASES = CURRENT_C500_CASE_IDS
 REQUEST_IDENTITY_MAX_BYTES = 64 * 1024
+_BASELINE_QUALIFICATION_CAPABILITY = object()
 
 
 def load_request_identity(
@@ -487,6 +488,7 @@ def record_external_result(
     git_revision: str | None = None,
     identity: Any | None = None,
     baseline_experiment_id: int | None = None,
+    _baseline_qualification_capability: object | None = None,
 ) -> ExperimentRecord:
     """Validate, promote and persist a result produced by ``evaluate-raw``."""
 
@@ -512,6 +514,7 @@ def record_external_result(
     with HistoryStore(state / "history.sqlite3", state_dir=state) as history:
         identity_value: Mapping[str, Any] | None = None
         evidence_only_identity: ExperimentIdentity | None = None
+        qualification_identity: ExperimentIdentity | None = None
         if identity is not None:
             to_dict = getattr(identity, "to_dict", None)
             identity_value = (
@@ -566,6 +569,36 @@ def record_external_result(
                     raise ValueError(
                         "noise collection must remeasure the exact frozen baseline artifact"
                     )
+            elif identity_value.get("replicate_kind") == "qualification":
+                if (
+                    _baseline_qualification_capability
+                    is not _BASELINE_QUALIFICATION_CAPABILITY
+                ):
+                    raise ValueError(
+                        "baseline qualification requires the trusted controller capability"
+                    )
+                try:
+                    qualification_identity = ExperimentIdentity.from_value(
+                        dict(identity_value)
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"baseline qualification identity is invalid: {exc}"
+                    ) from exc
+                if (
+                    qualification_identity.stage != "baseline_qualification"
+                    or backend != "c500"
+                    or suite != "full"
+                    or not qualification_identity.execution_environment.is_resolved
+                    or qualification_identity.candidate_artifact_id
+                    != qualification_identity.parent_artifact_id
+                    or qualification_identity.candidate_artifact_id
+                    != qualification_identity.baseline.artifact_id
+                ):
+                    raise ValueError(
+                        "baseline qualification must remeasure one resolved "
+                        "c500/full artifact"
+                    )
             if result.get("request_identity") != dict(identity_value):
                 raise ValueError("evaluator did not exactly echo request identity")
             history.ensure_namespace(namespace_id, namespace_value)
@@ -594,6 +627,16 @@ def record_external_result(
                 raise ValueError("frozen baseline experiment does not exist")
             if namespace_id is not None and best.namespace_id != namespace_id:
                 raise ValueError("frozen baseline belongs to another namespace")
+            if qualification_identity is not None and (
+                best.status != "SUCCESS"
+                or not best.promotable
+                or best.artifact_id
+                != str(qualification_identity.baseline.artifact_id)
+                or best.candidate_hash != validation.sha256
+            ):
+                raise ValueError(
+                    "baseline qualification parent is not the accepted identical artifact"
+                )
             if evidence_only_identity is not None:
                 if (
                     best.artifact_id
@@ -700,7 +743,36 @@ def record_external_result(
                     case["baseline_p20_us"] = baseline_percentiles["p20"]
                     case["baseline_p50_us"] = baseline_percentiles["p50"]
                     case["baseline_p80_us"] = baseline_percentiles["p80"]
-        if backend == "c500" and evidence_only_identity is None:
+        if qualification_identity is not None:
+            recorded_result["evidence"] = {
+                "schema_version": 1,
+                "role": "baseline_qualification",
+                "promotion_eligible": recorded_result["status"] == "SUCCESS",
+                "legacy_parent_experiment_uid": best.experiment_uid,
+                "namespace_id": qualification_identity.namespace_id,
+                "artifact_id": str(
+                    qualification_identity.candidate_artifact_id
+                ),
+                "execution_environment": (
+                    qualification_identity.execution_environment.to_dict()
+                ),
+            }
+            if recorded_result["status"] == "SUCCESS":
+                recorded_result["eligible_for_promotion"] = True
+                recorded_result["aggregate_score"] = best.aggregate_score
+                recorded_result["promotion"] = {
+                    "phase": "baseline",
+                    "reason": "execution_environment_requalified",
+                    "baseline_experiment_id": best.id,
+                    "baseline_candidate_hash": best.candidate_hash,
+                    "confirmed": True,
+                    "decision": {
+                        "promoted": True,
+                        "needs_confirmation": False,
+                        "reason": "execution_environment_requalified",
+                    },
+                }
+        elif backend == "c500" and evidence_only_identity is None:
             apply_c500_promotion(
                 recorded_result,
                 history=history,
@@ -787,6 +859,42 @@ def record_external_result(
                     metadata={"baseline_experiment_id": best.id if best else None},
                 )
     return record
+
+
+def record_baseline_qualification_result(
+    *,
+    candidate_source: str,
+    result: dict[str, Any],
+    state_dir: str | Path,
+    note: str,
+    identity: ExperimentIdentity,
+    baseline_experiment_id: int,
+    git_revision: str | None = None,
+) -> ExperimentRecord:
+    """Record one trusted, identical-artifact environment qualification.
+
+    This is deliberately narrower than promotion: the evaluator must measure
+    the accepted artifact against byte-identical baseline bytes under one
+    resolved identity.  The resulting promotable row is a baseline seed only;
+    it never adopts Git or a deployment pin.
+    """
+
+    if not isinstance(identity, ExperimentIdentity):
+        raise TypeError("qualification identity must be an ExperimentIdentity")
+    return record_external_result(
+        candidate_source=candidate_source,
+        result=result,
+        backend="c500",
+        suite="full",
+        state_dir=state_dir,
+        note=note,
+        git_revision=git_revision,
+        identity=identity,
+        baseline_experiment_id=baseline_experiment_id,
+        _baseline_qualification_capability=(
+            _BASELINE_QUALIFICATION_CAPABILITY
+        ),
+    )
 
 
 def record_noise_external_result(

@@ -2046,6 +2046,41 @@ def adopt_baseline(
     return report
 
 
+def requalify_adoption(
+    manifest: AdminManifest,
+    *,
+    candidate_hash: str,
+    candidate_path: str | Path,
+    namespace_id: str,
+) -> dict[str, Any]:
+    """Produce fresh resolved evidence without publishing deployment state."""
+
+    with campaign_maintenance_fence(manifest.runtime_root):
+        _require_no_active_campaign(manifest.runtime_root)
+        config = ControllerConfig.load(manifest.pro_config)
+        active = _active_run_error(config)
+        if active:
+            raise ControlledRuntimeError(active)
+        containers = _active_containers(config)
+        if containers:
+            raise ControlledRuntimeError(
+                "project containers still exist: " + ", ".join(containers)
+            )
+        result = ResearchController(config).requalify_candidate_for_adoption(
+            candidate_path=candidate_path,
+            candidate_hash=candidate_hash,
+            namespace_id=namespace_id,
+        )
+        _require_no_active_campaign(manifest.runtime_root)
+    report = {
+        "schema_version": 1,
+        "command": "requalify-adoption",
+        **result,
+    }
+    _write_report(manifest, "requalify-adoption", report)
+    return report
+
+
 def _print(value: Mapping[str, Any]) -> None:
     print(json.dumps(value, sort_keys=True, ensure_ascii=False, indent=2))
 
@@ -2064,7 +2099,13 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap_parser.add_argument("--manifest", required=True)
     bootstrap_parser.add_argument("--pro-config", required=True)
     bootstrap_parser.add_argument("--flash-config", required=True)
-    for command in ("sync", "verify", "update", "adopt-baseline"):
+    for command in (
+        "sync",
+        "verify",
+        "update",
+        "requalify-adoption",
+        "adopt-baseline",
+    ):
         subparser = subparsers.add_parser(command)
         subparser.add_argument("--manifest", required=True)
         if command == "verify":
@@ -2083,6 +2124,10 @@ def build_parser() -> argparse.ArgumentParser:
                     "it uses the one-cycle legacy V1 compatibility path"
                 ),
             )
+        if command == "requalify-adoption":
+            subparser.add_argument("--candidate-hash", required=True)
+            subparser.add_argument("--candidate-path", required=True)
+            subparser.add_argument("--namespace", dest="namespace_id", required=True)
     internal = subparsers.add_parser(
         "_post-update", help="internal locked post-update continuation"
     )
@@ -2117,6 +2162,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     manifest,
                     candidate_hash=args.candidate_hash,
                     doctor=args.doctor,
+                    namespace_id=args.namespace_id,
+                )
+            elif args.command == "requalify-adoption":
+                payload = requalify_adoption(
+                    manifest,
+                    candidate_hash=args.candidate_hash,
+                    candidate_path=args.candidate_path,
                     namespace_id=args.namespace_id,
                 )
             elif args.command == "_post-update":
