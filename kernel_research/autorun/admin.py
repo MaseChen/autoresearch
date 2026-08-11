@@ -718,7 +718,7 @@ def _artifact_for_best(
     *,
     candidate_hash: str | None = None,
     namespace_id: str | None = None,
-) -> tuple[Any, Path]:
+) -> tuple[ExperimentRecord, Path]:
     """Resolve explicit deployment/adoption evidence, never a global best."""
 
     selected_hash = candidate_hash or config.expected_kernel_hash
@@ -751,25 +751,83 @@ def _artifact_for_best(
             raise ControlledRuntimeError(
                 "candidate has no accepted C500 full evidence in the deployment namespace"
             )
-        try:
-            artifact_id = ArtifactId.parse(best.artifact_id)
-        except ValueError as exc:
-            raise ControlledRuntimeError(
-                "accepted History artifact ID is invalid"
-            ) from exc
-        if artifact_id.tag == "bundle-sha256-v1":
-            artifact = _bundle_entrypoint_artifact(history, config, best)
-        else:
-            artifact = _checked_history_path(
-                config, best.artifact_path, name="accepted History artifact"
-            )
-            if artifact_id.digest != best.candidate_hash:
-                raise ControlledRuntimeError(
-                    "accepted source artifact ID differs from candidate hash"
-                )
-    if _sha256_file(artifact) != best.candidate_hash:
-        raise ControlledRuntimeError("accepted History artifact hash mismatch")
+        artifact = _artifact_for_experiment(history, config, best)
     return best, artifact
+
+
+def _artifact_for_experiment(
+    history: HistoryStore,
+    config: ControllerConfig,
+    experiment: ExperimentRecord,
+) -> Path:
+    """Verify the authoritative artifact for one already-selected experiment."""
+
+    try:
+        artifact_id = ArtifactId.parse(experiment.artifact_id)
+    except ValueError as exc:
+        raise ControlledRuntimeError(
+            "accepted History artifact ID is invalid"
+        ) from exc
+    if artifact_id.tag == "bundle-sha256-v1":
+        artifact = _bundle_entrypoint_artifact(history, config, experiment)
+    else:
+        artifact = _checked_history_path(
+            config,
+            experiment.artifact_path,
+            name="accepted History artifact",
+        )
+        if artifact_id.digest != experiment.candidate_hash:
+            raise ControlledRuntimeError(
+                "accepted source artifact ID differs from candidate hash"
+            )
+    if _sha256_file(artifact) != experiment.candidate_hash:
+        raise ControlledRuntimeError("accepted History artifact hash mismatch")
+    return artifact
+
+
+def _artifact_for_pinned_confirmation(
+    config: ControllerConfig,
+    pin: DeploymentBaselinePin,
+) -> tuple[ExperimentRecord, Path]:
+    """Resolve the immutable History row named by a deployment pin.
+
+    A newer promotable row may legitimately reuse the same artifact, for
+    example a resolved baseline-qualification experiment.  Such a row must not
+    replace the confirmation ID and UID that the administrator actually
+    published.
+    """
+
+    namespace = _trusted_namespace(pin.namespace_id)
+    if pin.baseline_ref.namespace_id != namespace.namespace_id:
+        raise ControlledRuntimeError(
+            "deployment baseline pin has inconsistent scientific coordinates"
+        )
+    with HistoryStore(
+        config.state_dir / "history.sqlite3", state_dir=config.state_dir
+    ) as history:
+        confirmation = history.get_experiment(
+            pin.confirmation_experiment_id
+        )
+        if confirmation is None:
+            raise ControlledRuntimeError(
+                "deployment baseline pin confirmation experiment is missing"
+            )
+        if (
+            confirmation.experiment_uid
+            != pin.confirmation_experiment_uid
+            or confirmation.namespace_id != pin.namespace_id
+            or confirmation.candidate_hash != pin.candidate_hash
+            or confirmation.artifact_id
+            != str(pin.baseline_ref.artifact_id)
+        ):
+            raise ControlledRuntimeError(
+                "deployment baseline pin confirmation ID/UID or artifact "
+                "coordinates disagree"
+            )
+        artifact = _artifact_for_experiment(
+            history, config, confirmation
+        )
+    return confirmation, artifact
 
 
 @dataclass(frozen=True)
@@ -795,13 +853,18 @@ def _legacy_adoption_proof(
     config: ControllerConfig,
     *,
     candidate_hash: str,
+    selected_confirmation: tuple[ExperimentRecord, Path] | None = None,
 ) -> _AdoptionProof:
     """Grandfather the genuine V1 confirmation shape for one compatibility cycle."""
 
-    best, artifact = _artifact_for_best(
-        config,
-        candidate_hash=candidate_hash,
-        namespace_id=LEGACY_RESEARCH_NAMESPACE.namespace_id,
+    best, artifact = (
+        _artifact_for_best(
+            config,
+            candidate_hash=candidate_hash,
+            namespace_id=LEGACY_RESEARCH_NAMESPACE.namespace_id,
+        )
+        if selected_confirmation is None
+        else selected_confirmation
     )
     promotion = best.result.get("promotion")
     if (
@@ -850,11 +913,16 @@ def _strict_v2_adoption_proof(
     *,
     candidate_hash: str,
     namespace: ResearchNamespace,
+    selected_confirmation: tuple[ExperimentRecord, Path] | None = None,
 ) -> _AdoptionProof:
-    confirmation, artifact = _artifact_for_best(
-        config,
-        candidate_hash=candidate_hash,
-        namespace_id=namespace.namespace_id,
+    confirmation, artifact = (
+        _artifact_for_best(
+            config,
+            candidate_hash=candidate_hash,
+            namespace_id=namespace.namespace_id,
+        )
+        if selected_confirmation is None
+        else selected_confirmation
     )
     with HistoryStore(
         config.state_dir / "history.sqlite3", state_dir=config.state_dir
@@ -1052,20 +1120,30 @@ def _prove_adoption(
     *,
     candidate_hash: str,
     namespace_id: str | None,
+    selected_confirmation: tuple[ExperimentRecord, Path] | None = None,
 ) -> _AdoptionProof:
     namespace = _trusted_namespace(namespace_id)
     if namespace == LEGACY_RESEARCH_NAMESPACE:
-        selected, _artifact = _artifact_for_best(
-            config,
-            candidate_hash=candidate_hash,
-            namespace_id=namespace.namespace_id,
+        selected = (
+            _artifact_for_best(
+                config,
+                candidate_hash=candidate_hash,
+                namespace_id=namespace.namespace_id,
+            )
+            if selected_confirmation is None
+            else selected_confirmation
         )
-        if selected.replicate_kind == "legacy":
-            return _legacy_adoption_proof(config, candidate_hash=candidate_hash)
+        if selected[0].replicate_kind == "legacy":
+            return _legacy_adoption_proof(
+                config,
+                candidate_hash=candidate_hash,
+                selected_confirmation=selected,
+            )
     return _strict_v2_adoption_proof(
         config,
         candidate_hash=candidate_hash,
         namespace=namespace,
+        selected_confirmation=selected_confirmation,
     )
 
 
@@ -1088,20 +1166,23 @@ def _identity(
     if require_config_commit and base.get("expected_git_commit") != state["head"]:
         raise ControlledRuntimeError("base config commit does not match repository HEAD")
     config = ControllerConfig.load(manifest.pro_config)
-    best, artifact = _artifact_for_best(config)
-    if best.candidate_hash != required_hash:
-        raise ControlledRuntimeError("accepted History baseline does not match kernel.py")
     pin_path = _deployment_pin_path(config)
     deployment_pin = (
         None
         if not pin_path.exists() and not pin_path.is_symlink()
         else DeploymentBaselinePin.load(pin_path)
     )
-    if deployment_pin is not None:
+    if deployment_pin is None:
+        best, artifact = _artifact_for_best(config)
+    else:
+        selected_confirmation = _artifact_for_pinned_confirmation(
+            config, deployment_pin
+        )
         proof = _prove_adoption(
             config,
             candidate_hash=required_hash,
             namespace_id=deployment_pin.namespace_id,
+            selected_confirmation=selected_confirmation,
         )
         if (
             proof.confirmation.id
@@ -1119,6 +1200,8 @@ def _identity(
                 and proof.primary.experiment_uid
                 != deployment_pin.primary_experiment_uid
             )
+            or proof.execution_environment.is_resolved
+            != deployment_pin.execution_environment.is_resolved
             or (
                 proof.execution_environment.is_resolved
                 and proof.execution_environment
@@ -1129,6 +1212,10 @@ def _identity(
             raise ControlledRuntimeError(
                 "deployment baseline pin differs from its immutable History proof"
             )
+        best = proof.confirmation
+        artifact = proof.artifact
+    if best.candidate_hash != required_hash:
+        raise ControlledRuntimeError("accepted History baseline does not match kernel.py")
     return {
         **state,
         "baseline_experiment_id": best.id,

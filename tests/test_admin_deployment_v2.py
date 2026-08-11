@@ -27,6 +27,7 @@ from kernel_research.platform import (
     CURRENT_RESEARCH_NAMESPACE,
     ExecutionEnvironmentDigest,
     ExperimentIdentity,
+    LEGACY_RESEARCH_NAMESPACE,
 )
 
 from test_autorun import SEED, SEED_HASH
@@ -318,6 +319,127 @@ class CurrentEvidenceFixture:
 
 
 class AdminDeploymentV2Tests(unittest.TestCase):
+    def test_deployment_pin_is_not_replaced_by_later_qualification(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = AdminFixture(Path(temporary))
+            manifest = fixture.bootstrap()
+            with mock.patch.object(admin, "_active_containers", return_value=[]):
+                admin.adopt_baseline(
+                    manifest,
+                    candidate_hash=SEED_HASH,
+                    namespace_id=LEGACY_RESEARCH_NAMESPACE.namespace_id,
+                    doctor=False,
+                )
+
+            pin_path = fixture.runtime / DEPLOYMENT_BASELINE_FILENAME
+            pin = DeploymentBaselinePin.load(pin_path)
+            config = ControllerConfig.load(manifest.pro_config)
+            environment = ResearchController(
+                config
+            )._resolved_execution_environment(LEGACY_RESEARCH_NAMESPACE)
+            artifact_id = ArtifactId.source_sha256(SEED_HASH)
+            baseline_ref = BaselineRef.create(
+                namespace=LEGACY_RESEARCH_NAMESPACE,
+                artifact_id=artifact_id,
+                source="deployment",
+                revision="qualification-after-published-pin",
+                execution_environment=environment,
+            )
+            identity = ExperimentIdentity.create(
+                experiment_uid="00000000-0000-4000-8000-000000000099",
+                namespace=LEGACY_RESEARCH_NAMESPACE,
+                mode="DISCOVERY",
+                candidate_artifact_id=artifact_id,
+                parent_artifact_id=artifact_id,
+                baseline=baseline_ref,
+                execution_environment=environment,
+                stage="baseline_qualification",
+                suite="full",
+                replicate_kind="qualification",
+                run_id="qualification-after-published-pin",
+                iteration=0,
+            )
+            with HistoryStore(
+                fixture.state / "history.sqlite3", state_dir=fixture.state
+            ) as history:
+                qualification = history.record_experiment(
+                    candidate_source=SEED,
+                    backend="c500",
+                    suite="full",
+                    status="SUCCESS",
+                    promotable=True,
+                    aggregate_score=1.0,
+                    identity=identity,
+                    result={
+                        "status": "SUCCESS",
+                        "request_identity": identity.to_dict(),
+                        "promotion": {
+                            "phase": "baseline",
+                            "reason": "execution_environment_requalified",
+                            "confirmed": True,
+                        },
+                    },
+                    case_measurements=_measurements(),
+                )
+            self.assertGreater(
+                qualification.id, pin.confirmation_experiment_id
+            )
+
+            (fixture.repo / "README.md").write_text(
+                "control-plane update\n", encoding="utf-8"
+            )
+            _command("git", "add", "README.md", cwd=fixture.repo)
+            _command("git", "commit", "-m", "control update", cwd=fixture.repo)
+
+            report = admin._identity(
+                manifest,
+                require_config_commit=False,
+                expected_kernel_hash=SEED_HASH,
+            )
+            self.assertEqual(
+                report["baseline_experiment_id"],
+                pin.confirmation_experiment_id,
+            )
+            self.assertNotEqual(
+                report["baseline_experiment_id"], qualification.id
+            )
+
+            for name, confirmation_id, confirmation_uid in (
+                (
+                    "id",
+                    qualification.id,
+                    pin.confirmation_experiment_uid,
+                ),
+                (
+                    "uid",
+                    pin.confirmation_experiment_id,
+                    qualification.experiment_uid,
+                ),
+            ):
+                with self.subTest(tampered=name):
+                    tampered = DeploymentBaselinePin.create(
+                        namespace_id=pin.namespace_id,
+                        baseline_ref=pin.baseline_ref,
+                        candidate_hash=pin.candidate_hash,
+                        git_commit=pin.git_commit,
+                        primary_experiment_uid=pin.primary_experiment_uid,
+                        confirmation_experiment_uid=confirmation_uid,
+                        confirmation_experiment_id=confirmation_id,
+                        parent_baseline_ref=pin.parent_baseline_ref,
+                        execution_environment=pin.execution_environment,
+                    )
+                    pin_path.write_text(
+                        json.dumps(tampered.to_dict()), encoding="utf-8"
+                    )
+                    with self.assertRaisesRegex(
+                        ControlledRuntimeError, "ID/UID"
+                    ):
+                        admin._identity(
+                            manifest,
+                            require_config_commit=False,
+                            expected_kernel_hash=SEED_HASH,
+                        )
+
     def test_current_adoption_writes_atomic_pin_and_ordinary_run_uses_current(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = AdminFixture(Path(temporary))
