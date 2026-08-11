@@ -223,25 +223,43 @@ class PolicyHardeningTests(unittest.TestCase):
 
     def test_c500_num_warps_is_literal_and_bounded(self) -> None:
         pattern = re.compile(r"(?m)^(?P<indent>\s*)num_warps=[^,\n]+,$")
+        occurrences = tuple(pattern.finditer(SEED))
+        self.assertGreaterEqual(len(occurrences), 1)
 
-        def with_num_warps(value: str) -> str:
+        def with_all_num_warps(value: str) -> str:
             updated, count = pattern.subn(
                 rf"\g<indent>num_warps={value},", SEED
             )
-            self.assertEqual(count, 1)
+            self.assertEqual(count, len(occurrences))
             return updated
 
-        self.assertTrue(validate_research_candidate(with_num_warps("8")).valid)
-        for value in ("0", "3", "32", "topk"):
-            with self.subTest(num_warps=value):
-                result = validate_research_candidate(
-                    with_num_warps(value)
+        def with_one_num_warps(index: int, value: str) -> str:
+            match = occurrences[index]
+            replacement = (
+                f'{match.group("indent")}num_warps={value},'
+            )
+            return SEED[: match.start()] + replacement + SEED[match.end() :]
+
+        for value in ("8", "16"):
+            with self.subTest(valid_num_warps=value):
+                self.assertTrue(
+                    validate_research_candidate(
+                        with_all_num_warps(value)
+                    ).valid
                 )
-                self.assertFalse(result.valid)
-                self.assertIn(
-                    "C500_NUM_WARPS_INVALID",
-                    {error.code for error in result.errors},
-                )
+        for index in range(len(occurrences)):
+            for value in ("0", "3", "32", "topk"):
+                with self.subTest(
+                    occurrence=index, invalid_num_warps=value
+                ):
+                    result = validate_research_candidate(
+                        with_one_num_warps(index, value)
+                    )
+                    self.assertFalse(result.valid)
+                    self.assertIn(
+                        "C500_NUM_WARPS_INVALID",
+                        {error.code for error in result.errors},
+                    )
 
     def test_int64_product_must_flow_to_the_b_load(self) -> None:
         swapped = SEED.replace(
