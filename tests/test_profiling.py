@@ -1,0 +1,1528 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest import mock
+
+import kernel_research.profiling as profiling
+from kernel_research.autorun.models import ControllerConfig, GPU1_DEVICES
+from kernel_research.autorun.runtime import CommandResult
+from kernel_research.campaign.models import BudgetAmount, CampaignMode
+from kernel_research.campaign.store import CampaignStore
+from kernel_research.cli import build_parser
+from kernel_research.history import HistoryStore
+from kernel_research.platform.identity import (
+    BaselineRef,
+    ExecutionEnvironmentDigest,
+    ExperimentIdentity,
+)
+from kernel_research.platform.profiles import CURRENT_RESEARCH_NAMESPACE
+from kernel_research.platform.proposal import CandidateBundle
+from kernel_research.profiling import (
+    BUILTIN_PROFILE_RECIPES,
+    PROFILE_OUTPUT_LIMIT_BYTES,
+    PROFILE_TIMEOUT_SECONDS,
+    PROFILER_IMAGE,
+    ProfileMetric,
+    ProfileRecipe,
+    ToolProbe,
+    run_bounded_profile,
+    run_profiling_doctor,
+)
+
+
+class ProfilingDoctorTests(unittest.TestCase):
+    def test_ready_report_is_advisory_only(self) -> None:
+        commands: list[tuple[str, ...]] = []
+
+        def resolve(name: str) -> str | None:
+            return f"/trusted/bin/{name}"
+
+        def run(argv, **kwargs):
+            commands.append(tuple(argv))
+            return {
+                "status": "AVAILABLE",
+                "exit_code": 0,
+                "version_output": "1.2.3",
+            }
+
+        report = run_profiling_doctor(
+            tool_probes=(ToolProbe("trace", ("mcTracer",)),),
+            library_paths=(self._accessible_path(),),
+            device_paths=(self._accessible_path(),),
+            executable_resolver=resolve,
+            command_runner=run,
+        )
+
+        self.assertEqual(report["status"], "READY")
+        self.assertTrue(report["advisory_only"])
+        self.assertEqual(report["promotion_effect"], "none")
+        self.assertEqual(commands, [("/trusted/bin/mcTracer", "--version")])
+
+    def test_missing_capabilities_have_explicit_unavailable_reasons(self) -> None:
+        report = run_profiling_doctor(
+            tool_probes=(ToolProbe("trace", ("mcTracer",)),),
+            library_paths=(self._missing_path(),),
+            device_paths=(self._missing_path(),),
+            executable_resolver=lambda name: None,
+        )
+
+        self.assertEqual(report["status"], "UNAVAILABLE")
+        self.assertEqual(report["tools"][0]["status"], "UNAVAILABLE")
+        self.assertIn("reason", report["support_library"])
+        self.assertIn("reason", report["devices"])
+        self.assertEqual(len(report["reasons"]), 3)
+
+    def test_probe_recipe_rejects_paths_as_executable_names(self) -> None:
+        with self.assertRaisesRegex(ValueError, "bare trusted names"):
+            ToolProbe("trace", ("/tmp/agent-tool",))
+
+    def test_probe_and_recipe_value_objects_reject_untrusted_shapes(self) -> None:
+        for call, message in (
+            (lambda: ToolProbe("bad id", ("tool",)), "tool_id"),
+            (lambda: ToolProbe("trace", ()), "must not be empty"),
+            (lambda: ToolProbe("trace", ("tool",), ("",)), "arguments"),
+            (lambda: ProfileMetric("Bad", "integer", "count"), "metric_id"),
+            (lambda: ProfileMetric("count", "text", "count"), "value_kind"),
+            (lambda: ProfileMetric("count", "integer", ""), "unit"),
+            (
+                lambda: ProfileRecipe(
+                    "Bad", "case", 1, False, (ProfileMetric("a", "integer", "u"),)
+                ),
+                "recipe_id",
+            ),
+            (
+                lambda: ProfileRecipe(
+                    "recipe", "Bad-case", 1, False, (ProfileMetric("a", "integer", "u"),)
+                ),
+                "case_id",
+            ),
+            (
+                lambda: ProfileRecipe(
+                    "recipe", "case", 3, False, (ProfileMetric("a", "integer", "u"),)
+                ),
+                "minimum correctness",
+            ),
+            (lambda: ProfileRecipe("recipe", "case", 1, False, ()), "metrics"),
+            (
+                lambda: ProfileRecipe(
+                    "recipe",
+                    "case",
+                    1,
+                    False,
+                    (
+                        ProfileMetric("a", "integer", "u"),
+                        ProfileMetric("a", "integer", "u"),
+                    ),
+                ),
+                "metrics",
+            ),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    call()
+
+    def test_doctor_rejects_nonpositive_bounds(self) -> None:
+        with self.assertRaisesRegex(ValueError, "timeout"):
+            run_profiling_doctor(timeout_sec=0)
+        with self.assertRaisesRegex(ValueError, "output_limit"):
+            run_profiling_doctor(output_limit_bytes=0)
+
+    def test_bounded_version_command_handles_all_terminal_outcomes(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ("/trusted/tool", "--version"), 0, stdout=b"v1", stderr=b""
+        )
+        with mock.patch.object(profiling.subprocess, "run", return_value=completed):
+            result = profiling._bounded_version_command(
+                ("/trusted/tool", "--version"), timeout_sec=1, output_limit_bytes=16
+            )
+        self.assertEqual(result["status"], "AVAILABLE")
+        self.assertEqual(result["version_output"], "v1")
+
+        failed = subprocess.CompletedProcess(
+            ("/trusted/tool", "--version"), 7, stdout=b"", stderr=b"failed"
+        )
+        with mock.patch.object(profiling.subprocess, "run", return_value=failed):
+            result = profiling._bounded_version_command(
+                ("/trusted/tool", "--version"), timeout_sec=1, output_limit_bytes=16
+            )
+        self.assertEqual(result["status"], "UNAVAILABLE")
+        self.assertIn("non-zero", result["reason"])
+
+        noisy = subprocess.CompletedProcess(
+            ("/trusted/tool", "--version"), 0, stdout=b"too much", stderr=b"noise"
+        )
+        with mock.patch.object(profiling.subprocess, "run", return_value=noisy):
+            result = profiling._bounded_version_command(
+                ("/trusted/tool", "--version"), timeout_sec=1, output_limit_bytes=4
+            )
+        self.assertIn("output limit", result["reason"])
+
+        for error, reason in (
+            (subprocess.TimeoutExpired(("tool",), 1), "timed out"),
+            (OSError("unavailable"), "could not start"),
+        ):
+            with self.subTest(reason=reason), mock.patch.object(
+                profiling.subprocess, "run", side_effect=error
+            ):
+                result = profiling._bounded_version_command(
+                    ("/trusted/tool", "--version"),
+                    timeout_sec=1,
+                    output_limit_bytes=16,
+                )
+                self.assertIn(reason, result["reason"])
+
+    def test_strict_json_rejects_ambiguous_and_noncanonical_inputs(self) -> None:
+        self.assertEqual(
+            profiling._strict_json_object(b'{"a":1}', field="fixture"),
+            {"a": 1},
+        )
+        for payload, message in (
+            (b'{"a":1,"a":2}', "duplicate"),
+            (b'{"a":NaN}', "non-finite"),
+            (b'not-json', "strict UTF-8 JSON"),
+            (b'\xff', "strict UTF-8 JSON"),
+            (b'[]', "JSON object"),
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ValueError, message):
+                    profiling._strict_json_object(payload, field="fixture")
+
+    def test_bounded_regular_file_rejects_missing_nonregular_and_growth(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.bin"
+            source.write_bytes(b"abc")
+            self.assertEqual(
+                profiling._read_regular_file(source, limit=3, field="fixture"),
+                b"abc",
+            )
+            with self.assertRaisesRegex(ValueError, "positive"):
+                profiling._read_regular_file(source, limit=0, field="fixture")
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                profiling._read_regular_file(
+                    root / "missing", limit=10, field="fixture"
+                )
+            with self.assertRaisesRegex(ValueError, "regular"):
+                profiling._read_regular_file(root, limit=10, field="fixture")
+            with self.assertRaisesRegex(ValueError, "size limit"):
+                profiling._read_regular_file(source, limit=2, field="fixture")
+
+            one = root / "one.bin"
+            one.write_bytes(b"x")
+            with mock.patch.object(profiling.os, "read", return_value=b"xx"):
+                with self.assertRaisesRegex(ValueError, "size limit"):
+                    profiling._read_regular_file(one, limit=1, field="fixture")
+
+            real_fstat = os.fstat
+            calls = 0
+
+            def changed_size(descriptor):
+                nonlocal calls
+                calls += 1
+                value = real_fstat(descriptor)
+                if calls == 1:
+                    return value
+                fields = list(value)
+                fields[6] = value.st_size + 1
+                return os.stat_result(fields)
+
+            with mock.patch.object(profiling.os, "fstat", side_effect=changed_size):
+                with self.assertRaisesRegex(ValueError, "changed"):
+                    profiling._read_regular_file(source, limit=10, field="fixture")
+
+    def test_cas_is_idempotent_and_rejects_collision_symlink_and_failed_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "objects"
+            object_id = profiling._store_cas_object(
+                root, b"evidence", field="fixture"
+            )
+            self.assertEqual(
+                profiling._store_cas_object(root, b"evidence", field="fixture"),
+                object_id,
+            )
+            digest = object_id.removeprefix("sha256:")
+            path = root / digest[:2] / digest[2:]
+            path.write_bytes(b"collisio")
+            with self.assertRaisesRegex(ValueError, "collision"):
+                profiling._store_cas_object(root, b"evidence", field="fixture")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            target = base / "target"
+            target.mkdir()
+            linked = base / "linked"
+            linked.symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                profiling._store_cas_object(linked, b"evidence", field="fixture")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "objects"
+            with mock.patch.object(
+                profiling.os, "replace", side_effect=OSError("publish failed")
+            ):
+                with self.assertRaises(OSError):
+                    profiling._store_cas_object(root, b"evidence", field="fixture")
+            self.assertEqual(list(root.rglob("*.tmp")), [])
+
+    @staticmethod
+    def _accessible_path():
+        # The test file is readable and its containing directory is writable.
+        from pathlib import Path
+
+        return Path(__file__).resolve()
+
+    @staticmethod
+    def _missing_path():
+        from pathlib import Path
+
+        return Path(__file__).resolve().with_name("definitely-missing-device")
+
+
+class _FakeGate:
+    def __init__(
+        self,
+        *,
+        allowed: bool = True,
+        change_after: int | None = None,
+        on_status=None,
+    ):
+        self.allowed = allowed
+        self.change_after = change_after
+        self.on_status = on_status
+        self.status_calls = 0
+
+    def status(self):
+        self.status_calls += 1
+        if self.on_status is not None:
+            self.on_status(self.status_calls)
+        changed = (
+            self.change_after is not None
+            and self.status_calls > self.change_after
+        )
+        digest = "sha256:" + ("b" if changed else "a") * 64
+        return {
+            "current_observation_status": "AVAILABLE",
+            "profiling_allowed": self.allowed,
+            "active_invariant_matches": True,
+            "current_invariant_snapshot_digest": digest,
+        }
+
+    def profiling_allowed(self):
+        return self.allowed
+
+
+class _FakeProfileRunner:
+    def __init__(
+        self,
+        *,
+        metrics=None,
+        timed_out=False,
+        output_limited=False,
+        result_overrides=None,
+        returncode=0,
+        changed_argv=False,
+        start_error=False,
+        raw_trace=b"trusted raw trace\x00\x01",
+        stderr="ignored profiler stderr",
+        on_run=None,
+    ):
+        self.metrics = {} if metrics is None else metrics
+        self.timed_out = timed_out
+        self.output_limited = output_limited
+        self.result_overrides = (
+            {} if result_overrides is None else result_overrides
+        )
+        self.returncode = returncode
+        self.changed_argv = changed_argv
+        self.start_error = start_error
+        self.raw_trace = raw_trace
+        self.stderr = stderr
+        self.on_run = on_run
+        self.calls = []
+
+    def run(self, argv, **kwargs):
+        argv = tuple(argv)
+        self.calls.append((argv, dict(kwargs)))
+        if self.on_run is not None:
+            self.on_run(argv)
+        if self.start_error:
+            raise OSError("fixture start failure")
+        mounts = [
+            argv[index + 1]
+            for index, item in enumerate(argv[:-1])
+            if item == "--mount"
+        ]
+        output_mount = next(item for item in mounts if "dst=/output" in item)
+        source = output_mount.split("src=", 1)[1].split(",dst=", 1)[0]
+        output = Path(source)
+        if not self.timed_out and not self.output_limited:
+            recipe = argv[argv.index("--recipe") + 1]
+            case_id = argv[argv.index("--case-id") + 1]
+            uid = argv[argv.index("--experiment-uid") + 1]
+            result = {
+                "schema_version": 1,
+                "recipe_id": recipe,
+                "case_id": case_id,
+                "experiment_uid": uid,
+                "namespace_id": argv[argv.index("--namespace-id") + 1],
+                "condition_digest": argv[
+                    argv.index("--condition-digest") + 1
+                ],
+                "artifact_id": argv[argv.index("--artifact-id") + 1],
+                "candidate_sha256": argv[
+                    argv.index("--candidate-sha256") + 1
+                ],
+                "environment_digest": argv[
+                    argv.index("--environment-digest") + 1
+                ],
+                "soak_invariant_digest": argv[
+                    argv.index("--soak-invariant-digest") + 1
+                ],
+                "campaign_id": argv[argv.index("--campaign-id") + 1],
+                "run_id": argv[argv.index("--run-id") + 1],
+                "budget_action_key": argv[
+                    argv.index("--budget-action-key") + 1
+                ],
+                "metrics": self.metrics,
+            }
+            if "--resource-id" in argv:
+                result["resource_id"] = argv[argv.index("--resource-id") + 1]
+                result["fencing_epoch"] = int(
+                    argv[argv.index("--fencing-epoch") + 1]
+                )
+            result.update(self.result_overrides)
+            (output / "result.json").write_text(
+                json.dumps(result),
+                encoding="utf-8",
+            )
+            (output / "raw.trace").write_bytes(self.raw_trace)
+        return CommandResult(
+            argv=(argv + ("changed",) if self.changed_argv else argv),
+            returncode=self.returncode,
+            stdout="ignored profiler stdout",
+            stderr=self.stderr,
+            timed_out=self.timed_out,
+            output_limited=self.output_limited,
+        )
+
+
+_DEFAULT_SUBJECT_CAMPAIGN = object()
+
+
+class BoundedProfilingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name).resolve()
+        self.state = self.root / "state"
+        self.controller = self.root / "controller"
+        self.checkpoints = self.root / "checkpoints"
+        self.repository = self.root / "repository"
+        self.cache = self.root / "cache"
+        for directory in (
+            self.state,
+            self.controller,
+            self.checkpoints,
+            self.repository,
+            self.cache,
+        ):
+            directory.mkdir()
+        docker = self.root / "docker"
+        docker.write_text("fixture", encoding="utf-8")
+        key = self.root / "deepseek.key"
+        key.write_text("fixture", encoding="utf-8")
+        self.config = ControllerConfig(
+            repository_dir=self.repository,
+            state_dir=self.state,
+            controller_dir=self.controller,
+            checkpoint_dir=self.checkpoints,
+            docker_binary=docker,
+            proposer_image="fixture/proposer@sha256:" + "1" * 64,
+            evaluator_image="fixture/evaluator@sha256:" + "2" * 64,
+            deepseek_key_file=key,
+            gpu_devices=GPU1_DEVICES,
+            evaluator_cache_dir=self.cache,
+            expected_git_commit="3" * 40,
+            expected_kernel_hash="4" * 64,
+            acknowledge_gpu_passthrough_risk=True,
+        )
+        self.campaign_database = (
+            self.root / "campaign" / "campaign.sqlite3"
+        )
+        self.campaign_id = "profile-campaign"
+        self._create_campaign(self.campaign_id)
+        self.environment = ExecutionEnvironmentDigest.resolved(
+            evaluator_image_digest="sha256:" + "1" * 64,
+            toolchain_digest="sha256:" + "2" * 64,
+            framework_digest="sha256:" + "3" * 64,
+            operator_abi_digest="sha256:" + "4" * 64,
+            build_flags_digest="sha256:" + "5" * 64,
+        )
+        self.uid = "00000000-0000-4000-8000-000000000099"
+
+    def _create_campaign(
+        self, campaign_id: str, *, wall_ms: int = 20_000_000, gpu_ms: int = 20_000_000
+    ) -> str:
+        with CampaignStore(self.campaign_database) as campaigns:
+            campaigns.create_campaign(
+                campaign_id=campaign_id,
+                namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                mode=CampaignMode.DISCOVERY.value,
+                snapshot={"fixture": "bounded-profiling"},
+                budget_limit=BudgetAmount(
+                    wall_ms=wall_ms,
+                    gpu_ms=gpu_ms,
+                ),
+                initial_artifact_id="source-sha256-v1:" + "d" * 64,
+                initial_policy_snapshot={"fixture": "policy"},
+            )
+            campaigns.start_campaign(campaign_id)
+        return campaign_id
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _record(
+        self,
+        *,
+        stage="smoke",
+        suite="smoke",
+        passed=True,
+        campaign_id=_DEFAULT_SUBJECT_CAMPAIGN,
+        experiment_uid=None,
+        run_id=None,
+        link_child=True,
+    ):
+        subject_campaign_id = (
+            self.campaign_id
+            if campaign_id is _DEFAULT_SUBJECT_CAMPAIGN
+            else campaign_id
+        )
+        subject_uid = self.uid if experiment_uid is None else experiment_uid
+        subject_run_id = "profile-fixture-run" if run_id is None else run_id
+        source = "def kernel():\n    return 1\n"
+        bundle = CandidateBundle.single_file(content=source)
+        baseline = BaselineRef.create(
+            namespace=CURRENT_RESEARCH_NAMESPACE,
+            artifact_id=bundle.artifact_id,
+            source="deployment",
+            revision="profile-fixture",
+            execution_environment=self.environment,
+        )
+        identity = ExperimentIdentity.create(
+            experiment_uid=subject_uid,
+            namespace=CURRENT_RESEARCH_NAMESPACE,
+            mode="DISCOVERY",
+            candidate_artifact_id=bundle.artifact_id,
+            parent_artifact_id=bundle.artifact_id,
+            baseline=baseline,
+            execution_environment=self.environment,
+            stage=stage,
+            suite=suite,
+            replicate_kind=("primary" if stage == "full_primary" else "validation"),
+            campaign_id=subject_campaign_id,
+            run_id=subject_run_id,
+            iteration=1,
+        )
+        if subject_campaign_id is not None and link_child:
+            with CampaignStore(self.campaign_database) as campaigns:
+                child = campaigns.get_child_run_by_controller_run_id(
+                    subject_run_id
+                )
+                if child is None:
+                    campaigns.create_child_run(
+                        subject_campaign_id,
+                        proposer_profile={"id": "profile-fixture"},
+                        controller_run_id=subject_run_id,
+                    )
+        with HistoryStore(
+            self.state / "history.sqlite3", state_dir=self.state
+        ) as history:
+            history.ensure_namespace(
+                CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                CURRENT_RESEARCH_NAMESPACE.to_dict(),
+            )
+            history.store_candidate_bundle(bundle)
+            history.record_experiment(
+                candidate_source=source,
+                backend="c500",
+                suite=suite,
+                status="SUCCESS",
+                identity=identity,
+                result={"status": "SUCCESS"},
+                case_measurements=(
+                    {
+                        "name": {
+                            "smoke": "smoke_gate_up",
+                            "quick": "quick_decode_gate_up",
+                            "full": "full_decode_gate_up",
+                        }[suite],
+                        "matched_ratio": 1.0 if passed else 0.0,
+                        "passed": passed,
+                    },
+                ),
+            )
+        return identity
+
+    def _record_for_campaign(
+        self,
+        campaign_id,
+        index,
+        *,
+        stage="smoke",
+        suite="smoke",
+        passed=True,
+    ):
+        return self._record(
+            stage=stage,
+            suite=suite,
+            passed=passed,
+            campaign_id=campaign_id,
+            experiment_uid=f"00000000-0000-4000-8000-{index:012d}",
+            run_id=f"profile-fixture-run-{index}",
+        )
+
+    def _collect(
+        self,
+        runner,
+        gate,
+        *,
+        recipe="metax-compile-metadata-v1",
+        campaign_id=None,
+        experiment_uid=None,
+    ):
+        return run_bounded_profile(
+            self.config,
+            campaign_database=self.campaign_database,
+            campaign_id=self.campaign_id if campaign_id is None else campaign_id,
+            gate_id="production",
+            experiment_uid=(
+                self.uid if experiment_uid is None else experiment_uid
+            ),
+            namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+            execution_environment_digest=self.environment.digest,
+            recipe_id=recipe,
+            runner=runner,
+            _gate_factory=lambda store, gate_id, collector: gate,
+        )
+
+    def _campaign_rows(self, table, campaign_id=None):
+        with sqlite3.connect(self.campaign_database) as connection:
+            connection.row_factory = sqlite3.Row
+            return [
+                dict(row)
+                for row in connection.execute(
+                    f"SELECT * FROM {table} WHERE campaign_id = ? ORDER BY rowid",
+                    (self.campaign_id if campaign_id is None else campaign_id,),
+                )
+            ]
+
+    def test_compile_recipe_is_fixed_advisory_and_stores_bounded_evidence(self):
+        self._record()
+        history_before = hashlib.sha256(
+            (self.state / "history.sqlite3").read_bytes()
+        ).hexdigest()
+        runner = _FakeProfileRunner(
+            metrics={
+                "compiler_version_digest": {
+                    "status": "AVAILABLE",
+                    "value": "sha256:" + "9" * 64,
+                },
+                "shared_memory_bytes": {
+                    "status": "UNAVAILABLE",
+                    "reason_code": "COUNTER_NOT_EXPOSED",
+                },
+            }
+        )
+        report = self._collect(runner, _FakeGate())
+
+        self.assertEqual(report["status"], "SUCCESS")
+        self.assertTrue(report["advisory_only"])
+        self.assertEqual(report["promotion_effect"], "none")
+        self.assertEqual(report["baseline_effect"], "none")
+        self.assertEqual(report["profiler_image"], PROFILER_IMAGE)
+        self.assertEqual(report["case_id"], "smoke_gate_up")
+        self.assertEqual(report["campaign_id"], self.campaign_id)
+        self.assertEqual(report["run_id"], "profile-fixture-run")
+        self.assertEqual(report["subject"]["campaign_id"], self.campaign_id)
+        self.assertEqual(report["subject"]["run_id"], "profile-fixture-run")
+        self.assertIsNone(report["resource_lease"])
+        self.assertEqual(
+            report["metrics"]["register_count"]["status"], "UNAVAILABLE"
+        )
+        self.assertIn("reason", report["metrics"]["register_count"])
+        self.assertNotIn("value", report["metrics"]["register_count"])
+        self.assertNotIn("argv", report)
+        self.assertNotIn("stderr", report)
+
+        argv, kwargs = runner.calls[0]
+        self.assertIn("--pull=never", argv)
+        self.assertIn("--network=none", argv)
+        self.assertIn("--read-only", argv)
+        self.assertIn("no-new-privileges", argv)
+        self.assertNotIn("--device", argv)
+        self.assertEqual(kwargs["timeout_sec"], PROFILE_TIMEOUT_SECONDS)
+        self.assertEqual(kwargs["max_output_bytes"], PROFILE_OUTPUT_LIMIT_BYTES)
+        self.assertIn("--max-raw-trace-bytes", argv)
+        image_index = argv.index(PROFILER_IMAGE)
+        self.assertGreater(image_index, argv.index("--entrypoint"))
+        candidate_mount = next(
+            argv[index + 1]
+            for index, item in enumerate(argv[:-1])
+            if item == "--mount" and "dst=/input/candidate.cas" in argv[index + 1]
+        )
+        self.assertTrue(candidate_mount.endswith(",readonly"))
+        self.assertEqual(argv[argv.index("--campaign-id") + 1], self.campaign_id)
+        self.assertEqual(
+            argv[argv.index("--run-id") + 1], "profile-fixture-run"
+        )
+        self.assertEqual(
+            argv[argv.index("--budget-action-key") + 1],
+            report["budget_action_key"],
+        )
+
+        trace_digest = report["raw_trace"]["object_id"].removeprefix("sha256:")
+        trace_path = (
+            self.controller / "objects" / "sha256" / trace_digest[:2] / trace_digest[2:]
+        )
+        self.assertEqual(trace_path.read_bytes(), b"trusted raw trace\x00\x01")
+        evidence_digest = report["evidence_object_id"].removeprefix("sha256:")
+        evidence_path = (
+            self.state / "objects" / "sha256" / evidence_digest[:2] / evidence_digest[2:]
+        )
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        self.assertTrue(evidence["advisory_only"])
+        self.assertEqual(evidence["campaign_id"], self.campaign_id)
+        self.assertEqual(evidence["run_id"], "profile-fixture-run")
+        self.assertEqual(evidence["raw_trace"]["object_id"], report["raw_trace"]["object_id"])
+        self.assertEqual(
+            hashlib.sha256((self.state / "history.sqlite3").read_bytes()).hexdigest(),
+            history_before,
+        )
+        actions = self._campaign_rows("budget_actions")
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["status"], "SETTLED")
+        self.assertEqual(actions[0]["reserved_wall_ms"], 900_000)
+        self.assertEqual(actions[0]["reserved_gpu_ms"], 0)
+        self.assertLessEqual(actions[0]["actual_wall_ms"], 900_000)
+        self.assertEqual(actions[0]["actual_gpu_ms"], 0)
+        replay = _FakeProfileRunner()
+        with self.assertRaisesRegex(ValueError, "terminal budget intent"):
+            self._collect(replay, _FakeGate())
+        self.assertEqual(replay.calls, [])
+
+    def test_hardware_recipe_requires_quick_and_mounts_only_exact_devices(self):
+        self._record(stage="quick", suite="quick")
+        runner = _FakeProfileRunner(
+            metrics={
+                "gpu_active_percent": {"status": "AVAILABLE", "value": 0.0}
+            }
+        )
+        report = self._collect(
+            runner,
+            _FakeGate(),
+            recipe="metax-hardware-counters-v1",
+        )
+        self.assertEqual(report["metrics"]["gpu_active_percent"]["value"], 0.0)
+        self.assertEqual(report["resource_lease"]["resource_id"], "gpu1")
+        argv = runner.calls[0][0]
+        mounted = [
+            argv[index + 1]
+            for index, item in enumerate(argv[:-1])
+            if item == "--device"
+        ]
+        self.assertEqual(
+            mounted,
+            [f"{device}:{device}:rwm" for device in GPU1_DEVICES],
+        )
+        self.assertEqual(argv[argv.index("--resource-id") + 1], "gpu1")
+        self.assertEqual(
+            int(argv[argv.index("--fencing-epoch") + 1]),
+            report["resource_lease"]["fencing_epoch"],
+        )
+        actions = self._campaign_rows("budget_actions")
+        self.assertEqual(actions[0]["status"], "SETTLED")
+        self.assertEqual(actions[0]["reserved_gpu_ms"], 900_000)
+        leases = self._campaign_rows("resource_leases")
+        self.assertEqual(leases[-1]["status"], "RELEASED")
+        with CampaignStore(self.campaign_database) as campaigns:
+            self.assertIsNone(campaigns.get_active_resource_lease("gpu1"))
+
+    def test_hardware_recipe_rejects_smoke_before_runner(self):
+        self._record(stage="smoke", suite="smoke")
+        runner = _FakeProfileRunner()
+        with self.assertRaisesRegex(ValueError, "at least correct quick"):
+            self._collect(
+                runner,
+                _FakeGate(),
+                recipe="metax-hardware-counters-v1",
+            )
+        self.assertEqual(runner.calls, [])
+
+    def test_preexisting_active_gpu1_lease_blocks_runner_and_settles_intent(self):
+        self._record(stage="quick", suite="quick")
+        owner = self._create_campaign("supervisor-owner")
+        with CampaignStore(self.campaign_database) as campaigns:
+            existing = campaigns.acquire_resource(
+                owner,
+                resource_id="gpu1",
+                ttl_seconds=PROFILE_TIMEOUT_SECONDS,
+            )
+        runner = _FakeProfileRunner()
+        with self.assertRaisesRegex(ValueError, "active unexpired lease"):
+            self._collect(
+                runner,
+                _FakeGate(),
+                recipe="metax-hardware-counters-v1",
+            )
+        self.assertEqual(runner.calls, [])
+        actions = self._campaign_rows("budget_actions")
+        self.assertEqual(actions[0]["status"], "SETTLED")
+        with CampaignStore(self.campaign_database) as campaigns:
+            current = campaigns.get_active_resource_lease("gpu1")
+            self.assertEqual(current, existing)
+            self.assertEqual(
+                campaigns.get_campaign(self.campaign_id)["status"], "RUNNING"
+            )
+            campaigns.release_resource(existing)
+
+    def test_hardware_timeout_quarantines_pauses_and_same_action_never_replays(self):
+        self._record(stage="quick", suite="quick")
+        runner = _FakeProfileRunner(timed_out=True)
+        with self.assertRaisesRegex(ValueError, "timed out"):
+            self._collect(
+                runner,
+                _FakeGate(),
+                recipe="metax-hardware-counters-v1",
+            )
+        self.assertEqual(len(runner.calls), 1)
+        actions = self._campaign_rows("budget_actions")
+        self.assertEqual(actions[0]["status"], "RESERVED")
+        leases = self._campaign_rows("resource_leases")
+        self.assertEqual(leases[-1]["status"], "QUARANTINED")
+        with CampaignStore(self.campaign_database) as campaigns:
+            self.assertEqual(
+                campaigns.get_campaign(self.campaign_id)["status"],
+                "PAUSED_UNKNOWN_OUTCOME",
+            )
+            with self.assertRaisesRegex(ValueError, "doctor"):
+                campaigns.resume_campaign(self.campaign_id)
+
+        retry = _FakeProfileRunner()
+        with self.assertRaisesRegex(ValueError, "replay is forbidden"):
+            self._collect(
+                retry,
+                _FakeGate(),
+                recipe="metax-hardware-counters-v1",
+            )
+        self.assertEqual(retry.calls, [])
+        self.assertEqual(len(self._campaign_rows("budget_actions")), 1)
+
+    def test_hardware_interruption_is_unknown_and_quarantined(self):
+        self._record(stage="quick", suite="quick")
+
+        def interrupt(_argv):
+            raise KeyboardInterrupt()
+
+        runner = _FakeProfileRunner(on_run=interrupt)
+        with self.assertRaises(KeyboardInterrupt):
+            self._collect(
+                runner,
+                _FakeGate(),
+                recipe="metax-hardware-counters-v1",
+            )
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(
+            self._campaign_rows("budget_actions")[0]["status"], "RESERVED"
+        )
+        self.assertEqual(
+            self._campaign_rows("resource_leases")[-1]["status"],
+            "QUARANTINED",
+        )
+
+    def test_crash_left_reserved_action_is_reconciled_without_replay(self):
+        self._record(stage="quick", suite="quick")
+        recipe = BUILTIN_PROFILE_RECIPES["metax-hardware-counters-v1"]
+        subject = profiling._read_only_history_subject(
+            state_dir=self.state,
+            experiment_uid=self.uid,
+            namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+            execution_environment_digest=self.environment.digest,
+            recipe=recipe,
+        )
+        action_key = profiling._profile_action_key(
+            campaign_id=self.campaign_id,
+            gate_id="production",
+            recipe=recipe,
+            subject=subject,
+        )
+        with CampaignStore(self.campaign_database) as campaigns:
+            campaigns.reserve_budget(
+                self.campaign_id,
+                idempotency_key=action_key,
+                action_kind="PROFILE_HARDWARE_COUNTERS",
+                amount=BudgetAmount(wall_ms=900_000, gpu_ms=900_000),
+            )
+            campaigns.acquire_resource(
+                self.campaign_id,
+                resource_id="gpu1",
+                ttl_seconds=PROFILE_TIMEOUT_SECONDS,
+            )
+
+        runner = _FakeProfileRunner()
+        with self.assertRaisesRegex(ValueError, "replay is forbidden"):
+            self._collect(
+                runner,
+                _FakeGate(),
+                recipe=recipe.recipe_id,
+            )
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(
+            self._campaign_rows("budget_actions")[0]["status"], "RESERVED"
+        )
+        self.assertEqual(
+            self._campaign_rows("resource_leases")[-1]["status"],
+            "QUARANTINED",
+        )
+
+    def test_known_nonfatal_hardware_failure_settles_and_releases(self):
+        self._record(stage="quick", suite="quick")
+        known = _FakeProfileRunner(returncode=9)
+        with self.assertRaisesRegex(ValueError, "non-zero"):
+            self._collect(
+                known,
+                _FakeGate(),
+                recipe="metax-hardware-counters-v1",
+            )
+        self.assertEqual(
+            self._campaign_rows("budget_actions")[0]["status"],
+            "SETTLED",
+        )
+        self.assertEqual(
+            self._campaign_rows("resource_leases")[-1]["status"],
+            "RELEASED",
+        )
+        with CampaignStore(self.campaign_database) as campaigns:
+            self.assertEqual(
+                campaigns.get_campaign(self.campaign_id)["status"], "RUNNING"
+            )
+
+    def test_fatal_hardware_marker_quarantines_and_hard_pauses(self):
+        self._record(stage="quick", suite="quick")
+        fatal = _FakeProfileRunner(
+            returncode=137,
+            stderr="driver: ATU fault while collecting counters",
+        )
+        with self.assertRaisesRegex(ValueError, "fatal GPU marker"):
+            self._collect(
+                fatal,
+                _FakeGate(),
+                recipe="metax-hardware-counters-v1",
+            )
+        self.assertEqual(
+            self._campaign_rows("budget_actions")[0]["status"],
+            "RESERVED",
+        )
+        self.assertEqual(
+            self._campaign_rows("resource_leases")[-1]["status"],
+            "QUARANTINED",
+        )
+        with CampaignStore(self.campaign_database) as campaigns:
+            self.assertEqual(
+                campaigns.get_campaign(self.campaign_id)["status"],
+                "PAUSED_HARD_FAILURE",
+            )
+
+    def test_hardware_evidence_persistence_failure_is_unknown_and_quarantined(self):
+        self._record(stage="quick", suite="quick")
+        runner = _FakeProfileRunner()
+        with mock.patch.object(
+            profiling,
+            "_store_cas_object",
+            side_effect=OSError("fixture CAS persistence failure"),
+        ):
+            with self.assertRaisesRegex(OSError, "CAS persistence"):
+                self._collect(
+                    runner,
+                    _FakeGate(),
+                    recipe="metax-hardware-counters-v1",
+                )
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(
+            self._campaign_rows("budget_actions")[0]["status"], "RESERVED"
+        )
+        self.assertEqual(
+            self._campaign_rows("resource_leases")[-1]["status"],
+            "QUARANTINED",
+        )
+        with CampaignStore(self.campaign_database) as campaigns:
+            self.assertEqual(
+                campaigns.get_campaign(self.campaign_id)["status"],
+                "PAUSED_UNKNOWN_OUTCOME",
+            )
+
+    def test_budget_lease_soak_and_host_lock_drift_never_reach_runner(self):
+        recipe = "metax-hardware-counters-v1"
+
+        too_small = self._create_campaign(
+            "profile-budget-too-small", wall_ms=899_999, gpu_ms=899_999
+        )
+        too_small_identity = self._record_for_campaign(
+            too_small, 101, stage="quick", suite="quick"
+        )
+        runner = _FakeProfileRunner()
+        with self.assertRaisesRegex(ValueError, "exceeds a frozen limit"):
+            self._collect(
+                runner,
+                _FakeGate(),
+                recipe=recipe,
+                campaign_id=too_small,
+                experiment_uid=too_small_identity.experiment_uid,
+            )
+        self.assertEqual(runner.calls, [])
+
+        lease_drift = self._create_campaign("profile-lease-drift")
+        lease_identity = self._record_for_campaign(
+            lease_drift, 102, stage="quick", suite="quick"
+        )
+        runner = _FakeProfileRunner()
+        with mock.patch.object(
+            CampaignStore, "get_active_resource_lease", return_value=None
+        ):
+            with self.assertRaisesRegex(ValueError, "lease or fencing"):
+                self._collect(
+                    runner,
+                    _FakeGate(),
+                    recipe=recipe,
+                    campaign_id=lease_drift,
+                    experiment_uid=lease_identity.experiment_uid,
+                )
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(
+            self._campaign_rows("budget_actions", lease_drift)[0]["status"],
+            "SETTLED",
+        )
+
+        soak_drift = self._create_campaign("profile-soak-drift")
+        soak_identity = self._record_for_campaign(
+            soak_drift, 103, stage="quick", suite="quick"
+        )
+        runner = _FakeProfileRunner()
+        with self.assertRaisesRegex(ValueError, "invariant changed"):
+            self._collect(
+                runner,
+                _FakeGate(change_after=2),
+                recipe=recipe,
+                campaign_id=soak_drift,
+                experiment_uid=soak_identity.experiment_uid,
+            )
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(
+            self._campaign_rows("budget_actions", soak_drift)[0]["status"],
+            "SETTLED",
+        )
+
+        lock_drift = self._create_campaign("profile-lock-held")
+        lock_identity = self._record_for_campaign(
+            lock_drift, 104, stage="quick", suite="quick"
+        )
+        runner = _FakeProfileRunner()
+        with profiling.gpu_lock(self.controller / "gpu1.lock"):
+            with self.assertRaisesRegex(ValueError, "controller lock"):
+                self._collect(
+                    runner,
+                    _FakeGate(),
+                    recipe=recipe,
+                    campaign_id=lock_drift,
+                    experiment_uid=lock_identity.experiment_uid,
+                )
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(
+            self._campaign_rows("budget_actions", lock_drift)[0]["status"],
+            "SETTLED",
+        )
+
+    def test_reserved_budget_intent_drift_is_unknown_before_runner(self):
+        self._record(stage="quick", suite="quick")
+
+        def cancel_after_reservation(status_call):
+            if status_call != 3:
+                return
+            with sqlite3.connect(self.campaign_database) as connection:
+                connection.execute(
+                    """
+                    UPDATE budget_actions SET status = 'CANCELLED', settled_at = 'fixture'
+                    WHERE campaign_id = ? AND status = 'RESERVED'
+                    """,
+                    (self.campaign_id,),
+                )
+
+        runner = _FakeProfileRunner()
+        with self.assertRaisesRegex(ValueError, "cleanup could not be persisted"):
+            self._collect(
+                runner,
+                _FakeGate(on_status=cancel_after_reservation),
+                recipe="metax-hardware-counters-v1",
+            )
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(
+            self._campaign_rows("budget_actions")[0]["status"], "CANCELLED"
+        )
+        self.assertEqual(
+            self._campaign_rows("resource_leases")[-1]["status"],
+            "QUARANTINED",
+        )
+        with CampaignStore(self.campaign_database) as campaigns:
+            self.assertEqual(
+                campaigns.get_campaign(self.campaign_id)["status"],
+                "PAUSED_UNKNOWN_OUTCOME",
+            )
+
+    def test_wrong_namespace_environment_or_failed_correctness_is_closed(self):
+        self._record(passed=False)
+        runner = _FakeProfileRunner()
+        with self.assertRaisesRegex(ValueError, "passing correctness"):
+            self._collect(runner, _FakeGate())
+        with self.assertRaisesRegex(ValueError, "namespace"):
+            run_bounded_profile(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id=self.campaign_id,
+                gate_id="production",
+                experiment_uid=self.uid,
+                namespace_id="sha256:" + "f" * 64,
+                execution_environment_digest=self.environment.digest,
+                recipe_id="metax-compile-metadata-v1",
+                runner=runner,
+                _gate_factory=lambda store, gate_id, collector: _FakeGate(),
+            )
+        with self.assertRaisesRegex(ValueError, "environment assertion"):
+            run_bounded_profile(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id=self.campaign_id,
+                gate_id="production",
+                experiment_uid=self.uid,
+                namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                execution_environment_digest="sha256:" + "e" * 64,
+                recipe_id="metax-compile-metadata-v1",
+                runner=runner,
+                _gate_factory=lambda store, gate_id, collector: _FakeGate(),
+            )
+
+    def test_missing_campaign_fails_before_budget_or_runner(self):
+        missing_campaign = "missing-profile-campaign"
+        identity = self._record(
+            campaign_id=missing_campaign,
+            experiment_uid="00000000-0000-4000-8000-000000000201",
+            run_id="missing-profile-run",
+            link_child=False,
+        )
+        runner = _FakeProfileRunner()
+        with self.assertRaisesRegex(ValueError, "Campaign does not exist"):
+            self._collect(
+                runner,
+                _FakeGate(),
+                campaign_id=missing_campaign,
+                experiment_uid=identity.experiment_uid,
+            )
+        self.assertEqual(runner.calls, [])
+
+    def test_subject_must_belong_to_selected_campaign_and_child_run(self):
+        campaign_b = self._create_campaign("profile-campaign-b")
+        campaign_a_identity = self._record()
+        runner = _FakeProfileRunner()
+        with self.assertRaisesRegex(ValueError, "another Campaign"):
+            self._collect(
+                runner,
+                _FakeGate(),
+                campaign_id=campaign_b,
+                experiment_uid=campaign_a_identity.experiment_uid,
+            )
+
+        ordinary_identity = self._record(
+            campaign_id=None,
+            experiment_uid="00000000-0000-4000-8000-000000000202",
+            run_id="ordinary-profile-run",
+            link_child=False,
+        )
+        with self.assertRaisesRegex(ValueError, "ordinary Run"):
+            self._collect(
+                runner,
+                _FakeGate(),
+                experiment_uid=ordinary_identity.experiment_uid,
+            )
+
+        unlinked_identity = self._record(
+            campaign_id=self.campaign_id,
+            experiment_uid="00000000-0000-4000-8000-000000000203",
+            run_id="unlinked-profile-run",
+            link_child=False,
+        )
+        with self.assertRaisesRegex(ValueError, "not a Campaign child run"):
+            self._collect(
+                runner,
+                _FakeGate(),
+                experiment_uid=unlinked_identity.experiment_uid,
+            )
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self._campaign_rows("budget_actions"), [])
+
+    def test_soak_denial_and_invariant_change_fail_closed(self):
+        self._record()
+        runner = _FakeProfileRunner()
+        with self.assertRaisesRegex(ValueError, "does not allow profiling"):
+            self._collect(runner, _FakeGate(allowed=False))
+        self.assertEqual(runner.calls, [])
+
+        runner = _FakeProfileRunner()
+        with self.assertRaisesRegex(ValueError, "invariant changed"):
+            self._collect(runner, _FakeGate(change_after=2))
+        self.assertEqual(runner.calls, [])
+        self.assertFalse((self.controller / "objects").exists())
+
+    def test_timeout_and_output_cap_are_terminal_without_evidence(self):
+        for index, (runner, message) in enumerate((
+            (_FakeProfileRunner(timed_out=True), "timed out"),
+            (_FakeProfileRunner(output_limited=True), "output cap"),
+        )):
+            with self.subTest(message=message):
+                campaign_id = self._create_campaign(f"timeout-{index}")
+                identity = self._record_for_campaign(campaign_id, 210 + index)
+                with self.assertRaisesRegex(ValueError, message):
+                    self._collect(
+                        runner,
+                        _FakeGate(),
+                        campaign_id=campaign_id,
+                        experiment_uid=identity.experiment_uid,
+                    )
+                if index == 0:
+                    replay = _FakeProfileRunner()
+                    with self.assertRaisesRegex(ValueError, "replay is forbidden"):
+                        self._collect(
+                            replay,
+                            _FakeGate(),
+                            campaign_id=campaign_id,
+                            experiment_uid=identity.experiment_uid,
+                        )
+                    self.assertEqual(replay.calls, [])
+        self.assertFalse((self.controller / "objects").exists())
+
+    def test_runner_start_argv_returncode_and_empty_trace_fail_closed(self):
+        for index, (runner, message) in enumerate((
+            (_FakeProfileRunner(start_error=True), "could not start"),
+            (_FakeProfileRunner(changed_argv=True), "fixed argv"),
+            (_FakeProfileRunner(returncode=9), "non-zero"),
+            (_FakeProfileRunner(raw_trace=b""), "must not be empty"),
+        )):
+            with self.subTest(message=message):
+                campaign_id = self._create_campaign(f"runner-failure-{index}")
+                identity = self._record_for_campaign(campaign_id, 220 + index)
+                with self.assertRaisesRegex(ValueError, message):
+                    self._collect(
+                        runner,
+                        _FakeGate(),
+                        campaign_id=campaign_id,
+                        experiment_uid=identity.experiment_uid,
+                    )
+        self.assertFalse((self.controller / "objects").exists())
+
+    def test_runner_identity_echo_and_metric_whitelist_fail_closed(self):
+        self._record()
+        tampered = _FakeProfileRunner(
+            result_overrides={"namespace_id": "sha256:" + "f" * 64}
+        )
+        with self.assertRaisesRegex(ValueError, "trusted request"):
+            self._collect(tampered, _FakeGate())
+        unknown = _FakeProfileRunner(
+            metrics={"agent_metric": {"status": "AVAILABLE", "value": 1}}
+        )
+        campaign_id = self._create_campaign("unknown-metric")
+        identity = self._record_for_campaign(campaign_id, 230)
+        with self.assertRaisesRegex(ValueError, "non-whitelisted"):
+            self._collect(
+                unknown,
+                _FakeGate(),
+                campaign_id=campaign_id,
+                experiment_uid=identity.experiment_uid,
+            )
+        self.assertFalse((self.controller / "objects").exists())
+
+    def test_runner_must_echo_subject_run_identity(self):
+        self._record()
+        runner = _FakeProfileRunner(result_overrides={"run_id": "other-run"})
+        with self.assertRaisesRegex(ValueError, "trusted request"):
+            self._collect(runner, _FakeGate())
+        self.assertEqual(len(runner.calls), 1)
+
+    def test_metric_schema_and_value_validation_is_fail_closed(self):
+        compile_recipe = BUILTIN_PROFILE_RECIPES["metax-compile-metadata-v1"]
+        hardware_recipe = BUILTIN_PROFILE_RECIPES["metax-hardware-counters-v1"]
+        with self.assertRaisesRegex(ValueError, "JSON object"):
+            profiling._metric_summary(compile_recipe, {"metrics": []})
+
+        invalid_compile_metrics = (
+            ({"register_count": 1}, "fixed schema"),
+            (
+                {
+                    "register_count": {
+                        "status": "UNAVAILABLE",
+                        "reason_code": "AGENT_REASON",
+                    }
+                },
+                "unknown unavailable",
+            ),
+            (
+                {"register_count": {"status": "OTHER", "value": 1}},
+                "availability",
+            ),
+            (
+                {"register_count": {"status": "AVAILABLE", "value": True}},
+                "integer",
+            ),
+            (
+                {"register_count": {"status": "AVAILABLE", "value": -1}},
+                "integer",
+            ),
+            (
+                {
+                    "compiler_version_digest": {
+                        "status": "AVAILABLE",
+                        "value": "not-a-digest",
+                    }
+                },
+                "digest",
+            ),
+        )
+        for metrics, message in invalid_compile_metrics:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    profiling._metric_summary(compile_recipe, {"metrics": metrics})
+
+        for value in (True, "fast", math.nan, -0.5):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "numeric"):
+                    profiling._metric_summary(
+                        hardware_recipe,
+                        {
+                            "metrics": {
+                                "gpu_active_percent": {
+                                    "status": "AVAILABLE",
+                                    "value": value,
+                                }
+                            }
+                        },
+                    )
+
+        summary = profiling._metric_summary(
+            compile_recipe,
+            {
+                "metrics": {
+                    "register_count": {"status": "AVAILABLE", "value": 64},
+                    "compiler_version_digest": {
+                        "status": "AVAILABLE",
+                        "value": "sha256:" + "a" * 64,
+                    },
+                    "spill_bytes": {
+                        "status": "UNAVAILABLE",
+                        "reason_code": "NOT_SUPPORTED",
+                    },
+                }
+            },
+        )
+        self.assertEqual(summary["register_count"]["value"], 64)
+        self.assertEqual(summary["spill_bytes"]["status"], "UNAVAILABLE")
+
+    def test_gate_authorization_rejects_missing_invalid_and_stale_digest(self):
+        class Gate:
+            def __init__(self, statuses, allowed=True):
+                self.statuses = list(statuses)
+                self.allowed = allowed
+
+            def status(self):
+                return self.statuses.pop(0)
+
+            def profiling_allowed(self):
+                return self.allowed
+
+        base = {
+            "current_observation_status": "AVAILABLE",
+            "profiling_allowed": True,
+            "active_invariant_matches": True,
+            "current_invariant_snapshot_digest": "sha256:" + "a" * 64,
+        }
+        missing = dict(base)
+        missing.pop("current_invariant_snapshot_digest")
+        with self.assertRaisesRegex(ValueError, "no current invariant"):
+            profiling._gate_authorization(Gate((missing, missing)))
+
+        invalid = dict(base)
+        invalid["current_invariant_snapshot_digest"] = "invalid"
+        with self.assertRaisesRegex(ValueError, "sha256"):
+            profiling._gate_authorization(Gate((invalid, invalid)))
+
+        second_unavailable = dict(base)
+        second_unavailable["current_observation_status"] = "UNAVAILABLE"
+        with self.assertRaisesRegex(ValueError, "changed during authorization"):
+            profiling._gate_authorization(Gate((base, second_unavailable)))
+
+        with self.assertRaisesRegex(ValueError, "changed during profiling"):
+            profiling._gate_authorization(
+                Gate((base, base)),
+                expected_invariant_digest="sha256:" + "b" * 64,
+            )
+
+    def test_reserved_intent_soak_recheck_exempts_only_its_single_budget_count(self):
+        digest = "sha256:" + "a" * 64
+        status = {
+            "current_observation_status": "AVAILABLE",
+            "profiling_allowed": False,
+            "active_invariant_matches": True,
+            "current_invariant_snapshot_digest": digest,
+        }
+
+        class Gate:
+            def status(self):
+                return status
+
+            def profiling_allowed(self):
+                return False
+
+        class Store:
+            def soak_profiling_allowed(self, gate_id, invariant_digest):
+                return gate_id == "production" and invariant_digest == digest
+
+        counts = {field: 0 for field in profiling.COUNT_FIELDS}
+        counts["budget_leak_count"] = 1
+
+        class Collector:
+            def __init__(self, selected_counts):
+                self.selected_counts = selected_counts
+
+            def collect(self, **_kwargs):
+                return SimpleNamespace(
+                    status="AVAILABLE",
+                    invariant_snapshot_digest=digest,
+                    counts=self.selected_counts,
+                )
+
+        profiling._gate_authorization_with_reserved_profile_intent(
+            Gate(),
+            collector=Collector(counts),
+            store=Store(),
+            gate_id="production",
+            expected_invariant_digest=digest,
+        )
+        extra_violation = dict(counts)
+        extra_violation["lease_overlap_count"] = 1
+        with self.assertRaisesRegex(ValueError, "violations beyond"):
+            profiling._gate_authorization_with_reserved_profile_intent(
+                Gate(),
+                collector=Collector(extra_violation),
+                store=Store(),
+                gate_id="production",
+                expected_invariant_digest=digest,
+            )
+
+    def test_noncanonical_campaign_database_and_unknown_recipe_fail_closed(self):
+        self._record()
+        runner = _FakeProfileRunner()
+        other = self.root / "campaign.sqlite3"
+        other.write_bytes(self.campaign_database.read_bytes())
+        with self.assertRaisesRegex(ValueError, "conventional"):
+            run_bounded_profile(
+                self.config,
+                campaign_database=other,
+                campaign_id=self.campaign_id,
+                gate_id="production",
+                experiment_uid=self.uid,
+                namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                execution_environment_digest=self.environment.digest,
+                recipe_id="metax-compile-metadata-v1",
+                runner=runner,
+                _gate_factory=lambda store, gate_id, collector: _FakeGate(),
+            )
+        with self.assertRaisesRegex(ValueError, "reviewed built-in"):
+            run_bounded_profile(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id=self.campaign_id,
+                gate_id="production",
+                experiment_uid=self.uid,
+                namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                execution_environment_digest=self.environment.digest,
+                recipe_id="agent-supplied-recipe",
+                runner=runner,
+                _gate_factory=lambda store, gate_id, collector: _FakeGate(),
+            )
+        self.assertEqual(runner.calls, [])
+
+    def test_cli_collect_has_only_frozen_recipe_selection(self):
+        args = build_parser().parse_args(
+            [
+                "profile",
+                "collect",
+                "--config",
+                "/tmp/config.json",
+                "--database",
+                "/tmp/campaign/campaign.sqlite3",
+                "--campaign-id",
+                self.campaign_id,
+                "--gate-id",
+                "production",
+                "--experiment-uid",
+                self.uid,
+                "--namespace-id",
+                CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                "--environment-digest",
+                self.environment.digest,
+                "--recipe",
+                "metax-compile-metadata-v1",
+            ]
+        )
+        self.assertEqual(args.profile_command, "collect")
+        self.assertEqual(args.campaign_id, self.campaign_id)
+        self.assertFalse(hasattr(args, "image"))
+        self.assertFalse(hasattr(args, "resource_id"))
+        self.assertFalse(hasattr(args, "device"))
+        self.assertFalse(hasattr(args, "timeout"))
+
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(
+                [
+                    "profile",
+                    "collect",
+                    "--config",
+                    "/tmp/config.json",
+                    "--database",
+                    "/tmp/campaign/campaign.sqlite3",
+                    "--gate-id",
+                    "production",
+                    "--experiment-uid",
+                    self.uid,
+                    "--namespace-id",
+                    CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                    "--environment-digest",
+                    self.environment.digest,
+                    "--recipe",
+                    "metax-compile-metadata-v1",
+                ]
+            )
+
+    def test_builtin_recipe_registry_is_sealed(self):
+        with self.assertRaises(TypeError):
+            BUILTIN_PROFILE_RECIPES["agent-recipe"] = (  # type: ignore[index]
+                BUILTIN_PROFILE_RECIPES["metax-compile-metadata-v1"]
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

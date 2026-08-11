@@ -33,6 +33,7 @@ from kernel_research.autorun.proposal import (
 )
 from kernel_research.autorun.runtime import (
     CommandRunner,
+    EVALUATOR_REQUEST_IDENTITY_CONTAINER_PATH,
     evaluator_argv,
     proposer_argv,
     write_opencode_config,
@@ -498,6 +499,35 @@ class ConfigAndArgvTests(unittest.TestCase):
                 self.assertIn(f"{device}:{device}", joined)
             self.assertIn("/candidate/kernel.py", joined)
             self.assertIn("/baseline/kernel.py", joined)
+            self.assertNotIn("--request-identity", eval_args)
+            self.assertNotIn(EVALUATOR_REQUEST_IDENTITY_CONTAINER_PATH, joined)
+
+            request_identity = root / "request-identity.json"
+            request_identity.write_text("{}", encoding="utf-8")
+            identity_args = evaluator_argv(
+                config,
+                name="eval-identity",
+                run_id="run",
+                candidate_path=candidate,
+                suite="full",
+                baseline_path=baseline,
+                cache_dir=config.evaluator_cache_dir / "candidate-identity",
+                request_identity_path=request_identity,
+            )
+            identity_mount = (
+                f"type=bind,src={request_identity},"
+                f"dst={EVALUATOR_REQUEST_IDENTITY_CONTAINER_PATH},readonly"
+            )
+            self.assertIn(identity_mount, identity_args)
+            identity_option = identity_args.index("--request-identity")
+            self.assertEqual(
+                identity_args[identity_option + 1],
+                EVALUATOR_REQUEST_IDENTITY_CONTAINER_PATH,
+            )
+            self.assertLess(
+                identity_args.index(identity_mount),
+                identity_args.index(config.evaluator_image),
+            )
             opencode = json.loads(opencode_config.read_text(encoding="utf-8"))
             self.assertEqual(opencode["permission"], {"*": "deny"})
             self.assertNotIn("subagent_depth", opencode)
@@ -753,6 +783,7 @@ print('CONTROLLER_IMPORT_OK')
             payload = json.loads(output.getvalue())
             self.assertEqual(exit_code, 0)
             self.assertEqual(payload["command"], "evaluate-raw")
+            self.assertNotIn("request_identity", payload)
             self.assertFalse((root / ".autoresearch").exists())
             self.assertFalse(any(root.rglob("*.sqlite3")))
 
@@ -915,7 +946,14 @@ class FakeEvaluator:
         run_id: str,
         iteration_index: int,
         stage: str,
+        request_identity: dict | None = None,
     ) -> dict:
+        values = {
+            "candidate_path": candidate_path,
+            "suite": suite,
+            "baseline_path": baseline_path,
+            "request_identity": request_identity,
+        }
         self.stages.append(stage)
         if stage == "confirmation" and self.interrupt_confirmation:
             self.interrupt_confirmation = False
@@ -930,7 +968,7 @@ class FakeEvaluator:
             ),
         }
         if suite != "full":
-            return {
+            return self._with_identity(values, {
                 "status": "SUCCESS",
                 "cases": [
                     {
@@ -944,7 +982,7 @@ class FakeEvaluator:
                 ],
                 "environment": {},
                 "error": None,
-            }
+            })
         cases = [
             {
                 "case_id": name,
@@ -958,12 +996,41 @@ class FakeEvaluator:
             }
             for name in FULL_CASES
         ]
-        return {
+        return self._with_identity(values, {
             "status": "SUCCESS",
             "cases": cases,
             "environment": {},
             "error": None,
+        })
+
+    @staticmethod
+    def _with_identity(values: dict, result: dict) -> dict:
+        identity = values.get("request_identity")
+        if not isinstance(identity, dict):
+            raise AssertionError("trusted evaluator fixture requires identity")
+        namespace = identity.get("namespace")
+        if not isinstance(namespace, dict):
+            raise AssertionError("fixture identity is missing namespace")
+        protocol = namespace.get("evaluation_protocol")
+        if not isinstance(protocol, dict):
+            raise AssertionError("fixture identity is missing protocol")
+        candidate_path = Path(values["candidate_path"])
+        baseline_path = values.get("baseline_path")
+        envelope = {
+            "schema_version": 1,
+            "command": "evaluate-raw",
+            "backend": "c500",
+            "suite": values["suite"],
+            "candidate_hash": hashlib.sha256(candidate_path.read_bytes()).hexdigest(),
+            "baseline_candidate_hash": (
+                hashlib.sha256(Path(baseline_path).read_bytes()).hexdigest()
+                if baseline_path is not None
+                else None
+            ),
+            "evaluation_protocol_id": protocol["id"],
+            "request_identity": identity,
         }
+        return {**envelope, **result}
 
 
 class RejectingEvaluator(FakeEvaluator):
@@ -974,12 +1041,12 @@ class RejectingEvaluator(FakeEvaluator):
 
     def evaluate(self, **values):
         self.stages.append(str(values["stage"]))
-        return {
+        return self._with_identity(values, {
             "status": self.status,
             "cases": [],
             "environment": {},
             "error": self.error,
-        }
+        })
 
 
 class StageFailureEvaluator(FakeEvaluator):
@@ -991,12 +1058,12 @@ class StageFailureEvaluator(FakeEvaluator):
     def evaluate(self, **values):
         if values["stage"] == self.failure_stage:
             self.stages.append(str(values["stage"]))
-            return {
+            return self._with_identity(values, {
                 "status": self.failure_status,
                 "cases": [],
                 "environment": {},
                 "error": "fixture stage failure",
-            }
+            })
         return super().evaluate(**values)
 
 
@@ -1016,7 +1083,7 @@ class VariableFullEvaluator(FakeEvaluator):
             if stage == "confirmation"
             else self.primary_us
         )
-        return {
+        return self._with_identity(values, {
             "status": "SUCCESS",
             "cases": [
                 {
@@ -1033,7 +1100,7 @@ class VariableFullEvaluator(FakeEvaluator):
             ],
             "environment": {},
             "error": None,
-        }
+        })
 
 
 class NoopRunner:
@@ -1129,7 +1196,7 @@ class StateMachineTests(unittest.TestCase):
                 iteration = store.latest_iteration(run_id)
             self.assertEqual(iteration["outcome"], "PROPOSAL_VALIDATED")
 
-    def test_primary_resume_runs_same_hash_confirmation_without_reproposal(self) -> None:
+    def test_interrupted_confirmation_is_quarantined_without_retry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             evaluator = FakeEvaluator(interrupt_confirmation=True)
             controller, config, _ = self._controller(Path(temporary), evaluator)
@@ -1141,9 +1208,16 @@ class StateMachineTests(unittest.TestCase):
                 self.assertEqual(iteration["stage"], "CONFIRMATION")
                 self.assertIsNotNone(iteration["candidate_hash"])
             result = controller._run_loop(run_id)
-            self.assertEqual(result["status"], "PROMOTED")
+            self.assertEqual(result["status"], "HARD_FAILED")
             self.assertEqual(evaluator.stages.count("smoke"), 1)
-            self.assertEqual(evaluator.stages.count("confirmation"), 2)
+            self.assertEqual(evaluator.stages.count("confirmation"), 1)
+            with ControllerStore(controller.controller_db) as store:
+                iteration = store.latest_iteration(run_id)
+                attempts = store.list_evaluation_attempts(
+                    run_id, iteration_id=int(iteration["id"])
+                )
+            self.assertEqual(iteration["outcome"], "UNKNOWN_GPU_OUTCOME")
+            self.assertEqual(attempts[-1]["status"], "UNKNOWN_OUTCOME")
 
     def test_history_controller_non_atomic_window_is_reconciled_by_note(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

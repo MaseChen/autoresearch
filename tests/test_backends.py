@@ -28,6 +28,10 @@ from kernel_research.backends import (
     _mx_smi_fingerprint,
 )
 from kernel_research.contract import KERNEL_PARAMETERS, validate_candidate
+from kernel_research.constants import (
+    CURRENT_C500_EVALUATION_PROTOCOL_ID,
+    LEGACY_C500_EVALUATION_PROTOCOL_ID,
+)
 
 
 SIDE_EFFECT_CANDIDATE = """\
@@ -60,10 +64,35 @@ class MockBackendTests(unittest.TestCase):
             self.assertFalse(payload["environment"]["candidate_imported"])
             self.assertFalse(payload["environment"]["candidate_executed"])
             self.assertFalse(payload["environment"]["performance_measurement"])
+            self.assertEqual(
+                payload["environment"]["evaluation_protocol_id"],
+                CURRENT_C500_EVALUATION_PROTOCOL_ID,
+            )
             self.assertEqual(payload["benchmark_config"]["warmup_iterations"], 0)
             self.assertEqual(payload["benchmark_config"]["measurement_rounds"], 0)
             self.assertNotIn("latency", json.dumps(payload).lower())
             json.dumps(payload)
+
+    def test_mock_accepts_only_registered_protocol_revisions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "kernel.py"
+            candidate.write_text(SIDE_EFFECT_CANDIDATE, encoding="utf-8")
+            legacy = MockBackend().evaluate(
+                candidate,
+                suite="quick",
+                evaluation_protocol_id=LEGACY_C500_EVALUATION_PROTOCOL_ID,
+            )
+            self.assertEqual(
+                legacy.environment["evaluation_protocol_id"],
+                LEGACY_C500_EVALUATION_PROTOCOL_ID,
+            )
+            with self.assertRaisesRegex(
+                ValueError, "unsupported evaluation protocol"
+            ):
+                MockBackend().evaluate(
+                    candidate,
+                    evaluation_protocol_id="unregistered-protocol",
+                )
 
     def test_contract_error_also_does_not_import_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -97,6 +126,54 @@ class MockBackendTests(unittest.TestCase):
 
 
 class C500BackendTests(unittest.TestCase):
+    def test_protocol_reaches_suite_lookup_and_unknown_fails_before_doctor(
+        self,
+    ) -> None:
+        health = SimpleNamespace(
+            status="SUCCESS",
+            error=None,
+            environment={"device": "cuda:0"},
+            benchmark_config={},
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "kernel.py"
+            candidate.write_text(SIDE_EFFECT_CANDIDATE, encoding="utf-8")
+            backend = C500Backend()
+            with (
+                mock.patch.object(backend, "doctor", return_value=health),
+                mock.patch(
+                    "kernel_research.backends._load_c500_runtime",
+                    return_value=((object(), object()), None),
+                ),
+                mock.patch(
+                    "kernel_research.cases.get_suite",
+                    side_effect=RuntimeError("suite lookup sentinel"),
+                ) as get_suite,
+            ):
+                result = backend.evaluate(
+                    candidate,
+                    suite="quick",
+                    evaluation_protocol_id=LEGACY_C500_EVALUATION_PROTOCOL_ID,
+                )
+
+            self.assertEqual(result.status, STATUS_CRASH)
+            get_suite.assert_called_once_with(
+                "quick",
+                evaluation_protocol_id=LEGACY_C500_EVALUATION_PROTOCOL_ID,
+            )
+
+            with (
+                mock.patch.object(backend, "doctor") as doctor,
+                self.assertRaisesRegex(
+                    ValueError, "unsupported evaluation protocol"
+                ),
+            ):
+                backend.evaluate(
+                    candidate,
+                    evaluation_protocol_id="unregistered-protocol",
+                )
+            doctor.assert_not_called()
+
     def test_doctor_closes_cleanly_when_torch_is_missing(self) -> None:
         real_import = importlib.import_module
 

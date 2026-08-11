@@ -99,8 +99,37 @@ def summarize_result(
     }
 
 
-def feedback_for_iteration(iteration: Mapping[str, Any]) -> dict[str, Any]:
-    """Project one completed iteration into bounded proposer feedback."""
+def feedback_for_iteration(
+    iteration: Mapping[str, Any],
+    *,
+    hidden_case_ids: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """Project one completed iteration into bounded proposer feedback.
+
+    Holdout routing is applied here, at the final agent-visible projection.
+    The trusted host and History retain the complete evidence, while neither
+    case-level measurements nor per-case speedups for a holdout are returned
+    to the proposer.
+    """
+
+    summary = summarize_result(
+        _mapping(iteration.get("result")),
+        error=iteration.get("error"),
+    )
+    if hidden_case_ids:
+        summary["cases"] = [
+            case
+            for case in summary["cases"]
+            if case.get("case_id") not in hidden_case_ids
+        ]
+        for field in ("per_case_speedups", "confirmation_case_speedups"):
+            values = summary.get(field)
+            if isinstance(values, Mapping):
+                summary[field] = {
+                    key: value
+                    for key, value in values.items()
+                    if key not in hidden_case_ids
+                }
 
     return {
         "run_id": iteration.get("run_id"),
@@ -109,10 +138,7 @@ def feedback_for_iteration(iteration: Mapping[str, Any]) -> dict[str, Any]:
         "candidate_hash": iteration.get("candidate_hash"),
         "hypothesis": iteration.get("hypothesis"),
         "outcome": iteration.get("outcome"),
-        "result_summary": summarize_result(
-            _mapping(iteration.get("result")),
-            error=iteration.get("error"),
-        ),
+        "result_summary": summary,
     }
 
 

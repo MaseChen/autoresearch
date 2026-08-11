@@ -17,12 +17,36 @@ import time
 import traceback
 from typing import Any, Mapping
 
+from .constants import (
+    CURRENT_C500_EVALUATION_PROTOCOL_ID,
+    LEGACY_C500_EVALUATION_PROTOCOL_ID,
+)
 from .contract import validate_candidate
 
 
 DEFAULT_MOCK_TIMEOUT_SEC = 5.0
 DEFAULT_C500_COMPILE_TIMEOUT_SEC = 180.0
 DEFAULT_C500_CASE_TIMEOUT_SEC = 300.0
+
+_SUPPORTED_EVALUATION_PROTOCOL_IDS = frozenset(
+    {
+        LEGACY_C500_EVALUATION_PROTOCOL_ID,
+        CURRENT_C500_EVALUATION_PROTOCOL_ID,
+    }
+)
+
+
+def _resolve_evaluation_protocol_id(value: str | None) -> str:
+    """Select the current compatibility protocol or fail closed."""
+
+    if value is None:
+        return CURRENT_C500_EVALUATION_PROTOCOL_ID
+    if (
+        not isinstance(value, str)
+        or value not in _SUPPORTED_EVALUATION_PROTOCOL_IDS
+    ):
+        raise ValueError(f"unsupported evaluation protocol: {value!r}")
+    return value
 
 
 def _isolate_process_group() -> int | None:
@@ -110,6 +134,7 @@ def _child_entry(
     candidate_path: str,
     baseline_path: str | None,
     suite: str,
+    evaluation_protocol_id: str,
     test_fault: str | None,
 ) -> None:
     """Top-level spawn target; all exceptions become serializable results."""
@@ -135,7 +160,11 @@ def _child_entry(
 
         backend = MockBackend() if backend_name == "mock" else C500Backend()
         if backend_name == "mock":
-            result = backend.evaluate(Path(candidate_path), suite=suite)
+            result = backend.evaluate(
+                Path(candidate_path),
+                suite=suite,
+                evaluation_protocol_id=evaluation_protocol_id,
+            )
         else:
 
             def report_progress(
@@ -160,6 +189,7 @@ def _child_entry(
                 suite=suite,
                 baseline_path=(Path(baseline_path) if baseline_path else None),
                 progress_callback=report_progress,
+                evaluation_protocol_id=evaluation_protocol_id,
             )
         output.put(result.to_dict())
     except BaseException as exc:  # child must report compiler/runtime failures
@@ -425,6 +455,7 @@ def evaluate_isolated(
     candidate_source: str | None = None,
     baseline_path: str | Path | None = None,
     baseline_source: str | None = None,
+    evaluation_protocol_id: str | None = None,
     test_fault: str | None = None,
 ) -> dict[str, Any]:
     """Evaluate a candidate in a spawned process and return a result dictionary.
@@ -437,6 +468,9 @@ def evaluate_isolated(
         raise ValueError(f"unsupported backend: {backend}")
     if suite not in {"smoke", "quick", "full"}:
         raise ValueError(f"unsupported suite: {suite}")
+    resolved_evaluation_protocol_id = _resolve_evaluation_protocol_id(
+        evaluation_protocol_id
+    )
     if test_fault not in {None, "crash", "timeout", "print"}:
         raise ValueError(f"unsupported test fault: {test_fault}")
 
@@ -447,7 +481,7 @@ def evaluate_isolated(
         else validate_candidate(candidate)
     )
     if not validation.is_valid:
-        return _result_dict(
+        result = _result_dict(
             "CONTRACT_ERROR",
             candidate_hash=validation.sha256,
             error="; ".join(
@@ -455,6 +489,8 @@ def evaluate_isolated(
                 for candidate_error in validation.errors
             ),
         )
+        result["evaluation_protocol_id"] = resolved_evaluation_protocol_id
+        return result
 
     baseline_validation = None
     if baseline_path is not None or baseline_source is not None:
@@ -466,7 +502,7 @@ def evaluate_isolated(
             else validate_candidate(Path(baseline_path).resolve())
         )
         if not baseline_validation.is_valid:
-            return _result_dict(
+            result = _result_dict(
                 "CRASH",
                 candidate_hash=validation.sha256,
                 error="accepted baseline artifact failed static validation",
@@ -476,6 +512,8 @@ def evaluate_isolated(
                     ]
                 },
             )
+            result["evaluation_protocol_id"] = resolved_evaluation_protocol_id
+            return result
 
     if timeout_sec is not None and timeout_sec <= 0:
         raise ValueError("timeout_sec must be positive")
@@ -506,6 +544,7 @@ def evaluate_isolated(
                 str(isolated_candidate),
                 str(isolated_baseline) if isolated_baseline is not None else None,
                 suite,
+                resolved_evaluation_protocol_id,
                 test_fault,
             ),
             name=f"kernel-research-{backend}",
@@ -573,6 +612,7 @@ def evaluate_isolated(
             _close_queue(progress)
 
     result["candidate_hash"] = validation.sha256
+    result["evaluation_protocol_id"] = resolved_evaluation_protocol_id
     environment = dict(result.get("environment") or {})
     environment["watchdog"] = watchdog
     result["environment"] = environment

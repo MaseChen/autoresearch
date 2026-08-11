@@ -25,6 +25,9 @@ from .model_catalog import (
 from .models import ControllerConfig
 
 
+EVALUATOR_REQUEST_IDENTITY_CONTAINER_PATH = "/request/identity.json"
+
+
 @dataclass(frozen=True)
 class CommandResult:
     argv: tuple[str, ...]
@@ -386,6 +389,9 @@ def evaluator_argv(
     suite: str,
     baseline_path: Path | None,
     cache_dir: Path,
+    request_identity_path: Path | None = None,
+    backend: str = "c500",
+    evaluation_protocol_id: str | None = None,
 ) -> list[str]:
     argv = _evaluator_base_argv(
         config, name=name, run_id=run_id, cache_dir=cache_dir
@@ -402,6 +408,16 @@ def evaluator_argv(
                 f"type=bind,src={baseline_path},dst=/baseline/kernel.py,readonly",
             ]
         )
+    if request_identity_path is not None:
+        mounts.extend(
+            [
+                "--mount",
+                (
+                    f"type=bind,src={request_identity_path},"
+                    f"dst={EVALUATOR_REQUEST_IDENTITY_CONTAINER_PATH},readonly"
+                ),
+            ]
+        )
     argv[insertion:insertion] = mounts
     argv.extend(
         [
@@ -409,7 +425,7 @@ def evaluator_argv(
             "kernel_research",
             "evaluate-raw",
             "--backend",
-            "c500",
+            backend,
             "--suite",
             suite,
             "--candidate",
@@ -418,6 +434,15 @@ def evaluator_argv(
     )
     if baseline_path is not None:
         argv.extend(["--baseline", "/baseline/kernel.py"])
+    if request_identity_path is not None:
+        argv.extend(
+            [
+                "--request-identity",
+                EVALUATOR_REQUEST_IDENTITY_CONTAINER_PATH,
+            ]
+        )
+    if evaluation_protocol_id is not None:
+        argv.extend(["--evaluation-protocol", evaluation_protocol_id])
     return argv
 
 

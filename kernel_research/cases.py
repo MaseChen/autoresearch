@@ -14,7 +14,11 @@ from typing import Final, Literal, Mapping
 
 import numpy as np
 
-from .constants import EXPERT_TILE_ROWS
+from .constants import (
+    CURRENT_C500_EVALUATION_PROTOCOL_ID,
+    EXPERT_TILE_ROWS,
+    LEGACY_C500_EVALUATION_PROTOCOL_ID,
+)
 
 
 FIXED_SEED: Final[int] = 20260721
@@ -24,6 +28,7 @@ TOPK: Final[int] = 8
 ZIPF_ALPHA: Final[float] = 1.2
 
 ExpertDistribution = Literal["uniform", "zipf"]
+CaseRole = Literal["scored", "correctness_only", "holdout"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +42,7 @@ class CaseSpec:
     num_experts: int
     expert_dist: ExpertDistribution = "uniform"
     topk: int = TOPK
+    role: CaseRole = "scored"
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -52,6 +58,10 @@ class CaseSpec:
             raise ValueError(f"topk must be {TOPK}")
         if self.expert_dist not in {"uniform", "zipf"}:
             raise ValueError("expert_dist must be 'uniform' or 'zipf'")
+        if self.role not in {"scored", "correctness_only", "holdout"}:
+            raise ValueError(
+                "role must be 'scored', 'correctness_only', or 'holdout'"
+            )
 
     @property
     def tile_count(self) -> int:
@@ -126,12 +136,70 @@ SMOKE_CASES: Final[tuple[CaseSpec, ...]] = (
 
 # Four reduced representatives preserve both projection shapes and routing
 # regimes while remaining suitable for a short C500 bring-up run.
-QUICK_CASES: Final[tuple[CaseSpec, ...]] = (
+LEGACY_QUICK_CASES: Final[tuple[CaseSpec, ...]] = (
     CaseSpec("quick_decode_gate_up", 512, 256, 448, 16, "uniform"),
     CaseSpec("quick_prefill_gate_up", 1024, 256, 448, 16, "zipf"),
     CaseSpec("quick_decode_down", 512, 448, 128, 16, "uniform"),
     CaseSpec("quick_prefill_down", 1024, 448, 128, 16, "zipf"),
 )
+
+QUICK_SHADOW_CASES: Final[tuple[CaseSpec, ...]] = (
+    # Correctness-only cases straddle the accepted kernel's CTA-ordering
+    # threshold. Their latency is retained as evidence but never contributes
+    # to the full-suite promotion score.
+    CaseSpec(
+        "quick_shadow_tiles_127_n2",
+        127 * TILE_ROWS,
+        256,
+        64,
+        256,
+        "uniform",
+        role="correctness_only",
+    ),
+    CaseSpec(
+        "quick_shadow_tiles_128_n2",
+        128 * TILE_ROWS,
+        256,
+        64,
+        256,
+        "uniform",
+        role="correctness_only",
+    ),
+)
+
+QUICK_HOLDOUT_CASES: Final[tuple[CaseSpec, ...]] = (
+    # Holdouts use the same correctness-only scoring authority as shadows but
+    # are routed separately in the frozen protocol so proposer feedback and
+    # benchmark reports cannot silently treat them as public tuning cases.
+    CaseSpec(
+        "quick_shadow_tiles_128_n1",
+        128 * TILE_ROWS,
+        128,
+        64,
+        256,
+        "zipf",
+        role="holdout",
+    ),
+    CaseSpec(
+        "quick_shadow_tiles_129_n2",
+        129 * TILE_ROWS,
+        256,
+        64,
+        256,
+        "zipf",
+        role="holdout",
+    ),
+)
+
+CURRENT_QUICK_CASES: Final[tuple[CaseSpec, ...]] = (
+    *LEGACY_QUICK_CASES,
+    QUICK_SHADOW_CASES[0],
+    QUICK_HOLDOUT_CASES[0],
+    QUICK_SHADOW_CASES[1],
+    QUICK_HOLDOUT_CASES[1],
+)
+# Compatibility: the unversioned public suite is the current CLI protocol.
+QUICK_CASES: Final[tuple[CaseSpec, ...]] = CURRENT_QUICK_CASES
 
 # Exact DeepSeek-V3 representative shapes from the problem statement.  These
 # metadata objects are cheap; their arrays are intentionally not constructed
@@ -143,20 +211,44 @@ FULL_CASES: Final[tuple[CaseSpec, ...]] = (
     CaseSpec("full_prefill_down", 32768, 7168, 2048, 256, "zipf"),
 )
 
-CASE_SUITES: Final[Mapping[str, tuple[CaseSpec, ...]]] = {
+LEGACY_CASE_SUITES: Final[Mapping[str, tuple[CaseSpec, ...]]] = {
     "smoke": SMOKE_CASES,
-    "quick": QUICK_CASES,
+    "quick": LEGACY_QUICK_CASES,
     "full": FULL_CASES,
+}
+CURRENT_CASE_SUITES: Final[Mapping[str, tuple[CaseSpec, ...]]] = {
+    "smoke": SMOKE_CASES,
+    "quick": CURRENT_QUICK_CASES,
+    "full": FULL_CASES,
+}
+CASE_SUITES: Final[Mapping[str, tuple[CaseSpec, ...]]] = CURRENT_CASE_SUITES
+PROTOCOL_CASE_SUITES: Final[
+    Mapping[str, Mapping[str, tuple[CaseSpec, ...]]]
+] = {
+    LEGACY_C500_EVALUATION_PROTOCOL_ID: LEGACY_CASE_SUITES,
+    CURRENT_C500_EVALUATION_PROTOCOL_ID: CURRENT_CASE_SUITES,
 }
 
 
-def get_suite(name: str) -> tuple[CaseSpec, ...]:
-    """Return an immutable suite by name."""
+def get_suite(
+    name: str,
+    *,
+    evaluation_protocol_id: str = CURRENT_C500_EVALUATION_PROTOCOL_ID,
+) -> tuple[CaseSpec, ...]:
+    """Return an immutable suite from one exact trusted protocol revision."""
 
     try:
-        return CASE_SUITES[name.lower()]
+        suites = PROTOCOL_CASE_SUITES[evaluation_protocol_id]
+    except (TypeError, KeyError) as exc:
+        raise ValueError(
+            f"unknown evaluation protocol: {evaluation_protocol_id!r}"
+        ) from exc
+    try:
+        return suites[name.lower()]
     except (AttributeError, KeyError) as exc:
-        raise ValueError(f"unknown suite {name!r}; expected smoke, quick, or full") from exc
+        raise ValueError(
+            f"unknown suite {name!r}; expected smoke, quick, or full"
+        ) from exc
 
 
 def _stable_case_seed(spec: CaseSpec, seed: int) -> int:
@@ -300,11 +392,19 @@ def generate_case(spec: CaseSpec, *, seed: int = FIXED_SEED) -> DataSet:
 
 __all__ = [
     "CASE_SUITES",
+    "CURRENT_CASE_SUITES",
+    "CURRENT_QUICK_CASES",
+    "CaseRole",
     "DEFAULT_SEED",
     "DataSet",
     "FIXED_SEED",
     "FULL_CASES",
+    "LEGACY_CASE_SUITES",
+    "LEGACY_QUICK_CASES",
+    "PROTOCOL_CASE_SUITES",
     "QUICK_CASES",
+    "QUICK_SHADOW_CASES",
+    "QUICK_HOLDOUT_CASES",
     "SMOKE_CASES",
     "TILE_ROWS",
     "TOPK",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import json
+from pathlib import Path
 import signal
 import sqlite3
 import sys
@@ -14,6 +15,12 @@ from .controller import ControllerSignal, ResearchController
 from .errors import ControlledRuntimeError
 from .models import ControllerConfig
 from .summary import compact_status_payload
+from ..migration import (
+    CoordinatedMigrationError,
+    coordinate_v2_to_v3_migration,
+    production_cli_schema_guard,
+)
+from ..recovery import restore_checkpoint
 
 
 def _print(value: Any) -> None:
@@ -54,7 +61,12 @@ def _controlled_signals() -> Iterator[None]:
 
 
 def _controller(args: argparse.Namespace) -> ResearchController:
-    return ResearchController(ControllerConfig.load(args.config))
+    config = ControllerConfig.load(args.config)
+    production_cli_schema_guard(
+        history_db=config.state_dir / "history.sqlite3",
+        controller_db=config.controller_dir / "controller.sqlite3",
+    )
+    return ResearchController(config)
 
 
 def _doctor(args: argparse.Namespace) -> int:
@@ -112,6 +124,32 @@ def _checkpoint(args: argparse.Namespace) -> int:
     return 0
 
 
+def _restore(args: argparse.Namespace) -> int:
+    _print(
+        restore_checkpoint(
+            Path(args.checkpoint), Path(args.destination)
+        )
+    )
+    return 0
+
+
+def _migrate_v3(args: argparse.Namespace) -> int:
+    config = ControllerConfig.load(args.config)
+    _print(
+        coordinate_v2_to_v3_migration(
+            history_db=config.state_dir / "history.sqlite3",
+            controller_db=config.controller_dir / "controller.sqlite3",
+            state_dir=config.state_dir,
+            config_path=Path(args.config),
+            repository=config.repository_dir,
+            expected_git_commit=config.expected_git_commit,
+            checkpoint_root=Path(args.checkpoint_root),
+            operation_id=args.operation_id,
+        )
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kernel-autoresearch",
@@ -148,6 +186,29 @@ def build_parser() -> argparse.ArgumentParser:
                 default="json",
             )
         subparser.set_defaults(handler=handler)
+    restore = subparsers.add_parser(
+        "restore-checkpoint",
+        help="verify a checkpoint and restore it to a new inactive runtime root",
+    )
+    restore.add_argument("--checkpoint", required=True)
+    restore.add_argument("--destination", required=True)
+    restore.set_defaults(handler=_restore)
+    migrate = subparsers.add_parser(
+        "migrate-v3",
+        help=(
+            "checkpoint and migrate an offline terminal History/Controller "
+            "V2 pair"
+        ),
+    )
+    migrate.add_argument("--config", required=True)
+    migrate.add_argument(
+        "--checkpoint-root",
+        "--output",
+        dest="checkpoint_root",
+        required=True,
+    )
+    migrate.add_argument("--operation-id", default=None)
+    migrate.set_defaults(handler=_migrate_v3)
     return parser
 
 
@@ -162,6 +223,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         _print_error(KeyboardInterrupt("operator interrupt"), kind="INTERRUPTED")
         return 130
+    except CoordinatedMigrationError as exc:
+        print(
+            json.dumps(
+                exc.to_dict(),
+                sort_keys=True,
+                ensure_ascii=False,
+                indent=2,
+            ),
+            file=sys.stderr,
+        )
+        return 2
     except (
         OSError,
         ControlledRuntimeError,

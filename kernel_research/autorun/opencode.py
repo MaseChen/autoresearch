@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Callable
 
 from ..constants import (
     MAX_PROPOSER_ATTEMPTS,
@@ -39,12 +40,18 @@ class OpenCodeProposer(Proposer):
         iteration_index: int,
         run_dir: Path,
         runner: CommandRunner | None = None,
+        before_container_start: Callable[[float], None] | None = None,
     ) -> None:
         self.config = config
         self.run_id = run_id
         self.iteration_index = iteration_index
         self.run_dir = run_dir
         self.runner = runner or CommandRunner()
+        if before_container_start is not None and not callable(
+            before_container_start
+        ):
+            raise TypeError("before_container_start must be callable")
+        self.before_container_start = before_container_start
         self.container_name = (
             f"kar-proposer-{run_id}-{iteration_index:03d}"
         )
@@ -153,6 +160,12 @@ class OpenCodeProposer(Proposer):
                 run_id=self.run_id,
                 opencode_config=opencode_config,
             )
+            # The trusted host rechecks the frozen Run/Campaign window at the
+            # last possible point before *each* Docker attempt.  This matters
+            # for the bounded format/constraint retry: authorization for the
+            # first container is never reused for the second one.
+            if self.before_container_start is not None:
+                self.before_container_start(remaining_time)
             result = self.runner.run(
                 argv,
                 input_text=prompt,

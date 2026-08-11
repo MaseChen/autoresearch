@@ -11,6 +11,14 @@ import re
 import stat
 from typing import Any, Mapping
 
+from ..platform.artifacts import ArtifactId
+from ..platform.profiles import LEGACY_RESEARCH_NAMESPACE, ResearchNamespace
+from ..platform.proposal import (
+    TRITON_PYTHON_BUNDLE_LIMITS,
+    BundleLimits,
+    CandidateBundle,
+    ProposalV2,
+)
 from ..constants import (
     MAX_AUTORESEARCH_CANDIDATES,
     MAX_AUTORESEARCH_HOURS,
@@ -183,6 +191,71 @@ class ProposalV1:
         if include_source:
             result["kernel_source"] = self.kernel_source
         return result
+
+    def to_v2(
+        self,
+        *,
+        expected_proposal_context_id: str,
+        expected_parent_artifact_id: ArtifactId | str,
+        namespace: ResearchNamespace = LEGACY_RESEARCH_NAMESPACE,
+    ) -> ProposalV2:
+        """Normalize this legacy proposal into a bounded one-file bundle."""
+
+        return normalize_proposal_to_v2(
+            self,
+            expected_proposal_context_id=expected_proposal_context_id,
+            expected_parent_artifact_id=expected_parent_artifact_id,
+            namespace=namespace,
+            limits=TRITON_PYTHON_BUNDLE_LIMITS,
+        )
+
+
+def normalize_proposal_to_v2(
+    proposal: ProposalV1 | ProposalV2,
+    *,
+    expected_proposal_context_id: str,
+    expected_parent_artifact_id: ArtifactId | str,
+    namespace: ResearchNamespace,
+    limits: BundleLimits = TRITON_PYTHON_BUNDLE_LIMITS,
+) -> ProposalV2:
+    """Return one verified ProposalV2 without weakening V1 compatibility.
+
+    ProposalV1 has no namespace or context fields, so it is accepted only for
+    the exact built-in legacy Fused-MoE/Triton namespace.  Its bare parent hash
+    is mapped to the explicit ``source-sha256-v1`` artifact domain.
+    """
+
+    if not isinstance(namespace, ResearchNamespace):
+        raise TypeError("namespace must be a ResearchNamespace")
+    expected_parent = ArtifactId.parse(expected_parent_artifact_id)
+    if isinstance(proposal, ProposalV2):
+        if proposal.proposal_context_id != expected_proposal_context_id:
+            raise ValueError("proposal_context_id does not match request")
+        if proposal.parent_artifact_id != expected_parent:
+            raise ValueError("proposal parent_artifact_id does not match accepted")
+        proposal.candidate.validate(limits)
+        return proposal
+    if not isinstance(proposal, ProposalV1):
+        raise TypeError("proposal must be ProposalV1 or ProposalV2")
+    if namespace.namespace_id != LEGACY_RESEARCH_NAMESPACE.namespace_id:
+        raise ValueError(
+            "ProposalV1 is accepted only in the legacy Fused-MoE/Triton namespace"
+        )
+    parent = ArtifactId.source_sha256(proposal.parent_candidate_hash)
+    if parent != expected_parent:
+        raise ValueError("ProposalV1 parent does not match expected artifact")
+    candidate = CandidateBundle.single_file(
+        content=proposal.kernel_source,
+        limits=TRITON_PYTHON_BUNDLE_LIMITS,
+    )
+    return ProposalV2.create(
+        proposal_context_id=expected_proposal_context_id,
+        parent_artifact_id=parent,
+        hypothesis=proposal.hypothesis,
+        rationale=proposal.rationale,
+        candidate=candidate,
+        limits=limits,
+    )
 
 
 @dataclass(frozen=True)

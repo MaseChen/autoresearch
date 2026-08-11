@@ -720,6 +720,16 @@ class AdminVerificationAndUpdateTests(unittest.TestCase):
             def successful_child(argv, **kwargs):
                 if "kernel_research.autorun.admin" in argv:
                     self.assertIn("--doctor", argv)
+                    descriptor = int(
+                        argv[argv.index("--maintenance-lock-fd") + 1]
+                    )
+                    self.assertEqual(kwargs.get("pass_fds"), (descriptor,))
+                    self.assertEqual(
+                        admin.verify_inherited_campaign_maintenance_fence(
+                            fixture.runtime, descriptor
+                        ),
+                        descriptor,
+                    )
                     return subprocess.CompletedProcess(
                         argv, 0, json.dumps({"status": "SUCCESS"}), ""
                     )

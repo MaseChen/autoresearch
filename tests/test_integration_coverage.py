@@ -644,7 +644,11 @@ class ControllerPublicSurfaceTests(unittest.TestCase):
                     candidate_path="/candidate.py",
                 )
                 self.assertTrue(
-                    controller._candidate_seen(store, "f" * 64)
+                    controller._candidate_seen(
+                        store,
+                        run_id="seen",
+                        candidate_hash="f" * 64,
+                    )
                 )
             self.assertTrue(
                 controller._hard_failure(

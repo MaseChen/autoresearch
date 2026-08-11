@@ -23,7 +23,12 @@ import time
 from types import ModuleType
 from typing import Any, Callable, Mapping, Sequence
 
-from .constants import EXPERT_TILE_ROWS, REQUIRED_MATCH_RATIO
+from .constants import (
+    CURRENT_C500_EVALUATION_PROTOCOL_ID,
+    EXPERT_TILE_ROWS,
+    LEGACY_C500_EVALUATION_PROTOCOL_ID,
+    REQUIRED_MATCH_RATIO,
+)
 from .contract import validate_candidate
 
 
@@ -43,6 +48,26 @@ MEASUREMENT_ROUNDS = 3
 SAMPLES_PER_ROUND = 10
 
 ProgressCallback = Callable[[str, str | None, str], None]
+
+_SUPPORTED_EVALUATION_PROTOCOL_IDS = frozenset(
+    {
+        LEGACY_C500_EVALUATION_PROTOCOL_ID,
+        CURRENT_C500_EVALUATION_PROTOCOL_ID,
+    }
+)
+
+
+def _resolve_evaluation_protocol_id(value: str | None) -> str:
+    """Resolve the compatibility default and reject untrusted revisions."""
+
+    if value is None:
+        return CURRENT_C500_EVALUATION_PROTOCOL_ID
+    if (
+        not isinstance(value, str)
+        or value not in _SUPPORTED_EVALUATION_PROTOCOL_IDS
+    ):
+        raise ValueError(f"unsupported evaluation protocol: {value!r}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -146,7 +171,11 @@ class MockBackend:
         candidate_path: str | Path,
         *,
         suite: str = "smoke",
+        evaluation_protocol_id: str | None = None,
     ) -> BackendResult:
+        evaluation_protocol_id = _resolve_evaluation_protocol_id(
+            evaluation_protocol_id
+        )
         # validate_candidate reads and parses source. It intentionally never
         # imports it, even when the source contains valid top-level side effects.
         validation = validate_candidate(Path(candidate_path))
@@ -200,9 +229,11 @@ class MockBackend:
                 "performance_measurement": False,
                 "reference_self_check": _json_safe(self_check),
                 "requested_suite": suite,
+                "evaluation_protocol_id": evaluation_protocol_id,
             },
             benchmark_config={
                 "mode": "static-contract-and-reference-self-check",
+                "evaluation_protocol_id": evaluation_protocol_id,
                 "warmup_iterations": 0,
                 "measurement_rounds": 0,
                 "samples_per_round": 0,
@@ -310,7 +341,11 @@ class C500Backend:
         suite: str = "smoke",
         baseline_path: str | Path | None = None,
         progress_callback: ProgressCallback | None = None,
+        evaluation_protocol_id: str | None = None,
     ) -> BackendResult:
+        evaluation_protocol_id = _resolve_evaluation_protocol_id(
+            evaluation_protocol_id
+        )
         candidate_path = Path(candidate_path)
         validation = validate_candidate(candidate_path)
         if not validation.valid:
@@ -346,7 +381,10 @@ class C500Backend:
         try:
             from .cases import generate_case, get_suite
 
-            case_specs = get_suite(suite)
+            case_specs = get_suite(
+                suite,
+                evaluation_protocol_id=evaluation_protocol_id,
+            )
         except Exception as exc:
             return BackendResult(
                 status=STATUS_CRASH,
@@ -697,9 +735,11 @@ class C500Backend:
                     else None
                 ),
                 "hardware_validation": "executed",
+                "evaluation_protocol_id": evaluation_protocol_id,
             },
             benchmark_config={
                 **dict(health.benchmark_config),
+                "evaluation_protocol_id": evaluation_protocol_id,
                 "comparison": (
                     "alternating current-best and candidate"
                     if baseline_validation is not None

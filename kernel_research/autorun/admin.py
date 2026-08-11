@@ -16,16 +16,40 @@ import json
 import os
 from pathlib import Path
 import shlex
+import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 import uuid
 
 from ..constants import OPENCODE_PROPOSER_STEPS
-from ..history import HistoryStore
+from ..campaign.paths import (
+    campaign_maintenance_fence,
+    conventional_campaign_database,
+    verify_inherited_campaign_maintenance_fence,
+)
+from ..history import ExperimentRecord, HistoryStore
+from ..platform.artifacts import ArtifactId
+from ..platform.canonical import canonical_json_bytes
+from ..platform.identity import (
+    BaselineRef,
+    ExecutionEnvironmentDigest,
+    ExperimentIdentity,
+)
+from ..platform.profiles import (
+    CURRENT_RESEARCH_NAMESPACE,
+    LEGACY_RESEARCH_NAMESPACE,
+    ResearchNamespace,
+)
+from ..platform.proposal import CandidateBundle, TRITON_PYTHON_BUNDLE_LIMITS
 from .controller import ResearchController, gpu_lock
+from .deployment import (
+    DEPLOYMENT_BASELINE_FILENAME,
+    DeploymentBaselinePin,
+    deployment_runtime_root,
+)
 from .errors import ControlledRuntimeError
 from .model_catalog import (
     OPENCODE_MODEL_SPECS,
@@ -226,6 +250,7 @@ def _run(
     timeout: float = 60.0,
     check: bool = True,
     env: Mapping[str, str] | None = None,
+    pass_fds: Sequence[int] = (),
 ) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         [str(item) for item in argv],
@@ -236,6 +261,7 @@ def _run(
         timeout=timeout,
         shell=False,
         env=None if env is None else dict(env),
+        pass_fds=tuple(pass_fds),
     )
     if check and completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
@@ -449,21 +475,574 @@ def _atomic_publish(files: Mapping[Path, tuple[bytes, int]]) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def _artifact_for_best(config: ControllerConfig) -> tuple[Any, Path]:
+def _trusted_namespace(namespace_id: str | None) -> ResearchNamespace:
+    """Resolve only exact built-in scientific namespaces.
+
+    Omitting the namespace is the one-cycle V1 compatibility path.  It is
+    deliberately equivalent to naming the legacy namespace; no alias can be
+    used to relabel evidence.
+    """
+
+    selected = (
+        LEGACY_RESEARCH_NAMESPACE.namespace_id
+        if namespace_id is None
+        else namespace_id
+    )
+    trusted = {
+        LEGACY_RESEARCH_NAMESPACE.namespace_id: LEGACY_RESEARCH_NAMESPACE,
+        CURRENT_RESEARCH_NAMESPACE.namespace_id: CURRENT_RESEARCH_NAMESPACE,
+    }.get(selected)
+    if trusted is None:
+        raise ValueError(
+            "namespace must be an exact built-in LEGACY or CURRENT namespace_id"
+        )
+    return trusted
+
+
+def _deployment_pin_path(config: ControllerConfig) -> Path:
+    try:
+        runtime_root = deployment_runtime_root(
+            state_dir=config.state_dir,
+            controller_dir=config.controller_dir,
+            checkpoint_dir=config.checkpoint_dir,
+        )
+    except ValueError as exc:
+        raise ControlledRuntimeError(
+            f"formal config has no unique deployment runtime root: {exc}"
+        ) from exc
+    return runtime_root / DEPLOYMENT_BASELINE_FILENAME
+
+
+def _configured_namespace_id(config: ControllerConfig) -> str:
+    path = _deployment_pin_path(config)
+    if not path.exists() and not path.is_symlink():
+        return LEGACY_RESEARCH_NAMESPACE.namespace_id
+    try:
+        pin = DeploymentBaselinePin.load(path)
+        _trusted_namespace(pin.namespace_id)
+    except ValueError as exc:
+        raise ControlledRuntimeError(
+            f"deployment baseline pin is invalid: {exc}"
+        ) from exc
+    if pin.candidate_hash != config.expected_kernel_hash:
+        raise ControlledRuntimeError(
+            "deployment baseline pin candidate differs from formal config"
+        )
+    if pin.git_commit != config.expected_git_commit:
+        raise ControlledRuntimeError(
+            "deployment baseline pin Git commit differs from formal config"
+        )
+    return pin.namespace_id
+
+
+def _deployment_pin_for_commit(
+    config: ControllerConfig, *, git_commit: str
+) -> DeploymentBaselinePin | None:
+    """Reissue only a legacy-unknown pin across a non-scientific Git update.
+
+    A resolved V2 environment binds the framework commit.  Carrying that
+    evidence onto another commit would be relabeling, so update/sync must stop
+    until the candidate is re-evaluated and manually adopted at the new HEAD.
+    """
+
+    path = _deployment_pin_path(config)
+    if not path.exists() and not path.is_symlink():
+        return None
+    try:
+        pin = DeploymentBaselinePin.load(path)
+        _trusted_namespace(pin.namespace_id)
+    except ValueError as exc:
+        raise ControlledRuntimeError(
+            f"deployment baseline pin is invalid: {exc}"
+        ) from exc
+    if pin.candidate_hash != config.expected_kernel_hash:
+        raise ControlledRuntimeError(
+            "deployment baseline pin candidate differs from formal config"
+        )
+    if pin.git_commit == git_commit:
+        return pin
+    if pin.execution_environment.is_resolved:
+        raise ControlledRuntimeError(
+            "resolved deployment evidence is bound to another Git commit; "
+            "re-evaluate and adopt at the target HEAD"
+        )
+    return DeploymentBaselinePin.create(
+        namespace_id=pin.namespace_id,
+        baseline_ref=pin.baseline_ref,
+        candidate_hash=pin.candidate_hash,
+        git_commit=git_commit,
+        primary_experiment_uid=pin.primary_experiment_uid,
+        confirmation_experiment_uid=pin.confirmation_experiment_uid,
+        confirmation_experiment_id=pin.confirmation_experiment_id,
+        parent_baseline_ref=pin.parent_baseline_ref,
+        execution_environment=pin.execution_environment,
+    )
+
+
+def _add_deployment_pin_publish(
+    files: dict[Path, tuple[bytes, int]],
+    hashes: dict[str, str],
+    *,
+    manifest: AdminManifest,
+    pin: DeploymentBaselinePin | None,
+) -> None:
+    if pin is None:
+        return
+    path = manifest.runtime_root / DEPLOYMENT_BASELINE_FILENAME
+    data = _json_bytes(pin.to_dict())
+    files[path] = (data, 0o600)
+    hashes["deployment_baseline"] = _sha256_bytes(data)
+
+
+def _checked_history_path(
+    config: ControllerConfig, relative_path: str, *, name: str
+) -> Path:
+    if not isinstance(relative_path, str) or not relative_path:
+        raise ControlledRuntimeError(f"{name} has no object path")
+    relative = Path(relative_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ControlledRuntimeError(f"{name} has an unsafe object path")
+    raw = config.state_dir / relative
+    try:
+        _reject_symlink_path(raw)
+    except ValueError as exc:
+        raise ControlledRuntimeError(f"{name} uses a symlinked object path") from exc
+    root = config.state_dir.resolve(strict=False)
+    resolved = raw.resolve(strict=False)
+    if not resolved.is_relative_to(root):
+        raise ControlledRuntimeError(f"{name} escapes state_dir")
+    if not raw.is_file():
+        raise ControlledRuntimeError(f"{name} is missing")
+    return raw
+
+
+def _bundle_entrypoint_artifact(
+    history: HistoryStore,
+    config: ControllerConfig,
+    best: ExperimentRecord,
+) -> Path:
+    """Verify bundle object, manifest, entrypoint source CAS, and exact bytes."""
+
+    bundle_record = history.get_candidate_artifact(best.artifact_id)
+    if bundle_record is None or bundle_record.artifact_kind != "source_bundle_v1":
+        raise ControlledRuntimeError(
+            "accepted bundle has no authoritative bundle CAS record"
+        )
+    bundle_path = _checked_history_path(
+        config, bundle_record.object_path, name="accepted bundle CAS object"
+    )
+    try:
+        bundle_bytes = history.read_candidate_artifact(best.artifact_id)
+    except (KeyError, RuntimeError) as exc:
+        raise ControlledRuntimeError(
+            "accepted bundle CAS object is missing or corrupted"
+        ) from exc
+    if bundle_path.read_bytes() != bundle_bytes or bundle_record.byte_size != len(
+        bundle_bytes
+    ):
+        raise ControlledRuntimeError("accepted bundle CAS metadata is inconsistent")
+    try:
+        decoded = json.loads(bundle_bytes.decode("utf-8"))
+        bundle = CandidateBundle.from_value(
+            decoded, limits=TRITON_PYTHON_BUNDLE_LIMITS
+        )
+    except (UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ControlledRuntimeError(
+            "accepted bundle CAS payload is not a valid trusted-language bundle"
+        ) from exc
+    if (
+        bundle.bundle_bytes != bundle_bytes
+        or str(bundle.artifact_id) != best.artifact_id
+        or dict(bundle_record.manifest) != bundle.manifest
+        or canonical_json_bytes(bundle_record.manifest) != bundle.manifest_bytes
+    ):
+        raise ControlledRuntimeError(
+            "accepted bundle artifact ID, manifest, and payload disagree"
+        )
+    entrypoint = next(
+        item for item in bundle.files if item.path == bundle.entrypoint
+    )
+    source_id = str(ArtifactId.source_sha256(best.candidate_hash))
+    source_record = history.get_candidate_artifact(source_id)
+    if source_record is None or source_record.artifact_kind != "source_text_v1":
+        raise ControlledRuntimeError(
+            "accepted bundle has no verified entrypoint source artifact"
+        )
+    source_path = _checked_history_path(
+        config, source_record.object_path, name="accepted entrypoint source CAS object"
+    )
+    try:
+        source_bytes = history.read_candidate_artifact(source_id)
+    except (KeyError, RuntimeError) as exc:
+        raise ControlledRuntimeError(
+            "accepted entrypoint source CAS object is missing or corrupted"
+        ) from exc
+    if (
+        source_path.read_bytes() != source_bytes
+        or source_record.byte_size != len(source_bytes)
+        or source_bytes != entrypoint.content_bytes
+        or _sha256_bytes(source_bytes) != best.candidate_hash
+    ):
+        raise ControlledRuntimeError(
+            "accepted bundle entrypoint, source CAS, and History hash disagree"
+        )
+    return source_path
+
+
+def _artifact_for_best(
+    config: ControllerConfig,
+    *,
+    candidate_hash: str | None = None,
+    namespace_id: str | None = None,
+) -> tuple[Any, Path]:
+    """Resolve explicit deployment/adoption evidence, never a global best."""
+
+    selected_hash = candidate_hash or config.expected_kernel_hash
+    selected_namespace = (
+        _configured_namespace_id(config)
+        if namespace_id is None
+        else _trusted_namespace(namespace_id).namespace_id
+    )
     with HistoryStore(
         config.state_dir / "history.sqlite3", state_dir=config.state_dir
     ) as history:
-        best = history.get_best(backend="c500", suite="full")
-    if best is None:
-        raise ControlledRuntimeError("no accepted C500 full baseline exists")
-    artifact = (config.state_dir / best.artifact_path).resolve(strict=False)
-    if not artifact.is_relative_to(config.state_dir.resolve()):
-        raise ControlledRuntimeError("accepted artifact escapes state_dir")
-    if artifact.is_symlink() or not artifact.is_file():
-        raise ControlledRuntimeError("accepted History artifact is missing")
+        records = history.find_by_candidate_hash(
+            selected_hash,
+            namespace_id=selected_namespace,
+        )
+        best = next(
+            (
+                record
+                for record in reversed(records)
+                if record.backend == "c500"
+                and record.suite == "full"
+                and record.status == "SUCCESS"
+                and record.promotable
+                and record.result.get("promotion", {}).get("phase")
+                in {"confirmation", "baseline"}
+            ),
+            None,
+        )
+        if best is None:
+            raise ControlledRuntimeError(
+                "candidate has no accepted C500 full evidence in the deployment namespace"
+            )
+        try:
+            artifact_id = ArtifactId.parse(best.artifact_id)
+        except ValueError as exc:
+            raise ControlledRuntimeError(
+                "accepted History artifact ID is invalid"
+            ) from exc
+        if artifact_id.tag == "bundle-sha256-v1":
+            artifact = _bundle_entrypoint_artifact(history, config, best)
+        else:
+            artifact = _checked_history_path(
+                config, best.artifact_path, name="accepted History artifact"
+            )
+            if artifact_id.digest != best.candidate_hash:
+                raise ControlledRuntimeError(
+                    "accepted source artifact ID differs from candidate hash"
+                )
     if _sha256_file(artifact) != best.candidate_hash:
         raise ControlledRuntimeError("accepted History artifact hash mismatch")
     return best, artifact
+
+
+@dataclass(frozen=True)
+class _AdoptionProof:
+    confirmation: ExperimentRecord
+    primary: ExperimentRecord | None
+    artifact: Path
+    namespace: ResearchNamespace
+    parent_baseline: BaselineRef | None
+    execution_environment: ExecutionEnvironmentDigest
+
+
+def _correct_full_evidence(record: ExperimentRecord) -> bool:
+    return bool(record.case_measurements) and all(
+        case.passed is True
+        and case.matched_ratio is not None
+        and float(case.matched_ratio) >= 1.0
+        for case in record.case_measurements
+    )
+
+
+def _legacy_adoption_proof(
+    config: ControllerConfig,
+    *,
+    candidate_hash: str,
+) -> _AdoptionProof:
+    """Grandfather the genuine V1 confirmation shape for one compatibility cycle."""
+
+    best, artifact = _artifact_for_best(
+        config,
+        candidate_hash=candidate_hash,
+        namespace_id=LEGACY_RESEARCH_NAMESPACE.namespace_id,
+    )
+    promotion = best.result.get("promotion")
+    if (
+        best.namespace_id != LEGACY_RESEARCH_NAMESPACE.namespace_id
+        or best.replicate_kind != "legacy"
+        or best.backend != "c500"
+        or best.suite != "full"
+        or best.status != "SUCCESS"
+        or not best.promotable
+        or not _correct_full_evidence(best)
+        or not isinstance(promotion, Mapping)
+        or promotion.get("phase") != "confirmation"
+        or promotion.get("reason") != "promoted"
+        or promotion.get("confirmed") is not True
+    ):
+        raise ControlledRuntimeError(
+            "legacy adoption requires genuine V1 accepted confirmation evidence"
+        )
+    try:
+        ExperimentIdentity.from_value(dict(best.identity))
+    except (TypeError, ValueError):
+        pass
+    else:
+        raise ControlledRuntimeError(
+            "V2-shaped evidence cannot use the V1 grandfather adoption path"
+        )
+    environment = ExecutionEnvironmentDigest.legacy_unknown(
+        scope={
+            "namespace_id": LEGACY_RESEARCH_NAMESPACE.namespace_id,
+            "artifact_id": best.artifact_id,
+            "confirmation_experiment_uid": best.experiment_uid,
+        }
+    )
+    return _AdoptionProof(
+        confirmation=best,
+        primary=None,
+        artifact=artifact,
+        namespace=LEGACY_RESEARCH_NAMESPACE,
+        parent_baseline=None,
+        execution_environment=environment,
+    )
+
+
+def _strict_v2_adoption_proof(
+    config: ControllerConfig,
+    *,
+    candidate_hash: str,
+    namespace: ResearchNamespace,
+) -> _AdoptionProof:
+    confirmation, artifact = _artifact_for_best(
+        config,
+        candidate_hash=candidate_hash,
+        namespace_id=namespace.namespace_id,
+    )
+    with HistoryStore(
+        config.state_dir / "history.sqlite3", state_dir=config.state_dir
+    ) as history:
+        namespace_record = history.get_namespace(namespace.namespace_id)
+        if (
+            namespace_record is None
+            or dict(namespace_record.identity) != namespace.to_dict()
+        ):
+            raise ControlledRuntimeError(
+                "History namespace snapshot does not match the trusted built-in namespace"
+            )
+        # Re-read the exact selected row inside this proof and reject replacement
+        # or cross-namespace selection between the artifact and lineage checks.
+        current_confirmation = history.get_experiment(confirmation.id)
+        if current_confirmation != confirmation:
+            raise ControlledRuntimeError(
+                "confirmation evidence changed during adoption proof"
+            )
+        confirmation_promotion = confirmation.result.get("promotion")
+        primary_id = (
+            confirmation_promotion.get("primary_experiment_id")
+            if isinstance(confirmation_promotion, Mapping)
+            else None
+        )
+        if type(primary_id) is not int:
+            raise ControlledRuntimeError(
+                "confirmation evidence has no linked primary experiment"
+            )
+        primary = history.get_experiment(primary_id)
+        if primary is None:
+            raise ControlledRuntimeError("linked primary experiment is missing")
+        try:
+            primary_identity = ExperimentIdentity.from_value(dict(primary.identity))
+            confirmation_identity = ExperimentIdentity.from_value(
+                dict(confirmation.identity)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ControlledRuntimeError(
+                "promotion evidence has an invalid V2 scientific identity"
+            ) from exc
+        if (
+            not primary_identity.is_scientifically_comparable
+            or not confirmation_identity.is_scientifically_comparable
+        ):
+            raise ControlledRuntimeError(
+                "LEGACY_UNKNOWN evidence cannot be adopted as a V2 baseline"
+            )
+        primary_promotion = primary.result.get("promotion")
+        primary_decision = (
+            primary_promotion.get("decision")
+            if isinstance(primary_promotion, Mapping)
+            else None
+        )
+        confirmation_decision = (
+            confirmation_promotion.get("decision")
+            if isinstance(confirmation_promotion, Mapping)
+            else None
+        )
+        if (
+            primary.namespace_id != namespace.namespace_id
+            or confirmation.namespace_id != namespace.namespace_id
+            or primary_identity.namespace != namespace
+            or confirmation_identity.namespace != namespace
+            or primary.backend != "c500"
+            or confirmation.backend != "c500"
+            or primary.suite != "full"
+            or confirmation.suite != "full"
+            or primary.status != "SUCCESS"
+            or confirmation.status != "SUCCESS"
+            or primary.promotable
+            or not confirmation.promotable
+            or not _correct_full_evidence(primary)
+            or not _correct_full_evidence(confirmation)
+            or primary.artifact_id != confirmation.artifact_id
+            or primary.artifact_id != confirmation_identity.candidate_artifact_id.value
+            or primary.artifact_id != primary_identity.candidate_artifact_id.value
+            or primary.candidate_hash != candidate_hash
+            or confirmation.candidate_hash != candidate_hash
+            or primary_identity.stage != "full_primary"
+            or confirmation_identity.stage != "confirmation"
+            or primary_identity.suite != "full"
+            or confirmation_identity.suite != "full"
+            or primary_identity.replicate_kind != "primary"
+            or confirmation_identity.replicate_kind != "confirmation"
+            or primary.replicate_kind != "primary"
+            or confirmation.replicate_kind != "confirmation"
+            or primary_identity.replicate_index != primary.replicate_index
+            or confirmation_identity.replicate_index != confirmation.replicate_index
+            or primary_identity.experiment_uid != primary.experiment_uid
+            or confirmation_identity.experiment_uid
+            != confirmation.experiment_uid
+            or primary_identity.run_id != confirmation_identity.run_id
+            or primary_identity.iteration != confirmation_identity.iteration
+            or primary_identity.baseline != confirmation_identity.baseline
+            or primary_identity.parent_artifact_id
+            != primary_identity.baseline.artifact_id
+            or confirmation_identity.parent_artifact_id
+            != confirmation_identity.baseline.artifact_id
+            or primary_identity.execution_environment
+            != confirmation_identity.execution_environment
+            or primary_identity.condition_digest
+            == confirmation_identity.condition_digest
+            or not isinstance(primary_promotion, Mapping)
+            or primary_promotion.get("phase") != "primary"
+            or primary_promotion.get("reason") != "confirmation_required"
+            or not isinstance(primary_decision, Mapping)
+            or primary_decision.get("promoted") is not False
+            or primary_decision.get("needs_confirmation") is not True
+            or primary_decision.get("reason") != "confirmation_required"
+            or not isinstance(confirmation_promotion, Mapping)
+            or confirmation_promotion.get("phase") != "confirmation"
+            or confirmation_promotion.get("reason") != "promoted"
+            or confirmation_promotion.get("confirmed") is not True
+            or not isinstance(confirmation_decision, Mapping)
+            or confirmation_decision.get("promoted") is not True
+            or confirmation_decision.get("needs_confirmation") is not False
+            or confirmation_decision.get("reason") != "promoted"
+        ):
+            raise ControlledRuntimeError(
+                "primary/confirmation evidence does not prove one V2 promotion"
+            )
+        parent = primary_identity.baseline
+        baseline_id = primary_promotion.get("baseline_experiment_id")
+        if (
+            type(baseline_id) is not int
+            or confirmation_promotion.get("baseline_experiment_id") != baseline_id
+            or primary_promotion.get("baseline_candidate_hash")
+            != confirmation_promotion.get("baseline_candidate_hash")
+            or primary.baseline_experiment_uid is None
+            or confirmation.baseline_experiment_uid
+            != primary.baseline_experiment_uid
+        ):
+            raise ControlledRuntimeError(
+                "primary and confirmation do not share one frozen baseline"
+            )
+        baseline = history.get_experiment(baseline_id)
+        if (
+            baseline is None
+            or baseline.experiment_uid != primary.baseline_experiment_uid
+            or baseline.namespace_id != namespace.namespace_id
+            or baseline.artifact_id != str(parent.artifact_id)
+            or baseline.candidate_hash
+            != primary_promotion.get("baseline_candidate_hash")
+            or baseline.status != "SUCCESS"
+            or not baseline.promotable
+        ):
+            raise ControlledRuntimeError(
+                "promotion parent baseline cannot be proven from History"
+            )
+        try:
+            baseline_identity = ExperimentIdentity.from_value(dict(baseline.identity))
+            if (
+                baseline_identity.experiment_uid != baseline.experiment_uid
+                or baseline_identity.namespace != namespace
+                or str(baseline_identity.candidate_artifact_id)
+                != baseline.artifact_id
+            ):
+                raise ValueError(
+                    "baseline identity does not match its History record"
+                )
+            parent.require_environment(baseline_identity.execution_environment)
+            parent.require_environment(primary_identity.execution_environment)
+        except (TypeError, ValueError) as exc:
+            raise ControlledRuntimeError(
+                "promotion baseline or execution environment is unresolved/mismatched"
+            ) from exc
+        relations = history.list_experiment_relations(
+            primary.experiment_uid,
+            direction="source",
+            relation_type="confirmation_of",
+        )
+        matching_relations = [
+            relation
+            for relation in relations
+            if relation.target_experiment_uid == confirmation.experiment_uid
+            and dict(relation.metadata) == {"baseline_experiment_id": baseline.id}
+        ]
+        if len(matching_relations) != 1:
+            raise ControlledRuntimeError(
+                "promotion has no unique immutable primary-to-confirmation link"
+            )
+    return _AdoptionProof(
+        confirmation=confirmation,
+        primary=primary,
+        artifact=artifact,
+        namespace=namespace,
+        parent_baseline=parent,
+        execution_environment=primary_identity.execution_environment,
+    )
+
+
+def _prove_adoption(
+    config: ControllerConfig,
+    *,
+    candidate_hash: str,
+    namespace_id: str | None,
+) -> _AdoptionProof:
+    namespace = _trusted_namespace(namespace_id)
+    if namespace == LEGACY_RESEARCH_NAMESPACE:
+        selected, _artifact = _artifact_for_best(
+            config,
+            candidate_hash=candidate_hash,
+            namespace_id=namespace.namespace_id,
+        )
+        if selected.replicate_kind == "legacy":
+            return _legacy_adoption_proof(config, candidate_hash=candidate_hash)
+    return _strict_v2_adoption_proof(
+        config,
+        candidate_hash=candidate_hash,
+        namespace=namespace,
+    )
 
 
 def _identity(
@@ -488,6 +1067,44 @@ def _identity(
     best, artifact = _artifact_for_best(config)
     if best.candidate_hash != required_hash:
         raise ControlledRuntimeError("accepted History baseline does not match kernel.py")
+    pin_path = _deployment_pin_path(config)
+    deployment_pin = (
+        None
+        if not pin_path.exists() and not pin_path.is_symlink()
+        else DeploymentBaselinePin.load(pin_path)
+    )
+    if deployment_pin is not None:
+        proof = _prove_adoption(
+            config,
+            candidate_hash=required_hash,
+            namespace_id=deployment_pin.namespace_id,
+        )
+        if (
+            proof.confirmation.id
+            != deployment_pin.confirmation_experiment_id
+            or proof.confirmation.experiment_uid
+            != deployment_pin.confirmation_experiment_uid
+            or proof.confirmation.artifact_id
+            != str(deployment_pin.baseline_ref.artifact_id)
+            or (
+                proof.primary is None
+                and deployment_pin.primary_experiment_uid is not None
+            )
+            or (
+                proof.primary is not None
+                and proof.primary.experiment_uid
+                != deployment_pin.primary_experiment_uid
+            )
+            or (
+                proof.execution_environment.is_resolved
+                and proof.execution_environment
+                != deployment_pin.execution_environment
+            )
+            or proof.parent_baseline != deployment_pin.parent_baseline_ref
+        ):
+            raise ControlledRuntimeError(
+                "deployment baseline pin differs from its immutable History proof"
+            )
     return {
         **state,
         "baseline_experiment_id": best.id,
@@ -514,6 +1131,83 @@ def _active_run_error(config: ControllerConfig) -> str | None:
     if latest is not None and latest["status"] not in TERMINAL_RUN_STATUSES:
         return f"controller run {latest['id']} is still {latest['status']}"
     return None
+
+
+def _active_campaign_error(runtime_root: Path) -> str | None:
+    """Reject deployment mutation while any campaign can still resume.
+
+    The check is read-only and uses the sole production
+    ``campaign/campaign.sqlite3`` convention.  A malformed campaign database
+    is itself a data-integrity reason to fail closed.
+    """
+
+    candidates = (conventional_campaign_database(runtime_root),)
+    active: list[tuple[str, str]] = []
+    for database in candidates:
+        try:
+            _reject_symlink_path(database)
+        except ValueError as exc:
+            raise ControlledRuntimeError(
+                "campaign database path failed the non-symlink boundary"
+            ) from exc
+        if database.exists() and not database.is_file():
+            raise ControlledRuntimeError(
+                f"campaign database {database} is not a regular file"
+            )
+        if not database.is_file():
+            continue
+        try:
+            connection = sqlite3.connect(
+                database.resolve().as_uri() + "?mode=ro", uri=True
+            )
+            connection.row_factory = sqlite3.Row
+            try:
+                version = int(
+                    connection.execute("PRAGMA user_version").fetchone()[0]
+                )
+                if version != 1:
+                    raise ControlledRuntimeError(
+                        f"campaign database {database} has unsupported schema {version}"
+                    )
+                rows = connection.execute(
+                    """
+                    SELECT id, status FROM campaigns
+                    WHERE status NOT IN ('COMPLETED', 'CANCELLED')
+                    ORDER BY created_at, id
+                    """
+                ).fetchall()
+            finally:
+                connection.close()
+        except sqlite3.DatabaseError as exc:
+            raise ControlledRuntimeError(
+                f"campaign database {database} failed integrity/read checks: {exc}"
+            ) from exc
+        active.extend((str(row["id"]), str(row["status"])) for row in rows)
+    if active:
+        rendered = ", ".join(f"{campaign_id}={status}" for campaign_id, status in active)
+        return "deployment mutation is forbidden while campaigns are active: " + rendered
+    return None
+
+
+def _require_no_active_campaign(runtime_root: Path) -> None:
+    error = _active_campaign_error(runtime_root)
+    if error:
+        raise ControlledRuntimeError(error)
+
+
+@contextmanager
+def _deployment_mutation_guard(manifest: AdminManifest) -> Iterator[int]:
+    """Hold the canonical Campaign fence, then the existing GPU lock.
+
+    Every deployment publisher uses this exact ordering.  Campaign lifecycle
+    commands take only the first lock, so they cannot introduce a resumable
+    Campaign between the initial guard and the final publication check.
+    """
+
+    with campaign_maintenance_fence(manifest.runtime_root) as descriptor:
+        with gpu_lock(manifest.runtime_root / "controller" / "gpu1.lock"):
+            _require_no_active_campaign(manifest.runtime_root)
+            yield descriptor
 
 
 def _active_containers(config: ControllerConfig) -> list[str]:
@@ -758,10 +1452,16 @@ def _cpu_tests(config: ControllerConfig, *, run_tag: str) -> dict[str, Any]:
     }
 
 
-def _doctor_configs(configs: Mapping[str, ControllerConfig]) -> dict[str, Any]:
+def _doctor_configs(
+    configs: Mapping[str, ControllerConfig],
+    *,
+    deployment_pin: DeploymentBaselinePin | None = None,
+) -> dict[str, Any]:
     results: dict[str, Any] = {}
     for name in ("pro", "flash"):
-        payload = ResearchController(configs[name]).doctor()
+        payload = ResearchController(
+            configs[name], _deployment_pin_override=deployment_pin
+        ).doctor()
         if payload.get("status") != "SUCCESS":
             raise ControlledRuntimeError(
                 f"{name} controller doctor failed: "
@@ -916,7 +1616,7 @@ def _prepared_files_from_base(
     return files, hashes
 
 
-def sync(manifest: AdminManifest, *, publish: bool = True) -> dict[str, Any]:
+def _sync_locked(manifest: AdminManifest, *, publish: bool) -> dict[str, Any]:
     identity = _identity(manifest, require_config_commit=False)
     current_config = ControllerConfig.load(manifest.pro_config)
     active = _active_run_error(current_config)
@@ -933,12 +1633,22 @@ def sync(manifest: AdminManifest, *, publish: bool = True) -> dict[str, Any]:
     values = _render_config_values(base, commit=identity["head"], kernel_hash=pin)
     _validate_generated(values)
     files, hashes = _prepared_files_from_base(manifest, values)
+    deployment_pin = _deployment_pin_for_commit(
+        current_config, git_commit=identity["head"]
+    )
+    _add_deployment_pin_publish(
+        files,
+        hashes,
+        manifest=manifest,
+        pin=deployment_pin,
+    )
     changed = [
         str(path)
         for path, (data, _) in files.items()
         if not path.exists() or path.read_bytes() != data
     ]
     if publish:
+        _require_no_active_campaign(manifest.runtime_root)
         _atomic_publish(files)
     return {
         "schema_version": 1,
@@ -960,6 +1670,11 @@ def sync(manifest: AdminManifest, *, publish: bool = True) -> dict[str, Any]:
         "config_sha256": hashes,
         "models": {"pro": PRO_MODEL, "flash": FLASH_MODEL},
     }
+
+
+def sync(manifest: AdminManifest, *, publish: bool = True) -> dict[str, Any]:
+    with _deployment_mutation_guard(manifest):
+        return _sync_locked(manifest, publish=publish)
 
 
 def verify(manifest: AdminManifest, level: str) -> dict[str, Any]:
@@ -986,7 +1701,9 @@ def verify(manifest: AdminManifest, level: str) -> dict[str, Any]:
     return payload
 
 
-def _post_update(manifest: AdminManifest, *, doctor: bool) -> dict[str, Any]:
+def _post_update_locked(
+    manifest: AdminManifest, *, doctor: bool
+) -> dict[str, Any]:
     identity = _identity(manifest, require_config_commit=False)
     base = _load_base(manifest)
     pin = str(base["expected_kernel_hash"])
@@ -994,6 +1711,15 @@ def _post_update(manifest: AdminManifest, *, doctor: bool) -> dict[str, Any]:
     _validate_generated(values)
     files, hashes = _prepared_files_from_base(manifest, values)
     pro = ControllerConfig.load(manifest.pro_config)
+    deployment_pin = _deployment_pin_for_commit(
+        pro, git_commit=identity["head"]
+    )
+    _add_deployment_pin_publish(
+        files,
+        hashes,
+        manifest=manifest,
+        pin=deployment_pin,
+    )
     cpu = _cpu_tests(pro, run_tag=uuid.uuid4().hex[:12])
     _run(
         [
@@ -1020,7 +1746,10 @@ def _post_update(manifest: AdminManifest, *, doctor: bool) -> dict[str, Any]:
                 path = temporary_root / f"{name}.json"
                 path.write_bytes(_json_bytes(values[name]))
                 configs[name] = ControllerConfig.load(path)
-            doctor_payload = _doctor_configs(configs)
+            doctor_payload = _doctor_configs(
+                configs, deployment_pin=deployment_pin
+            )
+    _require_no_active_campaign(manifest.runtime_root)
     _atomic_publish(files)
     report = {
         "schema_version": 1,
@@ -1035,9 +1764,32 @@ def _post_update(manifest: AdminManifest, *, doctor: bool) -> dict[str, Any]:
     return report
 
 
+def _post_update(
+    manifest: AdminManifest,
+    *,
+    doctor: bool,
+    maintenance_lock_fd: int | None = None,
+) -> dict[str, Any]:
+    """Validate and publish an update only inside the maintenance fence.
+
+    Normal direct use acquires both locks itself.  ``update`` passes its
+    already-locked descriptor into the post-update child so the parent keeps
+    one uninterrupted fence across the Git fast-forward and config/pin
+    publication without making the child recursively wait on that same lock.
+    """
+
+    if maintenance_lock_fd is None:
+        with _deployment_mutation_guard(manifest):
+            return _post_update_locked(manifest, doctor=doctor)
+    verify_inherited_campaign_maintenance_fence(
+        manifest.runtime_root, maintenance_lock_fd
+    )
+    _require_no_active_campaign(manifest.runtime_root)
+    return _post_update_locked(manifest, doctor=doctor)
+
+
 def update(manifest: AdminManifest, *, doctor: bool) -> dict[str, Any]:
-    lock_path = manifest.runtime_root / "controller" / "gpu1.lock"
-    with gpu_lock(lock_path):
+    with _deployment_mutation_guard(manifest) as maintenance_lock_fd:
         state = _repo_state(manifest)
         # Permit resuming post-update after Git has already advanced, but still
         # prove that the pinned kernel and accepted History artifact agree
@@ -1063,6 +1815,7 @@ def update(manifest: AdminManifest, *, doctor: bool) -> dict[str, Any]:
         )
         if ancestor_check.returncode != 0:
             raise ControlledRuntimeError("upstream update is not a fast-forward descendant")
+        _require_no_active_campaign(manifest.runtime_root)
         _git(manifest.repository_dir, "merge", "--ff-only", "FETCH_HEAD")
         environment = dict(os.environ)
         current_pythonpath = environment.get("PYTHONPATH")
@@ -1076,6 +1829,8 @@ def update(manifest: AdminManifest, *, doctor: bool) -> dict[str, Any]:
             "_post-update",
             "--manifest",
             str(manifest.runtime_root / "admin.json"),
+            "--maintenance-lock-fd",
+            str(maintenance_lock_fd),
         ]
         if doctor:
             argv.append("--doctor")
@@ -1085,6 +1840,7 @@ def update(manifest: AdminManifest, *, doctor: bool) -> dict[str, Any]:
             timeout=2400,
             check=False,
             env=environment,
+            pass_fds=(maintenance_lock_fd,),
         )
         if completed.returncode != 0:
             raise ControlledRuntimeError(
@@ -1095,12 +1851,13 @@ def update(manifest: AdminManifest, *, doctor: bool) -> dict[str, Any]:
             child = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
             raise ControlledRuntimeError("post-update child emitted invalid JSON") from exc
+        new_commit = _git(manifest.repository_dir, "rev-parse", "HEAD")
     report = {
         "schema_version": 1,
         "command": "update",
         "status": "SUCCESS",
         "old_commit": state["head"],
-        "new_commit": _git(manifest.repository_dir, "rev-parse", "HEAD"),
+        "new_commit": new_commit,
         "post_update": child,
     }
     _write_report(manifest, "update", report)
@@ -1108,13 +1865,17 @@ def update(manifest: AdminManifest, *, doctor: bool) -> dict[str, Any]:
 
 
 def adopt_baseline(
-    manifest: AdminManifest, *, candidate_hash: str, doctor: bool
+    manifest: AdminManifest,
+    *,
+    candidate_hash: str,
+    doctor: bool,
+    namespace_id: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(candidate_hash, str) or len(candidate_hash) != 64 or any(
         character not in "0123456789abcdef" for character in candidate_hash
     ):
         raise ValueError("candidate hash must be 64 lowercase hex digits")
-    with gpu_lock(manifest.runtime_root / "controller" / "gpu1.lock"):
+    with _deployment_mutation_guard(manifest):
         state = _repo_state(manifest)
         if state["kernel_hash"] != candidate_hash or state["kernel_blob_hash"] != candidate_hash:
             raise ControlledRuntimeError("candidate hash must match kernel.py and HEAD blob")
@@ -1127,24 +1888,63 @@ def adopt_baseline(
             raise ControlledRuntimeError(
                 "project containers still exist: " + ", ".join(containers)
             )
-        best, artifact = _artifact_for_best(current)
-        promotion = best.result.get("promotion", {})
-        if (
-            best.candidate_hash != candidate_hash
-            or not best.promotable
-            or not isinstance(promotion, Mapping)
-            or promotion.get("phase") != "confirmation"
-            or promotion.get("reason") != "promoted"
-        ):
-            raise ControlledRuntimeError(
-                "candidate is not the accepted C500 full confirmation"
-            )
+        proof = _prove_adoption(
+            current,
+            candidate_hash=candidate_hash,
+            namespace_id=namespace_id,
+        )
+        best = proof.confirmation
+        artifact = proof.artifact
         base = _load_base(manifest)
         values = _render_config_values(
             base, commit=state["head"], kernel_hash=candidate_hash
         )
         _validate_generated(values)
+        if proof.execution_environment.is_resolved:
+            with tempfile.TemporaryDirectory(
+                prefix="kar-admin-target-", dir=manifest.runtime_root
+            ) as temporary:
+                target_path = Path(temporary) / "pro.json"
+                target_path.write_bytes(_json_bytes(values["pro"]))
+                target_config = ControllerConfig.load(target_path)
+            target_environment = ResearchController(
+                target_config
+            )._resolved_execution_environment(proof.namespace)
+            try:
+                proof.execution_environment.require_match(
+                    target_environment,
+                    context="adoption target",
+                )
+            except ValueError as exc:
+                raise ControlledRuntimeError(str(exc)) from exc
         files, hashes = _prepared_files_from_base(manifest, values)
+        baseline_ref = BaselineRef.create(
+            namespace=proof.namespace,
+            artifact_id=best.artifact_id,
+            source="deployment",
+            revision=f"history-{best.id}",
+            execution_environment=(
+                proof.execution_environment
+                if proof.execution_environment.is_resolved
+                else None
+            ),
+        )
+        deployment_pin = DeploymentBaselinePin.create(
+            namespace_id=proof.namespace.namespace_id,
+            baseline_ref=baseline_ref,
+            candidate_hash=candidate_hash,
+            git_commit=state["head"],
+            primary_experiment_uid=(
+                None if proof.primary is None else proof.primary.experiment_uid
+            ),
+            confirmation_experiment_uid=best.experiment_uid,
+            confirmation_experiment_id=best.id,
+            parent_baseline_ref=proof.parent_baseline,
+            execution_environment=baseline_ref.execution_environment,
+        )
+        pin_path = manifest.runtime_root / DEPLOYMENT_BASELINE_FILENAME
+        files[pin_path] = (_json_bytes(deployment_pin.to_dict()), 0o600)
+        hashes["deployment_baseline"] = _sha256_bytes(files[pin_path][0])
         doctor_payload = None
         if doctor:
             with tempfile.TemporaryDirectory(
@@ -1155,15 +1955,21 @@ def adopt_baseline(
                     path = Path(temporary) / f"{name}.json"
                     path.write_bytes(_json_bytes(values[name]))
                     configs[name] = ControllerConfig.load(path)
-                doctor_payload = _doctor_configs(configs)
+                doctor_payload = _doctor_configs(
+                    configs, deployment_pin=deployment_pin
+                )
+        _require_no_active_campaign(manifest.runtime_root)
         _atomic_publish(files)
     report = {
         "schema_version": 1,
         "command": "adopt-baseline",
         "status": "SUCCESS",
         "candidate_hash": candidate_hash,
+        "namespace_id": proof.namespace.namespace_id,
         "experiment_id": best.id,
         "artifact": str(artifact),
+        "baseline_ref": baseline_ref.to_dict(),
+        "evidence_digest": deployment_pin.evidence_digest,
         "doctor": doctor_payload,
         "config_sha256": hashes,
     }
@@ -1200,11 +2006,22 @@ def build_parser() -> argparse.ArgumentParser:
             subparser.add_argument("--doctor", action="store_true")
         if command == "adopt-baseline":
             subparser.add_argument("--candidate-hash", required=True)
+            subparser.add_argument(
+                "--namespace",
+                dest="namespace_id",
+                help=(
+                    "exact built-in ResearchNamespace namespace_id; omitting "
+                    "it uses the one-cycle legacy V1 compatibility path"
+                ),
+            )
     internal = subparsers.add_parser(
         "_post-update", help="internal locked post-update continuation"
     )
     internal.add_argument("--manifest", required=True)
     internal.add_argument("--doctor", action="store_true")
+    internal.add_argument(
+        "--maintenance-lock-fd", type=int, help=argparse.SUPPRESS
+    )
     return parser
 
 
@@ -1220,8 +2037,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             manifest = _manifest_argument(args.manifest)
             if args.command == "sync":
-                with gpu_lock(manifest.runtime_root / "controller" / "gpu1.lock"):
-                    payload = sync(manifest)
+                payload = sync(manifest)
                 _write_report(manifest, "sync", payload)
             elif args.command == "verify":
                 payload = verify(manifest, args.level)
@@ -1232,9 +2048,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     manifest,
                     candidate_hash=args.candidate_hash,
                     doctor=args.doctor,
+                    namespace_id=args.namespace_id,
                 )
             elif args.command == "_post-update":
-                payload = _post_update(manifest, doctor=args.doctor)
+                payload = _post_update(
+                    manifest,
+                    doctor=args.doctor,
+                    maintenance_lock_fd=args.maintenance_lock_fd,
+                )
             else:
                 raise AssertionError("unknown admin command")
         _print(payload)

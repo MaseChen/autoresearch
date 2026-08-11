@@ -38,9 +38,13 @@ from kernel_research.autorun.proposal import (
 )
 from kernel_research.autorun.runtime import CommandResult, CommandRunner
 from kernel_research.autorun.states import Stage
-from kernel_research.autorun.store import ControllerStore
+from kernel_research.autorun.store import (
+    ControllerStore,
+    _V2_TO_V3_MIGRATION_CAPABILITY,
+)
 from kernel_research.autorun.summary import (
     compact_status_payload,
+    feedback_for_iteration,
     summarize_result,
 )
 from kernel_research.constants import (
@@ -942,12 +946,14 @@ class AdapterAndCacheTests(unittest.TestCase):
                     CommandResult((), 0, valid, "secret second"),
                 ]
             )
+            guarded_timeouts: list[float] = []
             adapter = OpenCodeProposer(
                 config,
                 run_id="c" * 32,
                 iteration_index=1,
                 run_dir=root / "run",
                 runner=runner,  # type: ignore[arg-type]
+                before_container_start=guarded_timeouts.append,
             )
             request = ProposalRequest(
                 parent_candidate_hash=SEED_HASH,
@@ -965,6 +971,8 @@ class AdapterAndCacheTests(unittest.TestCase):
                 proposal = adapter.propose(request)
             self.assertEqual(proposal.candidate_hash, SEED_HASH)
             self.assertEqual(len(runner.argv), 2)
+            self.assertEqual(len(guarded_timeouts), 2)
+            self.assertGreater(guarded_timeouts[0], guarded_timeouts[1])
             self.assertTrue(
                 all(adapter.container_name in argv for argv in runner.argv)
             )
@@ -1867,6 +1875,40 @@ class FeedbackAndStatusTests(unittest.TestCase):
                         limit=-1,
                     )
 
+    def test_agent_feedback_redacts_holdout_cases_but_keeps_host_summary(self) -> None:
+        iteration = {
+            "run_id": "run",
+            "iteration_index": 1,
+            "result": {
+                "status": "SUCCESS",
+                "promotion": {
+                    "decision": {
+                        "per_case_speedups": {
+                            "public": 1.1,
+                            "secret-holdout": 0.9,
+                        }
+                    }
+                },
+                "cases": [
+                    {"case_id": "public", "status": "SUCCESS"},
+                    {
+                        "case_id": "secret-holdout",
+                        "status": "SUCCESS",
+                    },
+                ],
+            },
+        }
+        host_summary = summarize_result(iteration["result"])
+        self.assertEqual(len(host_summary["cases"]), 2)
+        feedback = feedback_for_iteration(
+            iteration, hidden_case_ids=frozenset({"secret-holdout"})
+        )
+        result = feedback["result_summary"]
+        self.assertEqual(
+            [case["case_id"] for case in result["cases"]], ["public"]
+        )
+        self.assertEqual(result["per_case_speedups"], {"public": 1.1})
+
     def test_status_result_summary_and_compact_projection_are_unambiguous(
         self,
     ) -> None:
@@ -2016,7 +2058,12 @@ class StoreAndRecoveryTests(unittest.TestCase):
             connection.commit()
             connection.close()
             with self.assertRaisesRegex(RuntimeError, "unknown state"):
-                ControllerStore(database)
+                ControllerStore(
+                    database,
+                    _v2_to_v3_migration_capability=(
+                        _V2_TO_V3_MIGRATION_CAPABILITY
+                    ),
+                )
 
     def test_controller_signal_stops_and_cleans_exact_container(self) -> None:
         class SignalEvaluator:

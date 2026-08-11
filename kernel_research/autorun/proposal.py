@@ -8,6 +8,12 @@ import json
 import re
 from typing import Any, Iterable, Mapping
 
+from ..platform.artifacts import ArtifactId
+from ..platform.proposal import (
+    SYSTEM_BUNDLE_LIMITS,
+    BundleLimits,
+    ProposalV2,
+)
 from ..constants import (
     MAX_FEEDBACK_CANDIDATES,
     OPENCODE_PROPOSER_STEPS,
@@ -16,7 +22,12 @@ from ..constants import (
     PROPOSAL_RATIONALE_HARD_LIMIT,
     PROPOSAL_RATIONALE_RETRY_TARGET,
 )
-from .models import ProposalV1
+from .models import ProposalV1, normalize_proposal_to_v2
+
+
+# Public proposal-protocol spelling; the implementation lives beside the
+# dataclass models so V1 callers can normalize without importing this parser.
+normalize_proposal_v2 = normalize_proposal_to_v2
 
 
 FENCED_JSON_RE = re.compile(r"\A\s*```json\s*\n(.*?)\n```\s*\Z", re.DOTALL)
@@ -92,6 +103,17 @@ def _format_error(exc: json.JSONDecodeError) -> ProposalFormatError:
     return ProposalFormatError(f"proposal is not valid JSON: {exc}")
 
 
+def _strict_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ProposalFormatError(
+                f"proposal JSON contains duplicate object key {key!r}"
+            )
+        result[key] = value
+    return result
+
+
 def _transport_recovery_candidate(
     payload: str, exc: json.JSONDecodeError
 ) -> tuple[str, str] | None:
@@ -143,6 +165,33 @@ def parse_proposal_text(text: str, *, expected_parent_hash: str) -> ProposalV1:
         expected_parent_hash=expected_parent_hash,
         allow_transport_recovery=False,
     ).proposal
+
+
+def parse_proposal_v2_text(
+    text: str,
+    *,
+    expected_proposal_context_id: str,
+    expected_parent_artifact_id: ArtifactId | str,
+    limits: BundleLimits = SYSTEM_BUNDLE_LIMITS,
+) -> ProposalV2:
+    """Strictly parse one ProposalV2 object under host-supplied conditions.
+
+    Like the V1 compatibility parser, this accepts either a bare JSON object
+    or exactly one ``json`` fence.  It performs no semantic repair and never
+    accepts model-supplied artifact hashes.
+    """
+
+    payload, _fenced = _proposal_payload(text)
+    try:
+        value = json.loads(payload, object_pairs_hook=_strict_json_pairs)
+    except json.JSONDecodeError as exc:
+        raise _format_error(exc) from exc
+    return ProposalV2.from_value(
+        value,
+        expected_proposal_context_id=expected_proposal_context_id,
+        expected_parent_artifact_id=expected_parent_artifact_id,
+        limits=limits,
+    )
 
 
 def _contains_forbidden_event(value: Any) -> str | None:

@@ -6,8 +6,10 @@ import unittest
 import numpy as np
 
 from kernel_research.cases import (
+    CURRENT_QUICK_CASES,
     FIXED_SEED,
     FULL_CASES,
+    LEGACY_QUICK_CASES,
     QUICK_CASES,
     SMOKE_CASES,
     CaseSpec,
@@ -15,6 +17,12 @@ from kernel_research.cases import (
     generate_case,
     generate_expert_ids,
     get_suite,
+)
+from kernel_research.constants import (
+    CURRENT_C500_CASE_IDS,
+    CURRENT_C500_EVALUATION_PROTOCOL_ID,
+    LEGACY_C500_CASE_IDS,
+    LEGACY_C500_EVALUATION_PROTOCOL_ID,
 )
 from kernel_research.reference import (
     bfloat16_round,
@@ -71,7 +79,37 @@ class CaseGenerationTests(unittest.TestCase):
             [(case.em, case.n, case.k, case.num_experts) for case in SMOKE_CASES],
             [(256, 128, 224, 4), (512, 224, 64, 8)],
         )
-        self.assertEqual(len(QUICK_CASES), 4)
+        self.assertEqual(len(QUICK_CASES), 8)
+        non_scored = {
+            case.name: case
+            for case in QUICK_CASES
+            if case.role != "scored"
+        }
+        self.assertEqual(
+            set(non_scored),
+            {
+                "quick_shadow_tiles_127_n2",
+                "quick_shadow_tiles_128_n1",
+                "quick_shadow_tiles_128_n2",
+                "quick_shadow_tiles_129_n2",
+            },
+        )
+        self.assertEqual(non_scored["quick_shadow_tiles_127_n2"].tile_count, 127)
+        self.assertEqual(non_scored["quick_shadow_tiles_128_n1"].tile_count, 128)
+        self.assertEqual(non_scored["quick_shadow_tiles_128_n1"].n, 128)
+        self.assertEqual(non_scored["quick_shadow_tiles_128_n2"].tile_count, 128)
+        self.assertEqual(non_scored["quick_shadow_tiles_129_n2"].tile_count, 129)
+        self.assertEqual(
+            {
+                case.name
+                for case in QUICK_CASES
+                if case.role == "holdout"
+            },
+            {
+                "quick_shadow_tiles_128_n1",
+                "quick_shadow_tiles_129_n2",
+            },
+        )
         self.assertEqual(
             [(case.em, case.n, case.k, case.num_experts) for case in FULL_CASES],
             [
@@ -84,6 +122,39 @@ class CaseGenerationTests(unittest.TestCase):
         self.assertIs(get_suite("smoke"), SMOKE_CASES)
         with self.assertRaises(ValueError):
             get_suite("unknown")
+
+    def test_quick_suite_is_selected_by_exact_protocol_revision(self) -> None:
+        self.assertIs(get_suite("quick"), CURRENT_QUICK_CASES)
+        self.assertIs(QUICK_CASES, CURRENT_QUICK_CASES)
+        self.assertEqual(
+            tuple(
+                case.name
+                for case in get_suite(
+                    "quick",
+                    evaluation_protocol_id=LEGACY_C500_EVALUATION_PROTOCOL_ID,
+                )
+            ),
+            LEGACY_C500_CASE_IDS["quick"],
+        )
+        self.assertIs(
+            get_suite(
+                "quick",
+                evaluation_protocol_id=LEGACY_C500_EVALUATION_PROTOCOL_ID,
+            ),
+            LEGACY_QUICK_CASES,
+        )
+        self.assertEqual(
+            tuple(
+                case.name
+                for case in get_suite(
+                    "quick",
+                    evaluation_protocol_id=CURRENT_C500_EVALUATION_PROTOCOL_ID,
+                )
+            ),
+            CURRENT_C500_CASE_IDS["quick"],
+        )
+        with self.assertRaisesRegex(ValueError, "unknown evaluation protocol"):
+            get_suite("quick", evaluation_protocol_id="unregistered-protocol")
 
     def test_fixed_shape_address_ranges_only_require_int64_for_full_b(self) -> None:
         int32_max = np.iinfo(np.int32).max

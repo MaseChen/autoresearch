@@ -7,6 +7,43 @@ EXPERT_TILE_ROWS = 128
 REQUIRED_MATCH_RATIO = 0.99
 C500_ALLOWED_NUM_WARPS = frozenset({1, 2, 4, 8, 16})
 
+# Protocol identity and ordered case IDs intentionally live in this
+# dependency-light module.  The trusted controller imports evaluation helpers
+# but must never import NumPy merely to validate an evaluator envelope.
+LEGACY_C500_EVALUATION_PROTOCOL_ID = "fused-moe-c500-v1"
+CURRENT_C500_EVALUATION_PROTOCOL_ID = (
+    "fused-moe-c500-v2-shadow-holdout"
+)
+LEGACY_C500_CASE_IDS = {
+    "smoke": ("smoke_gate_up", "smoke_down"),
+    "quick": (
+        "quick_decode_gate_up",
+        "quick_prefill_gate_up",
+        "quick_decode_down",
+        "quick_prefill_down",
+    ),
+    "full": (
+        "full_decode_gate_up",
+        "full_prefill_gate_up",
+        "full_decode_down",
+        "full_prefill_down",
+    ),
+}
+CURRENT_C500_CASE_IDS = {
+    **LEGACY_C500_CASE_IDS,
+    "quick": (
+        *LEGACY_C500_CASE_IDS["quick"],
+        "quick_shadow_tiles_127_n2",
+        "quick_shadow_tiles_128_n1",
+        "quick_shadow_tiles_128_n2",
+        "quick_shadow_tiles_129_n2",
+    ),
+}
+CURRENT_C500_HOLDOUT_CASE_IDS = (
+    "quick_shadow_tiles_128_n1",
+    "quick_shadow_tiles_129_n2",
+)
+
 # These are trusted-controller ceilings. User configuration may lower them but
 # may never raise them.
 MAX_AUTORESEARCH_CANDIDATES = 5
