@@ -29,8 +29,8 @@ from kernel_research.platform.profiles import (
     ResearchNamespace,
 )
 
-from tests.test_autorun import SEED, _config
-from tests import test_controller_v2_integration as controller_fixtures
+from test_autorun import SEED, _config
+import test_controller_v2_integration as controller_fixtures
 
 
 ROOT = Path(__file__).resolve().parents[1]

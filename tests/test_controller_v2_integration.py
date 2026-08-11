@@ -30,7 +30,7 @@ from kernel_research.platform.profiles import (
 )
 from kernel_research.platform.proposal import CandidateBundle
 
-from tests.test_autorun import (
+from test_autorun import (
     FakeEvaluator,
     NoopRunner,
     SEED,

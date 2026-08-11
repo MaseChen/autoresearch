@@ -63,7 +63,7 @@ from kernel_research.platform.profiles import (
 )
 from kernel_research.recovery import verify_checkpoint
 
-from tests.test_autorun import (
+from test_autorun import (
     FakeEvaluator,
     NoopRunner,
     SEED,
@@ -74,7 +74,7 @@ from tests.test_autorun import (
     _proposal_value,
     _with_different_block_size_n,
 )
-from tests.test_controller_v2_integration import AuditedStaticProposer
+from test_controller_v2_integration import AuditedStaticProposer
 
 
 class FixtureController(ResearchController):

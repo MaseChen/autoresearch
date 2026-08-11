@@ -54,13 +54,16 @@ class ProfilingDoctorTests(unittest.TestCase):
                 "version_output": "1.2.3",
             }
 
-        report = run_profiling_doctor(
-            tool_probes=(ToolProbe("trace", ("mcTracer",)),),
-            library_paths=(self._accessible_path(),),
-            device_paths=(self._accessible_path(),),
-            executable_resolver=resolve,
-            command_runner=run,
-        )
+        with tempfile.TemporaryDirectory() as temporary:
+            accessible = Path(temporary) / "capability"
+            accessible.write_text("available\n", encoding="utf-8")
+            report = run_profiling_doctor(
+                tool_probes=(ToolProbe("trace", ("mcTracer",)),),
+                library_paths=(accessible,),
+                device_paths=(accessible,),
+                executable_resolver=resolve,
+                command_runner=run,
+            )
 
         self.assertEqual(report["status"], "READY")
         self.assertTrue(report["advisory_only"])
@@ -272,13 +275,6 @@ class ProfilingDoctorTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     profiling._store_cas_object(root, b"evidence", field="fixture")
             self.assertEqual(list(root.rglob("*.tmp")), [])
-
-    @staticmethod
-    def _accessible_path():
-        # The test file is readable and its containing directory is writable.
-        from pathlib import Path
-
-        return Path(__file__).resolve()
 
     @staticmethod
     def _missing_path():

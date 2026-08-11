@@ -20,7 +20,7 @@ from kernel_research.platform.artifacts import ArtifactId
 from kernel_research.platform.identity import BaselineRef
 from kernel_research.platform.profiles import LEGACY_RESEARCH_NAMESPACE
 
-from tests.test_autorun import (
+from test_autorun import (
     FakeEvaluator,
     NoopRunner,
     SEED,
