@@ -751,6 +751,17 @@ def _sqlite_backup(source: Path, destination: Path) -> None:
     target_connection = sqlite3.connect(destination)
     try:
         source_connection.backup(target_connection)
+        journal_mode = target_connection.execute(
+            "PRAGMA journal_mode = DELETE"
+        ).fetchone()
+        if (
+            journal_mode is None
+            or str(journal_mode[0]).lower() != "delete"
+        ):
+            raise RuntimeError(
+                "SQLite checkpoint backup could not be normalized "
+                "to a single-file journal"
+            )
     finally:
         target_connection.close()
         source_connection.close()

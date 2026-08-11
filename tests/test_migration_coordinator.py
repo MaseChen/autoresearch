@@ -157,6 +157,17 @@ class MigrationCoordinatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             state, history_db, controller_db, source = self._pair(root)
+            for database in (history_db, controller_db):
+                connection = sqlite3.connect(database)
+                try:
+                    self.assertEqual(
+                        connection.execute(
+                            "PRAGMA journal_mode = WAL"
+                        ).fetchone(),
+                        ("wal",),
+                    )
+                finally:
+                    connection.close()
             extra = state / "artifacts" / "manifest.json"
             extra.write_text("preserve me", encoding="utf-8")
 
@@ -189,6 +200,24 @@ class MigrationCoordinatorTests(unittest.TestCase):
             checkpoint = Path(result["checkpoint"])
             verified = verify_v2_migration_checkpoint(checkpoint)
             self.assertEqual(verified["status"], "VERIFIED")
+            self.assertEqual(list(checkpoint.glob("*.sqlite3-*")), [])
+            for database in (
+                checkpoint / "history.sqlite3",
+                checkpoint / "controller.sqlite3",
+            ):
+                connection = sqlite3.connect(
+                    database.resolve().as_uri() + "?mode=ro",
+                    uri=True,
+                )
+                try:
+                    self.assertEqual(
+                        connection.execute(
+                            "PRAGMA journal_mode"
+                        ).fetchone(),
+                        ("delete",),
+                    )
+                finally:
+                    connection.close()
             self.assertEqual(
                 (checkpoint / "config.json").read_bytes(),
                 Path(source["config_path"]).read_bytes(),
