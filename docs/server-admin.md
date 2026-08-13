@@ -118,6 +118,43 @@ Evaluator。每次外部动作均先写 Controller intent；GPU 启动后没有�
 `评测未提交候选 → 人工审查 → 仅提交 kernel.py → adopt` 保持同一科学环境，同时
 继续拒绝夹带框架、配置或文档改动的候选提交。
 
+## CURRENT baseline bootstrap
+
+完成一次 legacy→resolved deployment adoption 后，不得把已有 LEGACY History
+记录改写或重新标记为 CURRENT。先通过上面的 `update --doctor` 部署包含 ADR-008
+能力的独立控制面提交，确认工作树干净、正式配置已固定该提交，并再次执行
+`verify --level static` 与 `verify --level doctor`。随后才运行：
+
+```bash
+kernel-autoresearch-admin bootstrap-current-baseline \
+  --manifest "$AUTORESEARCH_MANIFEST" \
+  --candidate-hash 64位小写的当前kernel.py_SHA256
+```
+
+该入口没有候选路径、namespace、baseline、protocol、image 或 timeout 参数。它只
+接受正式仓库中已部署的 `kernel.py`，并从 resolved LEGACY deployment pin 精确导出
+不可变的父候选。父候选先在内置 CURRENT protocol 下做 full qualification，当前
+部署候选再依次执行 SMOKE、八个 QUICK（含 shadow/holdout）、FULL_PRIMARY 和
+CONFIRMATION。五个 GPU action 均先写 Controller intent；未知结果不可自动重放。
+
+成功输出必须为 `PROMOTED`，并回显精确内置 `namespace_id`、protocol、run ID、
+qualification ID 和 resolved environment。使用产生该 Run 的 Pro 配置创建 checkpoint，
+再以 `verify_checkpoint()` 完整验证。确认 History/Controller 五个 attempt 均成功链接、
+LEGACY 证据与旧 deployment pin 均未变化后，才允许人工执行：
+
+```bash
+kernel-autoresearch-admin adopt-baseline \
+  --manifest "$AUTORESEARCH_MANIFEST" \
+  --candidate-hash 64位小写的当前kernel.py_SHA256 \
+  --namespace bootstrap输出的精确namespace_id \
+  --doctor
+```
+
+bootstrap 本身只产生证据，不修改 Git、配置或 deployment pin。上述人工 adoption
+允许在同一个已部署控制面 commit 上把 pin 从 LEGACY 切换到 CURRENT，因为
+`kernel.py` 字节未变化；不得为此重建或 amend 已部署提交。CURRENT pin 完整验证和
+归档完成前，不得开始 noise、Campaign soak 或 profiling collection。
+
 ## Flash 384K/max canary
 
 Pro/Flash 的模型声明 output 和 OpenCode 请求 cap 均固定为 384,000，thinking 均

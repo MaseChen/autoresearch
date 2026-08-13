@@ -2168,6 +2168,46 @@ def requalify_adoption(
     return report
 
 
+def bootstrap_current_baseline(
+    manifest: AdminManifest,
+    *,
+    candidate_hash: str,
+) -> dict[str, Any]:
+    """Produce CURRENT evidence for the exact deployed improvement chain."""
+
+    if not isinstance(candidate_hash, str) or re.fullmatch(
+        r"[0-9a-f]{64}", candidate_hash
+    ) is None:
+        raise ValueError("candidate hash must be 64 lowercase hex digits")
+    with campaign_maintenance_fence(manifest.runtime_root):
+        _require_no_active_campaign(manifest.runtime_root)
+        config = ControllerConfig.load(manifest.pro_config)
+        if candidate_hash != config.expected_kernel_hash:
+            raise ControlledRuntimeError(
+                "CURRENT bootstrap hash must equal the formal deployed kernel hash"
+            )
+        active = _active_run_error(config)
+        if active:
+            raise ControlledRuntimeError(active)
+        containers = _active_containers(config)
+        if containers:
+            raise ControlledRuntimeError(
+                "project containers still exist: " + ", ".join(containers)
+            )
+        result = ResearchController(config).bootstrap_current_baseline(
+            candidate_path=config.repository_dir / "kernel.py",
+            candidate_hash=candidate_hash,
+        )
+        _require_no_active_campaign(manifest.runtime_root)
+    report = {
+        "schema_version": 1,
+        "command": "bootstrap-current-baseline",
+        **result,
+    }
+    _write_report(manifest, "bootstrap-current-baseline", report)
+    return report
+
+
 def _print(value: Mapping[str, Any]) -> None:
     print(json.dumps(value, sort_keys=True, ensure_ascii=False, indent=2))
 
@@ -2191,6 +2231,7 @@ def build_parser() -> argparse.ArgumentParser:
         "verify",
         "update",
         "requalify-adoption",
+        "bootstrap-current-baseline",
         "adopt-baseline",
     ):
         subparser = subparsers.add_parser(command)
@@ -2215,6 +2256,8 @@ def build_parser() -> argparse.ArgumentParser:
             subparser.add_argument("--candidate-hash", required=True)
             subparser.add_argument("--candidate-path", required=True)
             subparser.add_argument("--namespace", dest="namespace_id", required=True)
+        if command == "bootstrap-current-baseline":
+            subparser.add_argument("--candidate-hash", required=True)
     internal = subparsers.add_parser(
         "_post-update", help="internal locked post-update continuation"
     )
@@ -2257,6 +2300,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     candidate_hash=args.candidate_hash,
                     candidate_path=args.candidate_path,
                     namespace_id=args.namespace_id,
+                )
+            elif args.command == "bootstrap-current-baseline":
+                payload = bootstrap_current_baseline(
+                    manifest,
+                    candidate_hash=args.candidate_hash,
                 )
             elif args.command == "_post-update":
                 payload = _post_update(

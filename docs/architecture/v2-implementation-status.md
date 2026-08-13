@@ -10,7 +10,7 @@ autonomous evaluation or promotion.
 | R0 | Accepted ADRs and legacy golden compatibility are implemented. | Existing deployment and accepted legacy artifact remain unchanged. |
 | R1 | The current protocol adds explicit shadow and hidden holdout quick-case roles. Strict CURRENT noise collection/reporting freezes the namespace, baseline, environment and replicate identity, while legacy hash reports remain read-only. A bounded profiling doctor is implemented. | Ten independent C500 full remeasurements, the 99% null-distribution decision, and the real profiler capability probe have not been performed by the test suite. Current-protocol autonomous promotion remains closed until those checks pass. |
 | R2 | Profile references, namespace identity, tagged artifacts, experiment UID, explicit baselines, scientific/private CAS, History V3, Controller V3, and coordinated V2-to-V3 migration are implemented. | Production migration requires an offline terminal V2 pair and a verified whole-unit checkpoint. |
-| R3 | The existing Fused MoE, Triton Python, C500, protocol, promotion, and OpenCode paths have trusted component wrappers. Production Run and evaluator paths resolve those exact registered components before start, resume and every GPU stage. Proposal V2 and V1 conversion, frozen snapshots, strict evaluator identity echo, idempotent cross-store reconciliation, graft-resistant UID reproof, an explicit legacy-adoption requalification bridge, and an environment-bound manual deployment pin are implemented. | Migrated `LEGACY_UNKNOWN` evidence is never relabelled. The requalification bridge must first reproduce the deployed baseline under a resolved environment, then obtain fresh primary and confirmation evidence for the candidate. A CURRENT deployment pin is issued only from a complete primary/confirmation proof and is revalidated against CAS, Git, and the resolved runtime before every ordinary Run. |
+| R3 | The existing Fused MoE, Triton Python, C500, protocol, promotion, and OpenCode paths have trusted component wrappers. Production Run and evaluator paths resolve those exact registered components before start, resume and every GPU stage. Proposal V2 and V1 conversion, frozen snapshots, strict evaluator identity echo, idempotent cross-store reconciliation, graft-resistant UID reproof, an explicit legacy-adoption requalification bridge, a trusted CURRENT baseline bootstrap, and an environment-bound manual deployment pin are implemented. | Migrated `LEGACY_UNKNOWN` evidence is never relabelled. The requalification bridge must first reproduce the deployed baseline under a resolved environment. The CURRENT bootstrap then repeats the immutable deployed improvement chain under the CURRENT protocol and produces fresh namespace-local primary and confirmation evidence. A CURRENT deployment pin is issued only by manual adoption from that complete proof and is revalidated against CAS, Git, and the resolved runtime before every ordinary Run. |
 | R4 | Trusted OpenCode, Direct API, and Pi proposer contracts are implemented. Benchmark Campaigns freeze a trusted cohort snapshot, execute deterministic interleaved child Runs, and derive aggregate reports from Campaign, Controller and History ledgers rather than caller-supplied observations. | Only the two reviewed OpenCode profiles are executable. Direct API and Pi adapters remain inert planning/request contracts; no network credential or live-provider execution is enabled here. |
 | R5 | TileLang and MACA CUDA probe/contract skeletons, Ragged Prefill CPU oracle, and descriptors for the planned operator sequence are implemented fail-closed. | Every R5 language/operator profile is `INACTIVE`. No real TileLang/MACA compiler, device, or two-full-run activation evidence has been produced. |
 | R6 | Durable five-axis Campaign budgets, per-action deadline/fencing checks, environment-bound staged lineage, trusted GPU-doctor quarantine clearance, OJ nomination/export/manual feedback, evidence-collected soak gates, three-database checkpoints, inactive-root recovery, a shared Admin/Campaign maintenance fence, and bounded advisory profiling collection are implemented. OJ keeps the Campaign-local revision row separate from the imported scientific baseline revision, and profiling binds its subject to the exact Campaign child and Controller run. | No 24/72/168-hour qualification soak has been run. Profiling remains gated by a continuously observed soak ledger with qualifying workload activity, and the release-candidate profiler image digest must be replaced by the built MetaX image before activation. |
@@ -61,12 +61,14 @@ autonomous evaluation or promotion.
 
 Before enabling the current C500 protocol for autonomous discovery:
 
-1. run and record at least ten independent same-hash full remeasurements in one
+1. establish a manually reviewed current-namespace baseline with primary and
+   confirmation evidence bound to the resolved execution environment, using
+   the trusted bootstrap defined by ADR-008 rather than relabelling legacy
+   evidence;
+2. run and record at least ten independent same-hash full remeasurements in one
    resolved execution environment;
-2. confirm the read-only noise report's 99th percentile remains below the 1%
+3. confirm the read-only noise report's 99th percentile remains below the 1%
    promotion threshold, otherwise keep automatic promotion paused;
-3. establish a manually reviewed current-namespace baseline with primary and
-   confirmation evidence bound to the resolved execution environment;
 4. run the profiler doctor in its pinned environment and retain explicit
    `UNAVAILABLE + reason` values for missing capabilities; and
 5. complete the applicable Campaign soak from zero after every invariant
@@ -74,8 +76,8 @@ Before enabling the current C500 protocol for autonomous discovery:
 
 ## Repository verification snapshot
 
-The final host-only verification run for this implementation completed 450
-unit and integration tests with 80.51% branch-aware coverage. `compileall` and
+The final host-only verification run for this implementation completed 462
+unit and integration tests with 80.23% branch-aware coverage. `compileall` and
 the Git whitespace check also passed. These checks use mocks and isolated
 SQLite/runtime fixtures; they do not claim MetaX C500 execution, provider/OJ
 network access, or elapsed 24/72/168-hour soak evidence.

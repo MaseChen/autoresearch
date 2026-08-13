@@ -41,6 +41,9 @@ from kernel_research.autorun.runtime import (
 from kernel_research.autorun.store import ControllerStore
 from kernel_research.cli import main as evaluator_main
 from kernel_research.constants import (
+    CURRENT_C500_CASE_IDS,
+    CURRENT_C500_EVALUATION_PROTOCOL_ID,
+    LEGACY_C500_CASE_IDS,
     OPENCODE_PROPOSER_STEPS,
     PROPOSAL_HYPOTHESIS_HARD_LIMIT,
     PROPOSAL_HYPOTHESIS_RETRY_TARGET,
@@ -936,6 +939,37 @@ print('CONTROLLER_IMPORT_OK')
                     "RUNNING",
                 )
 
+    def test_checkpoint_rejects_config_mismatch_before_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            frozen_config = _config(root)
+            _baseline(frozen_config.state_dir)
+            with ControllerStore(
+                frozen_config.controller_dir / "controller.sqlite3"
+            ) as store:
+                store.create_run(
+                    run_id="checkpoint-config-mismatch",
+                    deadline_epoch=time.time() + 60,
+                    config=frozen_config.redacted_dict(),
+                    initial_best_hash=SEED_HASH,
+                )
+            supplied_config = replace(
+                frozen_config,
+                opencode_model=(
+                    "deepseek/deepseek-v4-flash"
+                    if "flash" not in frozen_config.opencode_model
+                    else "deepseek/deepseek-v4-pro"
+                ),
+            )
+            controller = ResearchController(
+                supplied_config, evaluator=FakeEvaluator()
+            )
+            with self.assertRaisesRegex(
+                RuntimeError, "config differs from the frozen Controller Run"
+            ):
+                controller.checkpoint("checkpoint-config-mismatch")
+            self.assertEqual(list(frozen_config.checkpoint_dir.iterdir()), [])
+
     def test_controller_store_accepts_concurrent_wal_events(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             database = Path(temporary) / "controller.sqlite3"
@@ -1020,15 +1054,14 @@ class FakeEvaluator:
         if stage == "confirmation" and self.interrupt_confirmation:
             self.interrupt_confirmation = False
             raise KeyboardInterrupt
-        suite_cases = {
-            "smoke": ("smoke_gate_up", "smoke_down"),
-            "quick": (
-                "quick_decode_gate_up",
-                "quick_prefill_gate_up",
-                "quick_decode_down",
-                "quick_prefill_down",
-            ),
-        }
+        identity = request_identity or {}
+        namespace = identity.get("namespace", {})
+        protocol = namespace.get("evaluation_protocol", {})
+        protocol_cases = (
+            CURRENT_C500_CASE_IDS
+            if protocol.get("id") == CURRENT_C500_EVALUATION_PROTOCOL_ID
+            else LEGACY_C500_CASE_IDS
+        )
         if suite != "full":
             return self._with_identity(values, {
                 "status": "SUCCESS",
@@ -1040,7 +1073,7 @@ class FakeEvaluator:
                         "latency_samples_us": [10.0] * 30,
                         "p50_us": 10.0,
                     }
-                    for name in suite_cases[suite]
+                    for name in protocol_cases[suite]
                 ],
                 "environment": {},
                 "error": None,

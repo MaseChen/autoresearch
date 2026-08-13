@@ -17,6 +17,10 @@ from .executor import evaluate_isolated
 from .history import ExperimentRecord, HistoryStore, LEGACY_NAMESPACE_ID
 from .platform.canonical import canonical_json_bytes
 from .platform.identity import ExperimentIdentity
+from .platform.profiles import (
+    CURRENT_RESEARCH_NAMESPACE,
+    LEGACY_RESEARCH_NAMESPACE,
+)
 from .research_policy import validate_research_candidate_bounded
 from .scoring import evaluate_promotion, percentiles
 from .constants import (
@@ -35,6 +39,7 @@ LEGACY_EXPECTED_C500_CASES = LEGACY_C500_CASE_IDS
 EXPECTED_C500_CASES = CURRENT_C500_CASE_IDS
 REQUEST_IDENTITY_MAX_BYTES = 64 * 1024
 _BASELINE_QUALIFICATION_CAPABILITY = object()
+_CURRENT_BASELINE_BOOTSTRAP_CAPABILITY = object()
 
 
 def load_request_identity(
@@ -489,6 +494,7 @@ def record_external_result(
     identity: Any | None = None,
     baseline_experiment_id: int | None = None,
     _baseline_qualification_capability: object | None = None,
+    _current_baseline_bootstrap_capability: object | None = None,
 ) -> ExperimentRecord:
     """Validate, promote and persist a result produced by ``evaluate-raw``."""
 
@@ -515,6 +521,7 @@ def record_external_result(
         identity_value: Mapping[str, Any] | None = None
         evidence_only_identity: ExperimentIdentity | None = None
         qualification_identity: ExperimentIdentity | None = None
+        current_baseline_bootstrap = False
         if identity is not None:
             to_dict = getattr(identity, "to_dict", None)
             identity_value = (
@@ -570,10 +577,15 @@ def record_external_result(
                         "noise collection must remeasure the exact frozen baseline artifact"
                     )
             elif identity_value.get("replicate_kind") == "qualification":
-                if (
+                current_baseline_bootstrap = (
+                    _current_baseline_bootstrap_capability
+                    is _CURRENT_BASELINE_BOOTSTRAP_CAPABILITY
+                )
+                ordinary_qualification = (
                     _baseline_qualification_capability
-                    is not _BASELINE_QUALIFICATION_CAPABILITY
-                ):
+                    is _BASELINE_QUALIFICATION_CAPABILITY
+                )
+                if current_baseline_bootstrap == ordinary_qualification:
                     raise ValueError(
                         "baseline qualification requires the trusted controller capability"
                     )
@@ -598,6 +610,14 @@ def record_external_result(
                     raise ValueError(
                         "baseline qualification must remeasure one resolved "
                         "c500/full artifact"
+                    )
+                if current_baseline_bootstrap and (
+                    qualification_identity.namespace
+                    != CURRENT_RESEARCH_NAMESPACE
+                ):
+                    raise ValueError(
+                        "CURRENT baseline bootstrap requires the exact built-in "
+                        "CURRENT namespace"
                     )
             if result.get("request_identity") != dict(identity_value):
                 raise ValueError("evaluator did not exactly echo request identity")
@@ -625,7 +645,11 @@ def record_external_result(
             best = history.get_experiment(baseline_experiment_id)
             if best is None:
                 raise ValueError("frozen baseline experiment does not exist")
-            if namespace_id is not None and best.namespace_id != namespace_id:
+            if (
+                namespace_id is not None
+                and best.namespace_id != namespace_id
+                and not current_baseline_bootstrap
+            ):
                 raise ValueError("frozen baseline belongs to another namespace")
             if qualification_identity is not None and (
                 best.status != "SUCCESS"
@@ -637,6 +661,30 @@ def record_external_result(
                 raise ValueError(
                     "baseline qualification parent is not the accepted identical artifact"
                 )
+            if current_baseline_bootstrap:
+                try:
+                    source_identity = ExperimentIdentity.from_value(
+                        dict(best.identity)
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "CURRENT bootstrap source has no valid resolved identity"
+                    ) from exc
+                if (
+                    best.namespace_id
+                    != LEGACY_RESEARCH_NAMESPACE.namespace_id
+                    or source_identity.namespace != LEGACY_RESEARCH_NAMESPACE
+                    or source_identity.experiment_uid != best.experiment_uid
+                    or str(source_identity.candidate_artifact_id)
+                    != best.artifact_id
+                    or not source_identity.execution_environment.is_resolved
+                    or source_identity.execution_environment
+                    != qualification_identity.execution_environment
+                ):
+                    raise ValueError(
+                        "CURRENT bootstrap source is not the exact resolved LEGACY "
+                        "baseline evidence"
+                    )
             if evidence_only_identity is not None:
                 if (
                     best.artifact_id
@@ -744,11 +792,9 @@ def record_external_result(
                     case["baseline_p50_us"] = baseline_percentiles["p50"]
                     case["baseline_p80_us"] = baseline_percentiles["p80"]
         if qualification_identity is not None:
-            recorded_result["evidence"] = {
+            common_evidence = {
                 "schema_version": 1,
-                "role": "baseline_qualification",
                 "promotion_eligible": recorded_result["status"] == "SUCCESS",
-                "legacy_parent_experiment_uid": best.experiment_uid,
                 "namespace_id": qualification_identity.namespace_id,
                 "artifact_id": str(
                     qualification_identity.candidate_artifact_id
@@ -757,6 +803,25 @@ def record_external_result(
                     qualification_identity.execution_environment.to_dict()
                 ),
             }
+            recorded_result["evidence"] = (
+                {
+                    **common_evidence,
+                    "role": "current_baseline_bootstrap",
+                    "source_experiment_uid": best.experiment_uid,
+                    "source_experiment_id": best.id,
+                    "source_namespace_id": best.namespace_id,
+                    "source_artifact_id": best.artifact_id,
+                    "source_execution_environment_digest": (
+                        source_identity.execution_environment.digest
+                    ),
+                }
+                if current_baseline_bootstrap
+                else {
+                    **common_evidence,
+                    "role": "baseline_qualification",
+                    "legacy_parent_experiment_uid": best.experiment_uid,
+                }
+            )
             if recorded_result["status"] == "SUCCESS":
                 recorded_result["eligible_for_promotion"] = True
                 recorded_result["aggregate_score"] = best.aggregate_score
@@ -843,7 +908,9 @@ def record_external_result(
                 **record_values,
                 identity=identity_value,
                 baseline_experiment_uid=(
-                    None if best is None else best.experiment_uid
+                    None
+                    if best is None or current_baseline_bootstrap
+                    else best.experiment_uid
                 ),
             )
         )
@@ -893,6 +960,42 @@ def record_baseline_qualification_result(
         baseline_experiment_id=baseline_experiment_id,
         _baseline_qualification_capability=(
             _BASELINE_QUALIFICATION_CAPABILITY
+        ),
+    )
+
+
+def record_current_baseline_bootstrap_result(
+    *,
+    candidate_source: str,
+    result: dict[str, Any],
+    state_dir: str | Path,
+    note: str,
+    identity: ExperimentIdentity,
+    legacy_source_experiment_id: int,
+    git_revision: str | None = None,
+) -> ExperimentRecord:
+    """Create one CURRENT baseline seed from an exact resolved LEGACY parent.
+
+    This is the only cross-namespace scientific bridge.  It records fresh
+    CURRENT evaluator evidence with immutable source provenance; it never
+    copies or mutates the source experiment and never creates a cross-namespace
+    relation.
+    """
+
+    if not isinstance(identity, ExperimentIdentity):
+        raise TypeError("bootstrap identity must be an ExperimentIdentity")
+    return record_external_result(
+        candidate_source=candidate_source,
+        result=result,
+        backend="c500",
+        suite="full",
+        state_dir=state_dir,
+        note=note,
+        git_revision=git_revision,
+        identity=identity,
+        baseline_experiment_id=legacy_source_experiment_id,
+        _current_baseline_bootstrap_capability=(
+            _CURRENT_BASELINE_BOOTSTRAP_CAPABILITY
         ),
     )
 

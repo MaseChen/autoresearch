@@ -27,6 +27,7 @@ from ..constants import (
 )
 from ..evaluation import (
     record_baseline_qualification_result,
+    record_current_baseline_bootstrap_result,
     record_external_result,
     record_noise_external_result,
 )
@@ -2288,15 +2289,25 @@ class ResearchController:
             and revision.removeprefix("history-").isdigit()
             else None
         )
+        preferred_uid = (
+            revision.removeprefix("qualification-")
+            if revision.startswith("qualification-")
+            and revision.removeprefix("qualification-")
+            else None
+        )
         with HistoryStore(
             self.history_db, state_dir=self.config.state_dir
         ) as history:
             record = (
                 history.get_experiment(preferred_id)
                 if preferred_id is not None
-                else None
+                else (
+                    history.get_experiment_by_uid(preferred_uid)
+                    if preferred_uid is not None
+                    else None
+                )
             )
-            if record is None:
+            if record is None and preferred_id is None and preferred_uid is None:
                 matches = history.list_experiments_for_namespace(
                     namespace_id,
                     artifact_id=str(baseline_ref.artifact_id),
@@ -4460,6 +4471,49 @@ class ResearchController:
         candidate_hash: str,
         namespace_id: str,
     ) -> dict[str, Any]:
+        """Run the one-cycle LEGACY_UNKNOWN-to-resolved adoption bridge."""
+
+        if namespace_id != LEGACY_RESEARCH_NAMESPACE.namespace_id:
+            raise ValueError(
+                "initial requalification is restricted to the exact LEGACY namespace"
+            )
+        return self._qualify_candidate_for_adoption(
+            candidate_path=candidate_path,
+            candidate_hash=candidate_hash,
+            namespace=LEGACY_RESEARCH_NAMESPACE,
+            operation="adoption-requalification",
+        )
+
+    def bootstrap_current_baseline(
+        self,
+        *,
+        candidate_path: str | os.PathLike[str],
+        candidate_hash: str,
+    ) -> dict[str, Any]:
+        """Repeat the pinned improvement chain under the CURRENT protocol.
+
+        The immutable resolved LEGACY deployment proof owns both artifacts:
+        its exact parent is first qualified as a new CURRENT baseline, then the
+        currently deployed candidate traverses the ordinary CURRENT workflow.
+        This method produces evidence only and never publishes deployment
+        state.
+        """
+
+        return self._qualify_candidate_for_adoption(
+            candidate_path=candidate_path,
+            candidate_hash=candidate_hash,
+            namespace=CURRENT_RESEARCH_NAMESPACE,
+            operation="current-baseline-bootstrap",
+        )
+
+    def _qualify_candidate_for_adoption(
+        self,
+        *,
+        candidate_path: str | os.PathLike[str],
+        candidate_hash: str,
+        namespace: ResearchNamespace,
+        operation: str,
+    ) -> dict[str, Any]:
         """Create fresh resolved evidence without changing deployment state.
 
         This one-cycle migration bridge first measures the exact accepted
@@ -4469,10 +4523,21 @@ class ResearchController:
         Git and the deployment pin remain administrator-owned and untouched.
         """
 
-        if namespace_id != LEGACY_RESEARCH_NAMESPACE.namespace_id:
+        if operation not in {
+            "adoption-requalification",
+            "current-baseline-bootstrap",
+        }:
             raise ValueError(
-                "initial requalification is restricted to the exact LEGACY namespace"
+                "unknown trusted baseline qualification operation"
             )
+        current_bootstrap = operation == "current-baseline-bootstrap"
+        expected_namespace = (
+            CURRENT_RESEARCH_NAMESPACE
+            if current_bootstrap
+            else LEGACY_RESEARCH_NAMESPACE
+        )
+        if namespace != expected_namespace:
+            raise ValueError("baseline qualification namespace is not exact")
         if (
             not isinstance(candidate_hash, str)
             or re.fullmatch(r"[0-9a-f]{64}", candidate_hash) is None
@@ -4499,7 +4564,7 @@ class ResearchController:
         if hashlib.sha256(candidate_bytes).hexdigest() != candidate_hash:
             raise ValueError("candidate_path bytes do not match candidate_hash")
 
-        target = _trusted_target(LEGACY_RESEARCH_NAMESPACE)
+        target = _trusted_target(namespace)
         policy = target.validate_candidate(candidate_source)
         if not policy.valid or policy.sha256 != candidate_hash:
             raise ValueError("requalification candidate fails trusted policy")
@@ -4511,37 +4576,137 @@ class ResearchController:
             pin = self._deployment_pin()
             if pin is None:
                 raise ControlledRuntimeError(
-                    "requalification requires an explicit legacy deployment pin"
+                    "baseline qualification requires an explicit deployment pin"
                 )
-            if pin.execution_environment.is_resolved:
+            if current_bootstrap:
+                if (
+                    pin.namespace_id
+                    != LEGACY_RESEARCH_NAMESPACE.namespace_id
+                    or not pin.execution_environment.is_resolved
+                    or pin.parent_baseline_ref is None
+                    or not pin.parent_baseline_ref.execution_environment.is_resolved
+                ):
+                    raise ControlledRuntimeError(
+                        "CURRENT bootstrap requires an exact resolved LEGACY "
+                        "deployment proof with its parent baseline"
+                    )
+            elif pin.execution_environment.is_resolved:
                 raise ControlledRuntimeError(
                     "deployment baseline is already resolved; requalification is unnecessary"
                 )
-            preflight = self.doctor(run_id="preflight")
-            if preflight["status"] != "SUCCESS":
-                raise ControlledRuntimeError(
-                    "requalification preflight failed: "
-                    + "; ".join(preflight["errors"])
+            deployed = self._best()
+            if current_bootstrap:
+                if (
+                    candidate_hash != pin.candidate_hash
+                    or deployed.id != pin.confirmation_experiment_id
+                    or deployed.experiment_uid
+                    != pin.confirmation_experiment_uid
+                    or deployed.artifact_id != str(pin.baseline_ref.artifact_id)
+                ):
+                    raise ControllerDataIntegrityError(
+                        "CURRENT bootstrap candidate is not the exact deployed proof"
+                    )
+                repository_candidate = self.config.repository_dir / "kernel.py"
+                try:
+                    supplied_matches_repository = (
+                        supplied == repository_candidate.resolve(strict=True)
+                    )
+                except OSError as exc:
+                    raise ControllerDataIntegrityError(
+                        "deployed kernel.py cannot be resolved"
+                    ) from exc
+                if not supplied_matches_repository:
+                    raise ValueError(
+                        "CURRENT bootstrap candidate_path must be the deployed kernel.py"
+                    )
+                promotion = deployed.result.get("promotion")
+                source_id = (
+                    promotion.get("baseline_experiment_id")
+                    if isinstance(promotion, Mapping)
+                    else None
                 )
-            baseline = self._best()
+                if type(source_id) is not int:
+                    raise ControllerDataIntegrityError(
+                        "deployment proof has no exact parent baseline experiment"
+                    )
+                with HistoryStore(
+                    self.history_db, state_dir=self.config.state_dir
+                ) as history:
+                    baseline = history.get_experiment(source_id)
+                try:
+                    deployed_identity = ExperimentIdentity.from_value(
+                        dict(deployed.identity)
+                    )
+                    baseline_identity = (
+                        None
+                        if baseline is None
+                        else ExperimentIdentity.from_value(dict(baseline.identity))
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ControllerDataIntegrityError(
+                        "deployment proof has invalid resolved identities"
+                    ) from exc
+                if (
+                    baseline is None
+                    or baseline_identity is None
+                    or deployed_identity.namespace
+                    != LEGACY_RESEARCH_NAMESPACE
+                    or baseline_identity.namespace
+                    != LEGACY_RESEARCH_NAMESPACE
+                    or deployed_identity.baseline != pin.parent_baseline_ref
+                    or baseline.artifact_id
+                    != str(pin.parent_baseline_ref.artifact_id)
+                    or baseline_identity.candidate_artifact_id
+                    != pin.parent_baseline_ref.artifact_id
+                    or baseline_identity.execution_environment
+                    != pin.parent_baseline_ref.execution_environment
+                    or deployed.baseline_experiment_uid
+                    != baseline.experiment_uid
+                    or baseline.status != "SUCCESS"
+                    or not baseline.promotable
+                ):
+                    raise ControllerDataIntegrityError(
+                        "deployment proof does not retain its exact resolved parent"
+                    )
+            else:
+                baseline = deployed
             legacy_ref = pin.baseline_ref
-            if legacy_ref.execution_environment.is_resolved:
+            if not current_bootstrap and legacy_ref.execution_environment.is_resolved:
                 raise ControllerDataIntegrityError(
                     "legacy requalification parent unexpectedly has resolved evidence"
                 )
             runtime_environment = self._resolved_execution_environment(
-                LEGACY_RESEARCH_NAMESPACE
+                namespace
             )
+            if current_bootstrap:
+                try:
+                    pin.execution_environment.require_match(
+                        runtime_environment,
+                        context="CURRENT bootstrap deployment",
+                    )
+                    pin.parent_baseline_ref.require_environment(
+                        runtime_environment
+                    )
+                except ValueError as exc:
+                    raise ControllerDataIntegrityError(str(exc)) from exc
+            baseline_path = self._experiment_source_path(baseline)
+            baseline_source = baseline_path.read_text(encoding="utf-8")
+            preflight = self.doctor(run_id="preflight")
+            if preflight["status"] != "SUCCESS":
+                raise ControlledRuntimeError(
+                    "baseline qualification preflight failed: "
+                    + "; ".join(preflight["errors"])
+                )
             qualification_uid = str(
                 uuid.uuid5(
                     uuid.NAMESPACE_URL,
-                    "kernel-research/baseline-qualification/v1/"
+                    f"kernel-research/{operation}/baseline-qualification/v1/"
                     f"{baseline.experiment_uid}/{runtime_environment.digest}/"
                     f"{candidate_hash}",
                 )
             )
             qualification_ref = BaselineRef.create(
-                namespace=LEGACY_RESEARCH_NAMESPACE,
+                namespace=namespace,
                 artifact_id=baseline.artifact_id,
                 source="deployment",
                 revision=f"qualification-{qualification_uid}",
@@ -4554,10 +4719,12 @@ class ResearchController:
             )
             operation_uid = uuid.uuid5(
                 uuid.NAMESPACE_URL,
-                "kernel-research/adoption-requalification/v1/"
+                f"kernel-research/{operation}/v1/"
                 f"{qualification_uid}/{bundle.artifact_id}",
             )
-            run_id = "requal-" + operation_uid.hex
+            run_id = (
+                "current-bootstrap-" if current_bootstrap else "requal-"
+            ) + operation_uid.hex
             with ControllerStore(self.controller_db) as active_store:
                 active_rows = active_store.connection.execute(
                     "SELECT id FROM runs WHERE status = 'RUNNING' AND id != ?",
@@ -4579,15 +4746,16 @@ class ResearchController:
             snapshot = self._workflow_snapshot(
                 baseline=baseline,
                 history_cutoff=history_cutoff,
-                namespace=LEGACY_RESEARCH_NAMESPACE,
+                namespace=namespace,
                 baseline_ref=qualification_ref,
             )
             material = dict(snapshot)
             material.pop("snapshot_digest", None)
             material.update(
                 {
-                    "evidence_operation": "adoption-requalification",
-                    "legacy_parent_experiment_uid": baseline.experiment_uid,
+                    "evidence_operation": operation,
+                    "source_experiment_uid": baseline.experiment_uid,
+                    "source_namespace_id": baseline.namespace_id,
                     "qualification_experiment_uid": qualification_uid,
                     "candidate_artifact_id": str(bundle.artifact_id),
                 }
@@ -4630,7 +4798,7 @@ class ResearchController:
 
             qualification_identity = ExperimentIdentity.create(
                 experiment_uid=qualification_uid,
-                namespace=LEGACY_RESEARCH_NAMESPACE,
+                namespace=namespace,
                 mode="DISCOVERY",
                 candidate_artifact_id=baseline.artifact_id,
                 parent_artifact_id=baseline.artifact_id,
@@ -4658,7 +4826,7 @@ class ResearchController:
                         config=self.config.redacted_dict(),
                         initial_best_hash=baseline.candidate_hash,
                         preflight=preflight,
-                        namespace_id=LEGACY_RESEARCH_NAMESPACE.namespace_id,
+                        namespace_id=namespace.namespace_id,
                         resolved_config_digest=str(snapshot["snapshot_digest"]),
                         workflow_snapshot=snapshot,
                         baseline_ref=qualification_ref.to_dict(),
@@ -4717,8 +4885,6 @@ class ResearchController:
                     run_dir / "results" / "001" / "baseline_qualification.validated.json"
                 )
                 if qualification is None:
-                    baseline_path = self._experiment_source_path(baseline)
-                    baseline_source = baseline_path.read_text(encoding="utf-8")
                     launched = False
                     if attempt["status"] == "RUNNING":
                         if not raw_path.is_file():
@@ -4839,15 +5005,25 @@ class ResearchController:
                                 "baseline qualification evidence is not durable"
                             ) from exc
                     try:
-                        qualification = record_baseline_qualification_result(
-                            candidate_source=baseline_source,
-                            result=raw,
-                            state_dir=self.config.state_dir,
-                            note=f"requalification:{run_id}:baseline",
-                            identity=qualification_identity,
-                            baseline_experiment_id=baseline.id,
-                            git_revision=self.config.expected_git_commit[:12],
+                        recorder = (
+                            record_current_baseline_bootstrap_result
+                            if current_bootstrap
+                            else record_baseline_qualification_result
                         )
+                        recorder_arguments: dict[str, Any] = {
+                            "candidate_source": baseline_source,
+                            "result": raw,
+                            "state_dir": self.config.state_dir,
+                            "note": f"{operation}:{run_id}:baseline",
+                            "identity": qualification_identity,
+                            "git_revision": self.config.expected_git_commit[:12],
+                        }
+                        recorder_arguments[
+                            "legacy_source_experiment_id"
+                            if current_bootstrap
+                            else "baseline_experiment_id"
+                        ] = baseline.id
+                        qualification = recorder(**recorder_arguments)
                     except Exception as exc:
                         store.finish_evaluation_attempt(
                             qualification_uid,
@@ -4920,9 +5096,16 @@ class ResearchController:
                     iteration = store.accept_candidate(
                         int(iteration["id"]),
                         candidate_hash=candidate_hash,
-                        hypothesis="operator-selected candidate requalification",
+                        hypothesis=(
+                            "operator-selected CURRENT baseline bootstrap"
+                            if current_bootstrap
+                            else "operator-selected candidate requalification"
+                        ),
                         rationale=(
-                            "fresh resolved evidence required after legacy migration"
+                            "repeat the immutable deployed improvement under the "
+                            "CURRENT protocol"
+                            if current_bootstrap
+                            else "fresh resolved evidence required after legacy migration"
                         ),
                         candidate_path=str(candidate_file),
                     )
@@ -4945,6 +5128,8 @@ class ResearchController:
                     "schema_version": 1,
                     "status": completed["status"],
                     "run_id": run_id,
+                    "namespace_id": namespace.namespace_id,
+                    "evaluation_protocol": namespace.evaluation_protocol.to_dict(),
                     "qualification_experiment_id": qualification.id,
                     "qualification_experiment_uid": qualification.experiment_uid,
                     "candidate_hash": candidate_hash,
@@ -5402,6 +5587,12 @@ class ResearchController:
 
     def checkpoint(self, run_id: str) -> dict[str, Any]:
         with gpu_lock(self.config.controller_dir / "gpu1.lock"):
+            with ControllerStore(self.controller_db) as store:
+                frozen_run = store.get_run(run_id)
+            if frozen_run.get("config") != self.config.redacted_dict():
+                raise ControlledRuntimeError(
+                    "checkpoint config differs from the frozen Controller Run"
+                )
             timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
             destination = self.config.checkpoint_dir / f"{run_id}-{timestamp}"
             temporary_destination = (
