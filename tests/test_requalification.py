@@ -649,6 +649,22 @@ class RequalificationTests(unittest.TestCase):
         ):
             self.assertFalse(hasattr(parsed, forbidden), forbidden)
 
+    def test_current_bootstrap_invalid_hash_fails_before_side_effects(self) -> None:
+        manifest = mock.create_autospec(admin.AdminManifest, instance=True)
+        with (
+            mock.patch.object(admin, "campaign_maintenance_fence") as fence,
+            mock.patch.object(admin, "ResearchController") as controller,
+            self.assertRaisesRegex(
+                ValueError, "candidate hash must be 64 lowercase hex digits"
+            ),
+        ):
+            admin.bootstrap_current_baseline(
+                manifest,
+                candidate_hash="not-a-sha256",
+            )
+        fence.assert_not_called()
+        controller.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
