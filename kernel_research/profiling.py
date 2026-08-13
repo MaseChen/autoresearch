@@ -213,7 +213,14 @@ class ToolProbe:
 
 DEFAULT_TOOL_PROBES = (
     ToolProbe("metax-system-management", ("mx-smi",)),
-    ToolProbe("metax-trace-collector", ("mcTracer", "mctracer")),
+    # MetaX 3.2.1 mcTracer has no version flag: ``--version`` is interpreted
+    # as the target executable to trace and therefore fails with execvpe.
+    # Its reviewed ``--help`` path exits zero and includes the tool version.
+    ToolProbe(
+        "metax-trace-collector",
+        ("mcTracer", "mctracer"),
+        version_arguments=("--help",),
+    ),
     # mcProfiler is commonly a UI/client while the Linux target exposes its
     # collector.  It is therefore useful evidence but not a Linux hard gate.
     ToolProbe(

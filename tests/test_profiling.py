@@ -28,6 +28,7 @@ from kernel_research.platform.profiles import CURRENT_RESEARCH_NAMESPACE
 from kernel_research.platform.proposal import CandidateBundle
 from kernel_research.profiling import (
     BUILTIN_PROFILE_RECIPES,
+    DEFAULT_TOOL_PROBES,
     PROFILE_OUTPUT_LIMIT_BYTES,
     PROFILE_TIMEOUT_SECONDS,
     PROFILER_IMAGE,
@@ -69,6 +70,81 @@ class ProfilingDoctorTests(unittest.TestCase):
         self.assertTrue(report["advisory_only"])
         self.assertEqual(report["promotion_effect"], "none")
         self.assertEqual(commands, [("/trusted/bin/mcTracer", "--version")])
+
+    def test_default_metax_trace_probe_uses_help_and_can_be_ready(self) -> None:
+        commands: list[tuple[str, ...]] = []
+
+        def resolve(name: str) -> str | None:
+            if name in {"mx-smi", "mcTracer"}:
+                return f"/opt/maca-3.2.1/bin/{name}"
+            return None
+
+        def run(argv, **kwargs):
+            commands.append(tuple(argv))
+            return {
+                "status": "AVAILABLE",
+                "exit_code": 0,
+                "version_output": "3.2.1.10-df74b02",
+            }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            accessible = Path(temporary) / "capability"
+            accessible.write_text("available\n", encoding="utf-8")
+            report = run_profiling_doctor(
+                tool_probes=DEFAULT_TOOL_PROBES,
+                library_paths=(accessible,),
+                device_paths=(accessible,),
+                executable_resolver=resolve,
+                command_runner=run,
+            )
+
+        self.assertEqual(report["status"], "READY")
+        self.assertEqual(
+            commands,
+            [
+                ("/opt/maca-3.2.1/bin/mx-smi", "--version"),
+                ("/opt/maca-3.2.1/bin/mcTracer", "--help"),
+            ],
+        )
+        trace = next(
+            item
+            for item in report["tools"]
+            if item["tool_id"] == "metax-trace-collector"
+        )
+        self.assertEqual(trace["status"], "AVAILABLE")
+
+    def test_default_metax_trace_probe_nonzero_fails_closed(self) -> None:
+        commands: list[tuple[str, ...]] = []
+
+        def run(argv, **kwargs):
+            commands.append(tuple(argv))
+            if argv[-1] == "--help":
+                return {
+                    "status": "UNAVAILABLE",
+                    "exit_code": 127,
+                    "reason": "version probe returned a non-zero status",
+                    "version_output": "execvpe failed",
+                }
+            return {
+                "status": "AVAILABLE",
+                "exit_code": 0,
+                "version_output": "available",
+            }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            accessible = Path(temporary) / "capability"
+            accessible.write_text("available\n", encoding="utf-8")
+            report = run_profiling_doctor(
+                tool_probes=DEFAULT_TOOL_PROBES[:2],
+                library_paths=(accessible,),
+                device_paths=(accessible,),
+                executable_resolver=lambda name: f"/trusted/bin/{name}",
+                command_runner=run,
+            )
+
+        self.assertEqual(report["status"], "UNAVAILABLE")
+        self.assertEqual(commands[-1], ("/trusted/bin/mcTracer", "--help"))
+        self.assertIn("metax-trace-collector", report["reasons"][0])
 
     def test_missing_capabilities_have_explicit_unavailable_reasons(self) -> None:
         report = run_profiling_doctor(
