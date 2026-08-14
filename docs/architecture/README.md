@@ -12,6 +12,7 @@ change that contradicts an accepted decision must first supersede that ADR.
 - [ADR-006: trusted built-in extensions](adr-006-trusted-extensions.md)
 - [ADR-007: versioned workflows and bounded-context stores](adr-007-workflows-and-stores.md)
 - [ADR-008: trusted CURRENT baseline bootstrap](adr-008-current-baseline-bootstrap.md)
+- [ADR-009: bounded MetaX profiler image and pre-soak canary](adr-009-bounded-metax-profiler.md)
 - [V2 implementation and activation status](v2-implementation-status.md)
 - [Coordinated V2-to-V3 migration runbook](migration-runbook.md)
 - [Disaster recovery runbook](recovery-runbook.md)

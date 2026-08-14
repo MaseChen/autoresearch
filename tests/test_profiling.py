@@ -13,6 +13,7 @@ import unittest
 from unittest import mock
 
 import kernel_research.profiling as profiling
+from kernel_research.constants import CURRENT_C500_EVALUATION_PROTOCOL_ID
 from kernel_research.autorun.models import ControllerConfig, GPU1_DEVICES
 from kernel_research.autorun.runtime import CommandResult
 from kernel_research.campaign.models import BudgetAmount, CampaignMode
@@ -480,8 +481,19 @@ class _FakeProfileRunner:
             recipe = argv[argv.index("--recipe") + 1]
             case_id = argv[argv.index("--case-id") + 1]
             uid = argv[argv.index("--experiment-uid") + 1]
+            complete_metrics = {
+                metric.metric_id: {
+                    "status": "UNAVAILABLE",
+                    "reason_code": "COUNTER_NOT_EXPOSED",
+                }
+                for metric in BUILTIN_PROFILE_RECIPES[recipe].metrics
+            }
+            complete_metrics.update(self.metrics)
             result = {
-                "schema_version": 1,
+                "schema_version": profiling.PROFILE_COLLECTION_API_VERSION,
+                "worker_revision": profiling.PROFILER_WORKER_REVISION,
+                "profiler_profile_digest": profiling.PROFILER_PROFILE_DIGEST,
+                "profiler_image": profiling.PROFILER_IMAGE,
                 "recipe_id": recipe,
                 "case_id": case_id,
                 "experiment_uid": uid,
@@ -504,19 +516,83 @@ class _FakeProfileRunner:
                 "budget_action_key": argv[
                     argv.index("--budget-action-key") + 1
                 ],
-                "metrics": self.metrics,
+                "metrics": complete_metrics,
             }
             if "--resource-id" in argv:
                 result["resource_id"] = argv[argv.index("--resource-id") + 1]
                 result["fencing_epoch"] = int(
                     argv[argv.index("--fencing-epoch") + 1]
                 )
+            toolchain = {
+                "schema_version": 1,
+                "worker_revision": profiling.PROFILER_WORKER_REVISION,
+                "tools": {
+                    "mctracer": {
+                        "path": profiling.MCTRACER_PATH,
+                        "sha256": profiling.MCTRACER_SHA256,
+                        "version": profiling.MCTRACER_VERSION,
+                    },
+                    "libmcToolsExt_lite.so": {
+                        "path": profiling.MCTOOLS_EXT_LITE_PATH,
+                        "sha256": profiling.MCTOOLS_EXT_LITE_SHA256,
+                    },
+                    "libmcToolsExt.so": {
+                        "path": profiling.MCTOOLS_EXT_PATH,
+                        "sha256": profiling.MCTOOLS_EXT_SHA256,
+                    },
+                },
+                "help_contract": {
+                    "argv": [profiling.MCTRACER_PATH, "--help"],
+                    "stdin": "DEVNULL",
+                    "exit_code": 1,
+                    "version": profiling.MCTRACER_VERSION,
+                    "required_markers": ["Help Info", "Usage:"],
+                },
+            }
+            toolchain["digest"] = profiling.canonical_sha256(toolchain)
+            trace_descriptor = {
+                "format": (
+                    "deterministic-tar-v1"
+                    if "--resource-id" in argv
+                    else "canonical-json-manifest-v1"
+                ),
+                "sha256": "sha256:" + hashlib.sha256(self.raw_trace).hexdigest(),
+                "byte_size": len(self.raw_trace),
+                "file_count": 1,
+            }
+            if "--resource-id" in argv:
+                trace_descriptor.update(
+                    {
+                        "source_bytes": len(self.raw_trace),
+                        "mctracer_exit_code": 1,
+                        "target_stdout_sha256": "sha256:" + "b" * 64,
+                        "target_stderr_sha256": "sha256:" + "c" * 64,
+                        "toolchain_digest": toolchain["digest"],
+                    }
+                )
+            result["toolchain"] = toolchain
+            result["trace_descriptor"] = trace_descriptor
+            echo = {key: value for key, value in result.items() if key not in {
+                "metrics", "toolchain", "trace_descriptor"
+            }}
+            outcome = {
+                **echo,
+                "status": "SUCCESS",
+                "gpu_state": (
+                    "COMPLETED" if "--resource-id" in argv else "NOT_STARTED"
+                ),
+                "completion_trusted": True,
+                "reason_code": "EVIDENCE_COMMITTED",
+            }
             result.update(self.result_overrides)
             (output / "result.json").write_text(
                 json.dumps(result),
                 encoding="utf-8",
             )
             (output / "raw.trace").write_bytes(self.raw_trace)
+            (output / "outcome.json").write_text(
+                json.dumps(outcome), encoding="utf-8"
+            )
         return CommandResult(
             argv=(argv + ("changed",) if self.changed_argv else argv),
             returncode=self.returncode,
@@ -757,6 +833,7 @@ class BoundedProfilingTests(unittest.TestCase):
         report = self._collect(runner, _FakeGate())
 
         self.assertEqual(report["status"], "SUCCESS")
+        self.assertEqual(report["schema_version"], 2)
         self.assertTrue(report["advisory_only"])
         self.assertEqual(report["promotion_effect"], "none")
         self.assertEqual(report["baseline_effect"], "none")
@@ -812,6 +889,14 @@ class BoundedProfilingTests(unittest.TestCase):
         )
         evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
         self.assertTrue(evidence["advisory_only"])
+        self.assertEqual(evidence["schema_version"], 2)
+        self.assertEqual(evidence["kind"], "bounded_profiling_evidence_v2")
+        self.assertEqual(
+            evidence["profiler_profile_digest"],
+            profiling.PROFILER_PROFILE_DIGEST,
+        )
+        self.assertIn("toolchain", evidence)
+        self.assertIn("trace_descriptor", evidence)
         self.assertEqual(evidence["campaign_id"], self.campaign_id)
         self.assertEqual(evidence["run_id"], "profile-fixture-run")
         self.assertEqual(evidence["raw_trace"]["object_id"], report["raw_trace"]["object_id"])
@@ -1053,7 +1138,7 @@ class BoundedProfilingTests(unittest.TestCase):
                 "PAUSED_HARD_FAILURE",
             )
 
-    def test_hardware_evidence_persistence_failure_is_unknown_and_quarantined(self):
+    def test_completed_hardware_persistence_failure_is_known_and_released(self):
         self._record(stage="quick", suite="quick")
         runner = _FakeProfileRunner()
         with mock.patch.object(
@@ -1069,16 +1154,15 @@ class BoundedProfilingTests(unittest.TestCase):
                 )
         self.assertEqual(len(runner.calls), 1)
         self.assertEqual(
-            self._campaign_rows("budget_actions")[0]["status"], "RESERVED"
+            self._campaign_rows("budget_actions")[0]["status"], "SETTLED"
         )
         self.assertEqual(
-            self._campaign_rows("resource_leases")[-1]["status"],
-            "QUARANTINED",
+            self._campaign_rows("resource_leases")[-1]["status"], "RELEASED"
         )
         with CampaignStore(self.campaign_database) as campaigns:
             self.assertEqual(
                 campaigns.get_campaign(self.campaign_id)["status"],
-                "PAUSED_UNKNOWN_OUTCOME",
+                "RUNNING",
             )
 
     def test_budget_lease_soak_and_host_lock_drift_never_reach_runner(self):
@@ -1378,6 +1462,18 @@ class BoundedProfilingTests(unittest.TestCase):
     def test_metric_schema_and_value_validation_is_fail_closed(self):
         compile_recipe = BUILTIN_PROFILE_RECIPES["metax-compile-metadata-v1"]
         hardware_recipe = BUILTIN_PROFILE_RECIPES["metax-hardware-counters-v1"]
+
+        def complete(recipe, values):
+            result = {
+                metric.metric_id: {
+                    "status": "UNAVAILABLE",
+                    "reason_code": "COUNTER_NOT_EXPOSED",
+                }
+                for metric in recipe.metrics
+            }
+            result.update(values)
+            return result
+
         with self.assertRaisesRegex(ValueError, "JSON object"):
             profiling._metric_summary(compile_recipe, {"metrics": []})
 
@@ -1417,7 +1513,10 @@ class BoundedProfilingTests(unittest.TestCase):
         for metrics, message in invalid_compile_metrics:
             with self.subTest(message=message):
                 with self.assertRaisesRegex(ValueError, message):
-                    profiling._metric_summary(compile_recipe, {"metrics": metrics})
+                    profiling._metric_summary(
+                        compile_recipe,
+                        {"metrics": complete(compile_recipe, metrics)},
+                    )
 
         for value in (True, "fast", math.nan, -0.5):
             with self.subTest(value=value):
@@ -1425,19 +1524,19 @@ class BoundedProfilingTests(unittest.TestCase):
                     profiling._metric_summary(
                         hardware_recipe,
                         {
-                            "metrics": {
+                            "metrics": complete(hardware_recipe, {
                                 "gpu_active_percent": {
                                     "status": "AVAILABLE",
                                     "value": value,
                                 }
-                            }
+                            })
                         },
                     )
 
         summary = profiling._metric_summary(
             compile_recipe,
             {
-                "metrics": {
+                "metrics": complete(compile_recipe, {
                     "register_count": {"status": "AVAILABLE", "value": 64},
                     "compiler_version_digest": {
                         "status": "AVAILABLE",
@@ -1447,7 +1546,7 @@ class BoundedProfilingTests(unittest.TestCase):
                         "status": "UNAVAILABLE",
                         "reason_code": "NOT_SUPPORTED",
                     },
-                }
+                })
             },
         )
         self.assertEqual(summary["register_count"]["value"], 64)
@@ -1628,6 +1727,260 @@ class BoundedProfilingTests(unittest.TestCase):
                     "metax-compile-metadata-v1",
                 ]
             )
+
+    def test_inactive_profile_rejects_production_before_docker(self):
+        self._record()
+        runner = _FakeProfileRunner()
+        with self.assertRaisesRegex(ValueError, "profiler image is inactive"):
+            run_bounded_profile(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id=self.campaign_id,
+                gate_id="production",
+                experiment_uid=self.uid,
+                namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                execution_environment_digest=self.environment.digest,
+                recipe_id="metax-compile-metadata-v1",
+            )
+        self.assertEqual(runner.calls, [])
+
+    def test_image_doctor_cli_exposes_no_runtime_profiler_controls(self):
+        args = build_parser().parse_args(
+            [
+                "profile",
+                "image-doctor",
+                "--config",
+                "/runtime/config.json",
+                "--database",
+                "/runtime/campaign/campaign.sqlite3",
+                "--campaign-id",
+                "profiler-canary-1",
+            ]
+        )
+        self.assertEqual(args.profile_command, "image-doctor")
+        self.assertEqual(args.campaign_id, "profiler-canary-1")
+        for field in ("image", "candidate", "case", "device", "timeout", "mctracer"):
+            self.assertFalse(hasattr(args, field))
+
+    def test_image_doctor_runs_two_recipes_without_history_or_baseline_writes(self):
+        identity = self._record(stage="confirmation", suite="full")
+        with sqlite3.connect(self.state / "history.sqlite3") as connection:
+            row = connection.execute(
+                """
+                SELECT e.candidate_hash, a.object_path
+                FROM experiments e JOIN candidate_artifacts a
+                  ON a.artifact_id = e.artifact_id
+                WHERE e.experiment_uid = ?
+                """,
+                (identity.experiment_uid,),
+            ).fetchone()
+        assert row is not None
+        canary_id = "profile-image-canary-test"
+        subject = profiling._ProfileSubject(
+            experiment_uid=identity.experiment_uid,
+            namespace_id=identity.namespace_id,
+            condition_digest=identity.condition_digest,
+            artifact_id=str(identity.candidate_artifact_id),
+            execution_environment_digest=identity.execution_environment.digest,
+            campaign_id=canary_id,
+            run_id="profile-image-canary-run",
+            stage="confirmation",
+            suite="full",
+            replicate_kind="confirmation",
+            candidate_object_path=self.state / row[1],
+            candidate_content_sha256=row[0],
+        )
+        baseline_ref = BaselineRef.create(
+            namespace=CURRENT_RESEARCH_NAMESPACE,
+            artifact_id=identity.candidate_artifact_id,
+            source="campaign",
+            revision="profile-image-canary-fixture",
+            execution_environment=self.environment,
+        )
+        binding = {
+            "deployment_evidence_digest": "sha256:" + "d" * 64,
+            "deployment_git_commit": "e" * 40,
+            "deployment_candidate_hash": row[0],
+            "current_confirmation_experiment_uid": identity.experiment_uid,
+            "current_confirmation_identity": identity.to_dict(),
+            "execution_environment": self.environment.to_dict(),
+        }
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                Path(str(self.campaign_database) + suffix).unlink()
+            except FileNotFoundError:
+                pass
+        history_before = hashlib.sha256(
+            (self.state / "history.sqlite3").read_bytes()
+        ).hexdigest()
+        runner = _FakeProfileRunner()
+        with (
+            mock.patch.object(profiling, "require_active_profiler"),
+            mock.patch.object(
+                profiling,
+                "_current_deployment_profile_subject",
+                return_value=(subject, baseline_ref, binding),
+            ),
+        ):
+            report = profiling.run_profile_image_doctor(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id=canary_id,
+                runner=runner,
+            )
+        self.assertEqual(report["status"], "READY")
+        self.assertEqual(len(runner.calls), 2)
+        self.assertEqual(
+            [
+                argv[argv.index("--recipe") + 1]
+                for argv, _kwargs in runner.calls
+            ],
+            list(profiling.PROFILE_RECIPE_IDS),
+        )
+        self.assertEqual(
+            hashlib.sha256((self.state / "history.sqlite3").read_bytes()).hexdigest(),
+            history_before,
+        )
+        with CampaignStore(self.campaign_database) as store:
+            campaign = store.get_campaign(canary_id)
+            self.assertEqual(campaign["status"], "COMPLETED")
+            action = store.get_budget_action(
+                canary_id, idempotency_key="profile-image-canary-v1"
+            )
+            self.assertEqual(action["status"], "SETTLED")
+            self.assertEqual(action["reserved"]["wall_ms"], 1_800_000)
+            self.assertEqual(action["reserved"]["gpu_ms"], 900_000)
+            self.assertEqual(
+                store.connection.execute(
+                    "SELECT status FROM resource_leases ORDER BY rowid DESC LIMIT 1"
+                ).fetchone()[0],
+                "RELEASED",
+            )
+
+    def test_current_canary_uses_quick_subject_anchored_by_confirmation(self):
+        source = "def kernel():\n    return 1\n"
+        bundle = CandidateBundle.single_file(content=source)
+        baseline = BaselineRef.create(
+            namespace=CURRENT_RESEARCH_NAMESPACE,
+            artifact_id=bundle.artifact_id,
+            source="deployment",
+            revision="qualified-current-parent",
+            execution_environment=self.environment,
+        )
+        run_id = "current-bootstrap-profile-fixture"
+        quick = ExperimentIdentity.create(
+            experiment_uid="10000000-0000-4000-8000-000000000001",
+            namespace=CURRENT_RESEARCH_NAMESPACE,
+            mode="DISCOVERY",
+            candidate_artifact_id=bundle.artifact_id,
+            parent_artifact_id=bundle.artifact_id,
+            baseline=baseline,
+            execution_environment=self.environment,
+            stage="quick",
+            suite="quick",
+            replicate_kind="validation",
+            run_id=run_id,
+            iteration=1,
+        )
+        confirmation = ExperimentIdentity.create(
+            experiment_uid="10000000-0000-4000-8000-000000000002",
+            namespace=CURRENT_RESEARCH_NAMESPACE,
+            mode="DISCOVERY",
+            candidate_artifact_id=bundle.artifact_id,
+            parent_artifact_id=bundle.artifact_id,
+            baseline=baseline,
+            execution_environment=self.environment,
+            stage="confirmation",
+            suite="full",
+            replicate_kind="confirmation",
+            run_id=run_id,
+            iteration=1,
+        )
+        with HistoryStore(
+            self.state / "history.sqlite3", state_dir=self.state
+        ) as history:
+            history.ensure_namespace(
+                CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                CURRENT_RESEARCH_NAMESPACE.to_dict(),
+            )
+            history.store_candidate_bundle(bundle)
+            history.record_experiment(
+                candidate_source=source,
+                backend="c500",
+                suite="quick",
+                status="SUCCESS",
+                identity=quick,
+                result={
+                    "status": "SUCCESS",
+                    "evaluation_protocol_id": (
+                        CURRENT_C500_EVALUATION_PROTOCOL_ID
+                    ),
+                    "request_identity": quick.to_dict(),
+                },
+                case_measurements=(
+                    {
+                        "name": "quick_decode_gate_up",
+                        "matched_ratio": 1.0,
+                        "passed": True,
+                    },
+                ),
+            )
+            history.record_experiment(
+                candidate_source=source,
+                backend="c500",
+                suite="full",
+                status="SUCCESS",
+                promotable=True,
+                identity=confirmation,
+                result={
+                    "status": "SUCCESS",
+                    "evaluation_protocol_id": (
+                        CURRENT_C500_EVALUATION_PROTOCOL_ID
+                    ),
+                    "request_identity": confirmation.to_dict(),
+                    "promotion": {
+                        "phase": "confirmation",
+                        "confirmed": True,
+                    },
+                },
+                case_measurements=(
+                    {
+                        "name": "full_decode_gate_up",
+                        "matched_ratio": 1.0,
+                        "passed": True,
+                    },
+                ),
+            )
+        candidate_hash = hashlib.sha256(source.encode()).hexdigest()
+        fake_controller = mock.Mock()
+        fake_controller._deployment_pin.return_value = SimpleNamespace(
+            candidate_hash=candidate_hash,
+            execution_environment=self.environment,
+            evidence_digest="sha256:" + "a" * 64,
+            git_commit="b" * 40,
+        )
+        fake_controller._best.return_value = SimpleNamespace(
+            artifact_id=str(bundle.artifact_id)
+        )
+        fake_controller._resolved_execution_environment.return_value = (
+            self.environment
+        )
+        with mock.patch.object(
+            profiling, "ResearchController", return_value=fake_controller
+        ):
+            subject, _baseline, binding = (
+                profiling._current_deployment_profile_subject(
+                    self.config, campaign_id="canary"
+                )
+            )
+        self.assertEqual(subject.experiment_uid, quick.experiment_uid)
+        self.assertEqual(
+            binding["current_confirmation_experiment_uid"],
+            confirmation.experiment_uid,
+        )
+        self.assertEqual(
+            binding["current_quick_experiment_uid"], quick.experiment_uid
+        )
 
     def test_builtin_recipe_registry_is_sealed(self):
         with self.assertRaises(TypeError):

@@ -1,2 +1,8 @@
 **
 !containers/opencode/Dockerfile
+!containers/profiler/
+!containers/profiler/Dockerfile
+!containers/profiler/bounded-profiler
+!kernel_research/
+!kernel_research/*.py
+!kernel_research/**/*.py

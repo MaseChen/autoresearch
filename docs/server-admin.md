@@ -155,6 +155,58 @@ bootstrap 本身只产生证据，不修改 Git、配置或 deployment pin。上
 `kernel.py` 字节未变化；不得为此重建或 amend 已部署提交。CURRENT pin 完整验证和
 归档完成前，不得开始 noise、Campaign soak 或 profiling collection。
 
+## MetaX bounded profiler 镜像
+
+Profiler 使用独立私有镜像，不得在服务器上把 evaluator tag 临时当作 profiler。
+提交 A 的 profile 固定为 `active=false`；它只提供可审核的 Dockerfile、worker、host
+接口和测试。先从提交 A 的干净 Linux/amd64 工作树构建：
+
+```bash
+export SOURCE_REVISION="$(git rev-parse HEAD)"
+export DOCKER_CONFIG="$(mktemp -d /tmp/autoresearch-ghcr.XXXXXX)"
+
+printf '%s' "$GHCR_WRITE_TOKEN" | docker login ghcr.io \
+  --username masechen --password-stdin
+
+docker buildx build \
+  --platform linux/amd64 \
+  --build-arg "SOURCE_REVISION=$SOURCE_REVISION" \
+  --file containers/profiler/Dockerfile \
+  --tag ghcr.io/masechen/autoresearch-metax-profiler:"$SOURCE_REVISION" \
+  --push .
+
+docker logout ghcr.io
+rm -rf "$DOCKER_CONFIG"
+unset DOCKER_CONFIG GHCR_WRITE_TOKEN
+```
+
+把 build 输出的 RepoDigest、source commit、base RepoDigest、image ID、worker revision、
+mcTracer 与两个 MetaX 库 hash 归档。提交 B 只能把该精确
+`ghcr.io/masechen/autoresearch-metax-profiler@sha256:...` 写入轻量 contract 并将
+`active=true`；不得同时修改 worker、recipe 或 `kernel.py`。
+
+服务器使用临时只读凭证拉取精确 digest，立即 logout 并删除临时
+`DOCKER_CONFIG`。随后通过 `kernel-autoresearch-admin update --doctor` 部署提交 B，
+完成 static、doctor 和完整主机回归。运行唯一公开 canary 入口：
+
+```bash
+kernel-research profile image-doctor \
+  --config "$AUTORESEARCH_PRO_CONFIG" \
+  --database "$AUTORESEARCH_RUNTIME/campaign/campaign.sqlite3" \
+  --campaign-id "profile-image-canary-$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+该命令不接受 image、candidate、case、device、timeout 或 mcTracer 参数。它创建一个
+无 child-run 的 CURRENT Campaign，固定预留 1800 秒 wall 与 900 秒 GPU，按
+maintenance fence → `gpu1.lock` → lease 的顺序执行 compile manifest 和固定
+`quick_decode_gate_up` mctx。成功 Campaign 自动结束；原始 trace 只进入私有 CAS，
+白名单摘要不具 promotion 或 baseline 权限。
+
+UNKNOWN 或 hard failure 会保留 reservation 并 quarantine；不得重放。修复必须产生
+新镜像、新激活提交和全新 canary Campaign。canary READY 后才能创建全新 Discovery
+Campaign，从零累计 24/72/168 小时 soak。正式 `profile collect` 仍须等三阶段全部
+合格后执行；所有数值 counter 可以是 `UNAVAILABLE/COUNTER_NOT_EXPOSED`，不得填零。
+
 ## Flash 384K/max canary
 
 Pro/Flash 的模型声明 output 和 OpenCode 请求 cap 均固定为 384,000，thinking 均

@@ -28,6 +28,13 @@ from ..platform.canonical import (
     require_sha256_digest,
 )
 from ..platform.profiles import BUILTIN_PROFILE_REGISTRY
+from ..profiler_contract import (
+    PROFILER_ACTIVE,
+    PROFILER_IMAGE,
+    PROFILER_PROFILE_DIGEST,
+    PROFILER_WORKER_REVISION,
+    profiler_profile_snapshot,
+)
 from .paths import validate_production_campaign_database
 
 
@@ -449,6 +456,13 @@ class SoakObservationCollector:
             "expected_git_commit": self.config.expected_git_commit,
             "proposer_image": self.config.proposer_image,
             "evaluator_image": self.config.evaluator_image,
+            "profiler": {
+                "active": PROFILER_ACTIVE,
+                "image": PROFILER_IMAGE,
+                "profile_digest": PROFILER_PROFILE_DIGEST,
+                "worker_revision": PROFILER_WORKER_REVISION,
+                "profile": profiler_profile_snapshot(),
+            },
         }
         reasons: list[str] = []
         try:

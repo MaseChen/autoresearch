@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Absolute entrypoint for the reviewed bounded profiler image."""
+
+from __future__ import annotations
+
+import sys
+
+sys.path.insert(0, "/opt/kernel-research/lib")
+
+from kernel_research.profiler_worker import main  # noqa: E402
+
+
+raise SystemExit(main())

@@ -42,6 +42,7 @@ from .autorun.models import ControllerConfig
 from .profiling import (
     PROFILE_RECIPE_IDS,
     run_bounded_profile,
+    run_profile_image_doctor,
     run_profiling_doctor,
 )
 
@@ -389,6 +390,16 @@ def _profile_collect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _profile_image_doctor(args: argparse.Namespace) -> int:
+    report = run_profile_image_doctor(
+        ControllerConfig.load(args.config),
+        campaign_database=args.database,
+        campaign_id=args.campaign_id,
+    )
+    _print_json(report)
+    return 0 if report["status"] in {"READY", "ALREADY_COMPLETED"} else 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kernel-research",
@@ -499,6 +510,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     profile_doctor.add_argument("--timeout", type=float, default=5.0)
     profile_doctor.set_defaults(handler=_profile_doctor)
+    profile_image_doctor = profile_commands.add_parser(
+        "image-doctor",
+        help="qualify the fixed active profiler image before Campaign soak",
+    )
+    profile_image_doctor.add_argument("--config", required=True)
+    profile_image_doctor.add_argument(
+        "--database",
+        required=True,
+        help="canonical <runtime_root>/campaign/campaign.sqlite3",
+    )
+    profile_image_doctor.add_argument("--campaign-id", required=True)
+    profile_image_doctor.set_defaults(handler=_profile_image_doctor)
     profile_collect = profile_commands.add_parser(
         "collect",
         help=(

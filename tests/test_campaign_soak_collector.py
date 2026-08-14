@@ -21,6 +21,13 @@ from kernel_research.campaign.soak_collector import (
 )
 from kernel_research.campaign.store import CampaignStore
 from kernel_research.platform.identity import BaselineRef
+from kernel_research.profiler_contract import (
+    PROFILER_ACTIVE,
+    PROFILER_IMAGE,
+    PROFILER_PROFILE_DIGEST,
+    PROFILER_WORKER_REVISION,
+    profiler_profile_snapshot,
+)
 
 
 NAMESPACE_A = "sha256:" + "a" * 64
@@ -411,6 +418,16 @@ class CampaignSoakCollectorTests(unittest.TestCase):
         )
         self.assertEqual(clean.status, "AVAILABLE")
         self.assertEqual(clean.invariant_snapshot["code"]["git_commit"], runner.git_head)
+        self.assertEqual(
+            clean.invariant_snapshot["profiler"],
+            {
+                "active": PROFILER_ACTIVE,
+                "image": PROFILER_IMAGE,
+                "profile_digest": PROFILER_PROFILE_DIGEST,
+                "worker_revision": PROFILER_WORKER_REVISION,
+                "profile": profiler_profile_snapshot(),
+            },
+        )
         self.assertEqual(
             runner.calls[:2],
             [

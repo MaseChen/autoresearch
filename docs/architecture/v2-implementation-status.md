@@ -13,7 +13,7 @@ autonomous evaluation or promotion.
 | R3 | The existing Fused MoE, Triton Python, C500, protocol, promotion, and OpenCode paths have trusted component wrappers. Production Run and evaluator paths resolve those exact registered components before start, resume and every GPU stage. Proposal V2 and V1 conversion, frozen snapshots, strict evaluator identity echo, idempotent cross-store reconciliation, graft-resistant UID reproof, an explicit legacy-adoption requalification bridge, a trusted CURRENT baseline bootstrap, and an environment-bound manual deployment pin are implemented. | Migrated `LEGACY_UNKNOWN` evidence is never relabelled. The requalification bridge must first reproduce the deployed baseline under a resolved environment. The CURRENT bootstrap then repeats the immutable deployed improvement chain under the CURRENT protocol and produces fresh namespace-local primary and confirmation evidence. A CURRENT deployment pin is issued only by manual adoption from that complete proof and is revalidated against CAS, Git, and the resolved runtime before every ordinary Run. |
 | R4 | Trusted OpenCode, Direct API, and Pi proposer contracts are implemented. Benchmark Campaigns freeze a trusted cohort snapshot, execute deterministic interleaved child Runs, and derive aggregate reports from Campaign, Controller and History ledgers rather than caller-supplied observations. | Only the two reviewed OpenCode profiles are executable. Direct API and Pi adapters remain inert planning/request contracts; no network credential or live-provider execution is enabled here. |
 | R5 | TileLang and MACA CUDA probe/contract skeletons, Ragged Prefill CPU oracle, and descriptors for the planned operator sequence are implemented fail-closed. | Every R5 language/operator profile is `INACTIVE`. No real TileLang/MACA compiler, device, or two-full-run activation evidence has been produced. |
-| R6 | Durable five-axis Campaign budgets, per-action deadline/fencing checks, environment-bound staged lineage, trusted GPU-doctor quarantine clearance, OJ nomination/export/manual feedback, evidence-collected soak gates, three-database checkpoints, inactive-root recovery, a shared Admin/Campaign maintenance fence, and bounded advisory profiling collection are implemented. OJ keeps the Campaign-local revision row separate from the imported scientific baseline revision, and profiling binds its subject to the exact Campaign child and Controller run. | No 24/72/168-hour qualification soak has been run. Profiling remains gated by a continuously observed soak ledger with qualifying workload activity, and the release-candidate profiler image digest must be replaced by the built MetaX image before activation. |
+| R6 | Durable five-axis Campaign budgets, deadline/fencing checks, environment-bound staged lineage, trusted GPU-doctor quarantine clearance, OJ nomination/export/manual feedback, evidence-collected soak gates, three-database checkpoints, recovery, the Admin/Campaign maintenance fence, and bounded advisory profiling are implemented. ADR-009 adds a separate offline-built MetaX profiler image, durable worker outcome protocol, V2 toolchain/trace evidence, and no-child pre-soak canary. | No 24/72/168-hour qualification soak has been run. Submit A's profiler profile is deliberately inactive and uses a non-runnable digest sentinel. A reviewed Linux/amd64 build must be pushed and pinned by Submit B, then pass the trusted image canary before soak starts. |
 
 ## Non-negotiable runtime gates
 
@@ -54,6 +54,9 @@ autonomous evaluation or promotion.
   observations of Campaign, Controller, Git, and Docker state. Empty ledgers,
   unavailable sources, invariant changes, and missing stage-specific workload
   evidence cannot qualify a release.
+- Profiler image, worker, recipe, toolchain, limit, or activation changes are
+  explicit soak invariants. Any change after a gate starts invalidates prior
+  elapsed time and restarts qualification from the first stage.
 - A restored or migration checkpoint is switched and rolled back only as a
   complete runtime unit; a one-database rollback is unsupported.
 
@@ -76,8 +79,8 @@ Before enabling the current C500 protocol for autonomous discovery:
 
 ## Repository verification snapshot
 
-The final host-only verification run for this implementation completed 462
-unit and integration tests with 80.23% branch-aware coverage. `compileall` and
+The final host-only verification run for this implementation completed 489
+unit and integration tests with 80.02% branch-aware coverage. `compileall` and
 the Git whitespace check also passed. These checks use mocks and isolated
 SQLite/runtime fixtures; they do not claim MetaX C500 execution, provider/OJ
 network access, or elapsed 24/72/168-hour soak evidence.

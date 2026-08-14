@@ -26,47 +26,71 @@ import time
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
-from .autorun.controller import FATAL_GPU_MARKERS, gpu_lock
+from .autorun.controller import FATAL_GPU_MARKERS, ResearchController, gpu_lock
 from .autorun.deployment import deployment_runtime_root
 from .autorun.errors import ControlledRuntimeError
 from .autorun.models import ControllerConfig, GPU1_DEVICES
 from .autorun.runtime import CommandResult, CommandRunner
-from .campaign.models import BudgetAmount, CampaignStatus, ResourceLease
-from .campaign.paths import validate_production_campaign_database
+from .campaign.models import (
+    BudgetAmount,
+    CampaignMode,
+    CampaignStatus,
+    ResourceLease,
+)
+from .campaign.paths import (
+    campaign_maintenance_fence,
+    validate_production_campaign_database,
+)
 from .campaign.soak import SoakGate
 from .campaign.soak_collector import COUNT_FIELDS, SoakObservationCollector
 from .campaign.store import CampaignStore
+from .constants import CURRENT_C500_EVALUATION_PROTOCOL_ID
 from .platform.canonical import canonical_json_text, canonical_sha256, require_sha256_digest
-from .platform.identity import ExperimentIdentity
+from .platform.identity import BaselineRef, ExperimentIdentity
+from .platform.profiles import CURRENT_RESEARCH_NAMESPACE
+from .platform.proposal import CandidateBundle, TRITON_PYTHON_BUNDLE_LIMITS
+from .profiler_contract import (
+    MCTRACER_PATH,
+    MCTRACER_SHA256,
+    MCTRACER_VERSION,
+    MCTOOLS_EXT_LITE_PATH,
+    MCTOOLS_EXT_LITE_SHA256,
+    MCTOOLS_EXT_PATH,
+    MCTOOLS_EXT_SHA256,
+    PROFILE_CANDIDATE_CONTAINER_PATH,
+    PROFILE_CANDIDATE_LIMIT_BYTES,
+    PROFILE_COLLECTION_SCHEMA_VERSION,
+    PROFILE_CANARY_GPU_SECONDS,
+    PROFILE_CANARY_WALL_SECONDS,
+    PROFILE_CPU_LIMIT,
+    PROFILE_LEASE_TTL_SECONDS,
+    PROFILE_MEMORY_LIMIT,
+    PROFILE_OUTCOME_CONTAINER_PATH,
+    PROFILE_OUTCOME_LIMIT_BYTES,
+    PROFILE_OUTPUT_LIMIT_BYTES,
+    PROFILE_PID_LIMIT,
+    PROFILE_RAW_TRACE_LIMIT_BYTES,
+    PROFILE_RESOURCE_ID,
+    PROFILE_RESULT_CONTAINER_PATH,
+    PROFILE_RESULT_LIMIT_BYTES,
+    PROFILE_TIMEOUT_SECONDS,
+    PROFILE_TRACE_CONTAINER_PATH,
+    PROFILE_UNAVAILABLE_REASON_CODES,
+    PROFILER_ACTIVE,
+    PROFILER_ENTRYPOINT,
+    PROFILER_IMAGE,
+    PROFILER_PROFILE_DIGEST,
+    PROFILER_RECIPES,
+    PROFILER_WORKER_REVISION,
+    require_active_profiler,
+)
 
 
 PROFILE_DOCTOR_API_VERSION = 1
 DEFAULT_TIMEOUT_SEC = 5.0
 DEFAULT_OUTPUT_LIMIT_BYTES = 64 * 1024
 
-PROFILE_COLLECTION_API_VERSION = 1
-# Inactive release-candidate pin.  Hardware activation must replace it with
-# the digest of the reviewed MetaX profiler image *before* the qualifying soak
-# starts.  ``--pull=never`` makes the current software-only build fail closed
-# instead of fetching or silently substituting an image.
-PROFILER_IMAGE = (
-    "registry.local/kernel-research/metax-profiler@sha256:"
-    "8c8f872f1ab4dbcb52b4ed4bb5ce82ec0e8d394d7a695fd32334bd06f69c1481"
-)
-PROFILER_ENTRYPOINT = "/opt/kernel-research/bin/bounded-profiler"
-PROFILE_RESULT_CONTAINER_PATH = "/output/result.json"
-PROFILE_TRACE_CONTAINER_PATH = "/output/raw.trace"
-PROFILE_CANDIDATE_CONTAINER_PATH = "/input/candidate.cas"
-PROFILE_TIMEOUT_SECONDS = 900.0
-PROFILE_OUTPUT_LIMIT_BYTES = 256 * 1024
-PROFILE_RESULT_LIMIT_BYTES = 64 * 1024
-PROFILE_RAW_TRACE_LIMIT_BYTES = 64 * 1024 * 1024
-PROFILE_CANDIDATE_LIMIT_BYTES = 2 * 1024 * 1024
-PROFILE_MEMORY_LIMIT = "4g"
-PROFILE_CPU_LIMIT = 4.0
-PROFILE_PID_LIMIT = 128
-PROFILE_RESOURCE_ID = "gpu1"
-PROFILE_LEASE_TTL_SECONDS = PROFILE_TIMEOUT_SECONDS + 30.0
+PROFILE_COLLECTION_API_VERSION = PROFILE_COLLECTION_SCHEMA_VERSION
 _PROFILE_BUDGET_CEILING_MS = int(PROFILE_TIMEOUT_SECONDS * 1000)
 
 _HISTORY_SCHEMA_VERSION = 3
@@ -76,6 +100,8 @@ _PROFILE_REASON_TEXT = {
     "PERMISSION_DENIED": "metric is unavailable with the reviewed capability set",
     "TOOL_VERSION_UNSUPPORTED": "metric is unavailable in the pinned tool version",
 }
+if frozenset(_PROFILE_REASON_TEXT) != PROFILE_UNAVAILABLE_REASON_CODES:
+    raise RuntimeError("profiler unavailable reason allowlist drifted")
 _PROFILE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _STAGE_SUITE_RANK = {
     ("smoke", "smoke"): 1,
@@ -125,32 +151,21 @@ class ProfileRecipe:
             raise ValueError("profile recipe metrics must be non-empty and unique")
 
 
-BUILTIN_PROFILE_RECIPES: Mapping[str, ProfileRecipe] = MappingProxyType({
-    "metax-compile-metadata-v1": ProfileRecipe(
-        recipe_id="metax-compile-metadata-v1",
-        case_id="smoke_gate_up",
-        minimum_correctness_rank=1,
-        requires_gpu=False,
-        metrics=(
-            ProfileMetric("compiler_version_digest", "digest", "sha256"),
-            ProfileMetric("register_count", "integer", "registers/thread"),
-            ProfileMetric("shared_memory_bytes", "integer", "bytes/block"),
-            ProfileMetric("spill_bytes", "integer", "bytes/thread"),
-        ),
-    ),
-    "metax-hardware-counters-v1": ProfileRecipe(
-        recipe_id="metax-hardware-counters-v1",
-        case_id="quick_decode_gate_up",
-        minimum_correctness_rank=2,
-        requires_gpu=True,
-        metrics=(
-            ProfileMetric("gpu_active_percent", "number", "percent"),
-            ProfileMetric("achieved_occupancy_percent", "number", "percent"),
-            ProfileMetric("dram_bandwidth_gbps", "number", "GB/s"),
-            ProfileMetric("l2_hit_percent", "number", "percent"),
-        ),
-    ),
-})
+BUILTIN_PROFILE_RECIPES: Mapping[str, ProfileRecipe] = MappingProxyType(
+    {
+        recipe_id: ProfileRecipe(
+            recipe_id=recipe_id,
+            case_id=str(value["case_id"]),
+            minimum_correctness_rank=int(value["minimum_correctness_rank"]),
+            requires_gpu=bool(value["requires_gpu"]),
+            metrics=tuple(
+                ProfileMetric(metric_id, value_kind, unit)
+                for metric_id, value_kind, unit in value["metrics"]
+            ),
+        )
+        for recipe_id, value in PROFILER_RECIPES.items()
+    }
+)
 PROFILE_RECIPE_IDS = tuple(BUILTIN_PROFILE_RECIPES)
 
 
@@ -584,6 +599,7 @@ def _read_only_history_subject(
         row = connection.execute(
             """
             SELECT experiment_uid, namespace_id, condition_digest, artifact_id,
+                   candidate_hash,
                    backend, suite, status, replicate_kind, replicate_index,
                    identity_json, result_json, error_summary
             FROM experiments WHERE experiment_uid = ?
@@ -601,9 +617,10 @@ def _read_only_history_subject(
             """,
             (experiment_uid,),
         ).fetchall()
-        artifact = connection.execute(
+        bundle_artifact = connection.execute(
             """
-            SELECT artifact_id, content_sha256, object_path, byte_size
+            SELECT artifact_id, artifact_kind, content_sha256, object_path,
+                   byte_size, manifest_json
             FROM candidate_artifacts WHERE artifact_id = ?
             """,
             (str(row["artifact_id"]),),
@@ -667,16 +684,16 @@ def _read_only_history_subject(
         raise ValueError(
             "profiling requires passing correctness evidence for its fixed case"
         )
-    if artifact is None:
+    if bundle_artifact is None:
         raise ValueError("profiling candidate has no authoritative CAS record")
-    if artifact["artifact_id"] != str(identity.candidate_artifact_id):
+    if bundle_artifact["artifact_id"] != str(identity.candidate_artifact_id):
         raise ValueError("profiling candidate artifact identity mismatch")
-    if type(artifact["byte_size"]) is not int or not (
-        0 <= artifact["byte_size"] <= PROFILE_CANDIDATE_LIMIT_BYTES
+    if type(bundle_artifact["byte_size"]) is not int or not (
+        0 <= bundle_artifact["byte_size"] <= PROFILE_CANDIDATE_LIMIT_BYTES
     ):
         raise ValueError("profiling candidate size is unavailable or excessive")
 
-    relative_text = str(artifact["object_path"])
+    relative_text = str(bundle_artifact["object_path"])
     relative = PurePosixPath(relative_text)
     if (
         relative.is_absolute()
@@ -700,18 +717,43 @@ def _read_only_history_subject(
         raise ValueError("profiling candidate CAS object is unavailable") from exc
     if not resolved.is_relative_to(state_dir) or resolved != object_path:
         raise ValueError("profiling candidate CAS object escapes state_dir")
-    candidate = _read_regular_file(
+    mounted_candidate = _read_regular_file(
         object_path,
         limit=PROFILE_CANDIDATE_LIMIT_BYTES,
         field="profiling candidate CAS object",
     )
-    content_digest = hashlib.sha256(candidate).hexdigest()
+    content_digest = hashlib.sha256(mounted_candidate).hexdigest()
     if (
-        content_digest != artifact["content_sha256"]
-        or len(candidate) != artifact["byte_size"]
+        content_digest != bundle_artifact["content_sha256"]
+        or len(mounted_candidate) != bundle_artifact["byte_size"]
         or object_path.parts[-2:] != (content_digest[:2], content_digest[2:])
     ):
         raise ValueError("profiling candidate CAS object is corrupted")
+    if bundle_artifact["artifact_kind"] == "source_bundle_v1":
+        try:
+            bundle = CandidateBundle.from_value(
+                _strict_json_object(
+                    mounted_candidate, field="profiling bundle"
+                ),
+                limits=TRITON_PYTHON_BUNDLE_LIMITS,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("profiling bundle manifest is invalid") from exc
+        entrypoint = next(
+            item for item in bundle.files if item.path == bundle.entrypoint
+        )
+        if (
+            str(bundle.artifact_id) != str(identity.candidate_artifact_id)
+            or hashlib.sha256(entrypoint.content_bytes).hexdigest()
+            != row["candidate_hash"]
+        ):
+            raise ValueError("profiling bundle and entrypoint source disagree")
+    elif (
+        bundle_artifact["artifact_kind"]
+        not in {"source_text_v1", "legacy_source_v1"}
+        or content_digest != row["candidate_hash"]
+    ):
+        raise ValueError("profiling artifact kind is unsupported")
     return _ProfileSubject(
         experiment_uid=identity.experiment_uid,
         namespace_id=identity.namespace_id,
@@ -724,7 +766,7 @@ def _read_only_history_subject(
         suite=identity.suite,
         replicate_kind=identity.replicate_kind,
         candidate_object_path=object_path,
-        candidate_content_sha256=content_digest,
+        candidate_content_sha256=str(row["candidate_hash"]),
     )
 
 
@@ -872,7 +914,7 @@ def _profile_argv(
         "--cpus",
         str(PROFILE_CPU_LIMIT),
         "--tmpfs",
-        "/tmp:rw,noexec,nosuid,nodev,size=64m",
+        "/tmp:rw,nosuid,nodev,size=64m,mode=700",
         "--mount",
         _docker_mount(
             subject.candidate_object_path,
@@ -890,6 +932,7 @@ def _profile_argv(
             "--entrypoint",
             PROFILER_ENTRYPOINT,
             PROFILER_IMAGE,
+            "run",
             "--recipe",
             recipe.recipe_id,
             "--case-id",
@@ -898,10 +941,14 @@ def _profile_argv(
             PROFILE_CANDIDATE_CONTAINER_PATH,
             "--result",
             PROFILE_RESULT_CONTAINER_PATH,
+            "--outcome",
+            PROFILE_OUTCOME_CONTAINER_PATH,
             "--raw-trace",
             PROFILE_TRACE_CONTAINER_PATH,
             "--max-result-bytes",
             str(PROFILE_RESULT_LIMIT_BYTES),
+            "--max-outcome-bytes",
+            str(PROFILE_OUTCOME_LIMIT_BYTES),
             "--max-raw-trace-bytes",
             str(PROFILE_RAW_TRACE_LIMIT_BYTES),
             "--experiment-uid",
@@ -952,16 +999,12 @@ def _metric_summary(
     unknown = sorted(set(metrics) - set(definitions))
     if unknown:
         raise ValueError("profiler result contains non-whitelisted metrics")
+    missing = sorted(set(definitions) - set(metrics))
+    if missing:
+        raise ValueError("profiler result omits required metric statuses")
     summary: dict[str, dict[str, Any]] = {}
     for metric_id, definition in definitions.items():
         value = metrics.get(metric_id)
-        if value is None:
-            summary[metric_id] = {
-                "status": "UNAVAILABLE",
-                "reason": "pinned profiler did not report this metric",
-                "unit": definition.unit,
-            }
-            continue
         if not isinstance(value, dict) or set(value) not in (
             {"status", "value"},
             {"status", "reason_code"},
@@ -1003,6 +1046,179 @@ def _metric_summary(
             "unit": definition.unit,
         }
     return summary
+
+
+def _toolchain_summary(result: Mapping[str, Any]) -> dict[str, Any]:
+    toolchain = result.get("toolchain")
+    if not isinstance(toolchain, dict):
+        raise ValueError("profiler result has no exact toolchain descriptor")
+    if set(toolchain) != {
+        "schema_version",
+        "worker_revision",
+        "tools",
+        "help_contract",
+        "digest",
+    }:
+        raise ValueError("profiler toolchain descriptor has an invalid schema")
+    if (
+        toolchain["schema_version"] != 1
+        or toolchain["worker_revision"] != PROFILER_WORKER_REVISION
+    ):
+        raise ValueError("profiler toolchain descriptor identity drifted")
+    tools = toolchain["tools"]
+    if not isinstance(tools, dict) or set(tools) != {
+        "mctracer",
+        "libmcToolsExt_lite.so",
+        "libmcToolsExt.so",
+    }:
+        raise ValueError("profiler toolchain files are incomplete")
+    expected_tools = {
+        "mctracer": {
+            "path": MCTRACER_PATH,
+            "sha256": MCTRACER_SHA256,
+            "version": MCTRACER_VERSION,
+        },
+        "libmcToolsExt_lite.so": {
+            "path": MCTOOLS_EXT_LITE_PATH,
+            "sha256": MCTOOLS_EXT_LITE_SHA256,
+        },
+        "libmcToolsExt.so": {
+            "path": MCTOOLS_EXT_PATH,
+            "sha256": MCTOOLS_EXT_SHA256,
+        },
+    }
+    if tools != expected_tools:
+        raise ValueError("profiler toolchain files differ from the frozen profile")
+    help_contract = toolchain["help_contract"]
+    if (
+        not isinstance(help_contract, dict)
+        or set(help_contract)
+        != {
+            "argv",
+            "stdin",
+            "exit_code",
+            "version",
+            "required_markers",
+        }
+        or help_contract.get("argv") != [MCTRACER_PATH, "--help"]
+        or help_contract.get("stdin") != "DEVNULL"
+        or help_contract.get("exit_code") != 1
+        or help_contract.get("version") != MCTRACER_VERSION
+        or help_contract.get("required_markers") != ["Help Info", "Usage:"]
+    ):
+        raise ValueError("profiler mcTracer help contract is invalid")
+    material = dict(toolchain)
+    digest = material.pop("digest")
+    if digest != canonical_sha256(material):
+        raise ValueError("profiler toolchain digest is invalid")
+    return dict(toolchain)
+
+
+def _trace_descriptor(
+    recipe: ProfileRecipe,
+    result: Mapping[str, Any],
+    *,
+    raw_trace: bytes,
+) -> dict[str, Any]:
+    descriptor = result.get("trace_descriptor")
+    if not isinstance(descriptor, dict):
+        raise ValueError("profiler result has no trace descriptor")
+    required = {"format", "sha256", "byte_size", "file_count"}
+    if recipe.requires_gpu:
+        required.update(
+            {
+                "source_bytes",
+                "mctracer_exit_code",
+                "target_stdout_sha256",
+                "target_stderr_sha256",
+                "toolchain_digest",
+            }
+        )
+    if set(descriptor) != required:
+        raise ValueError("profiler trace descriptor has an invalid schema")
+    expected_format = (
+        "deterministic-tar-v1"
+        if recipe.requires_gpu
+        else "canonical-json-manifest-v1"
+    )
+    if (
+        descriptor["format"] != expected_format
+        or descriptor["sha256"]
+        != "sha256:" + hashlib.sha256(raw_trace).hexdigest()
+        or descriptor["byte_size"] != len(raw_trace)
+        or type(descriptor["file_count"]) is not int
+        or descriptor["file_count"] <= 0
+    ):
+        raise ValueError("profiler trace descriptor does not match raw bytes")
+    if recipe.requires_gpu:
+        if (
+            type(descriptor["source_bytes"]) is not int
+            or descriptor["source_bytes"] <= 0
+            or descriptor["source_bytes"] > len(raw_trace)
+            or descriptor["mctracer_exit_code"] not in {0, 1}
+        ):
+            raise ValueError("profiler mctx trace descriptor is invalid")
+        for field in ("target_stdout_sha256", "target_stderr_sha256"):
+            require_sha256_digest(descriptor[field], field=field)
+        require_sha256_digest(
+            descriptor["toolchain_digest"], field="toolchain_digest"
+        )
+    return dict(descriptor)
+
+
+def _read_worker_outcome(
+    output_directory: Path,
+    *,
+    expected: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    path = output_directory / "outcome.json"
+    if not path.exists() and not path.is_symlink():
+        return None
+    outcome = _strict_json_object(
+        _read_regular_file(
+            path,
+            limit=PROFILE_OUTCOME_LIMIT_BYTES,
+            field="profiler outcome",
+        ),
+        field="profiler outcome",
+    )
+    if set(outcome) != set(expected) | {
+        "status",
+        "gpu_state",
+        "completion_trusted",
+        "reason_code",
+    } or any(outcome.get(field) != value for field, value in expected.items()):
+        raise ValueError("profiler outcome did not echo the trusted request")
+    if (
+        outcome.get("status")
+        not in {"RUNNING", "SUCCESS", "FAILED", "HARD_FAILURE"}
+        or outcome.get("gpu_state") not in {"NOT_STARTED", "STARTED", "COMPLETED"}
+        or type(outcome.get("completion_trusted")) is not bool
+        or not isinstance(outcome.get("reason_code"), str)
+        or _PROFILE_TOKEN.fullmatch(outcome["reason_code"]) is None
+    ):
+        raise ValueError("profiler outcome state is invalid")
+    if outcome["gpu_state"] == "COMPLETED" and not outcome["completion_trusted"]:
+        raise ValueError("profiler completed outcome lacks trusted completion")
+    return outcome
+
+
+def _outcome_is_known(
+    recipe: ProfileRecipe,
+    outcome: Mapping[str, Any] | None,
+) -> bool:
+    if not recipe.requires_gpu:
+        return True
+    return bool(
+        outcome is not None
+        and (
+            outcome.get("gpu_state") == "NOT_STARTED"
+            or (
+                outcome.get("gpu_state") == "COMPLETED"
+                and outcome.get("completion_trusted") is True
+            )
+        )
+    )
 
 
 def _store_cas_object(root: Path, content: bytes, *, field: str) -> str:
@@ -1325,6 +1541,10 @@ def run_bounded_profile(
         recipe = BUILTIN_PROFILE_RECIPES[recipe_id]
     except (KeyError, TypeError) as exc:
         raise ValueError("profile recipe is not a reviewed built-in recipe") from exc
+    if runner is None:
+        # Submit A is intentionally inert.  Tests may inject a runner to prove
+        # all pre-launch and evidence paths without weakening production.
+        require_active_profiler()
 
     runtime_root = _runtime_root(config)
     database = validate_production_campaign_database(
@@ -1480,6 +1700,7 @@ def run_bounded_profile(
                 )
                 outcome_kind = "unknown"
                 failure_reason_code = "runner-outcome-unknown"
+                worker_outcome: dict[str, Any] | None = None
                 try:
                     command = profile_runner.run(
                         argv,
@@ -1493,35 +1714,13 @@ def run_bounded_profile(
                     outcome_kind = "known"
                     failure_reason_code = "runner-start-failed"
                     raise ValueError("bounded profiler could not start") from exc
-                if recipe.requires_gpu and _command_has_fatal_gpu_marker(command):
-                    hard_failure = True
-                    failure_reason_code = "fatal-gpu-marker"
-                    raise ValueError("bounded profiler reported a fatal GPU marker")
-                if tuple(command.argv) != argv:
-                    failure_reason_code = "runner-argv-mismatch"
-                    raise ValueError("profile runner changed the fixed argv")
-                if command.timed_out:
-                    failure_reason_code = "runner-timeout"
-                    raise ValueError("bounded profiler timed out")
-                if command.output_limited:
-                    failure_reason_code = "runner-output-limit"
-                    raise ValueError("bounded profiler exceeded its output cap")
-                if command.returncode != 0:
+                if not recipe.requires_gpu:
                     outcome_kind = "known"
-                    failure_reason_code = "runner-known-nonzero"
-                    raise ValueError("bounded profiler returned a non-zero status")
-
-                failure_reason_code = "evidence-validation-or-persistence-failed"
-                result = _strict_json_object(
-                    _read_regular_file(
-                        output_directory / "result.json",
-                        limit=PROFILE_RESULT_LIMIT_BYTES,
-                        field="profiler result",
-                    ),
-                    field="profiler result",
-                )
                 expected_result: dict[str, Any] = {
                     "schema_version": PROFILE_COLLECTION_API_VERSION,
+                    "worker_revision": PROFILER_WORKER_REVISION,
+                    "profiler_profile_digest": PROFILER_PROFILE_DIGEST,
+                    "profiler_image": PROFILER_IMAGE,
                     "recipe_id": recipe.recipe_id,
                     "case_id": recipe.case_id,
                     "experiment_uid": subject.experiment_uid,
@@ -1542,7 +1741,86 @@ def run_bounded_profile(
                             "fencing_epoch": lease.fencing_epoch,
                         }
                     )
-                if set(result) != set(expected_result) | {"metrics"} or any(
+                worker_outcome = _read_worker_outcome(
+                    output_directory,
+                    expected=expected_result,
+                )
+                if recipe.requires_gpu and (
+                    _command_has_fatal_gpu_marker(command)
+                    or (
+                        worker_outcome is not None
+                        and worker_outcome.get("status") == "HARD_FAILURE"
+                    )
+                ):
+                    hard_failure = True
+                    failure_reason_code = "fatal-gpu-marker"
+                    raise ValueError("bounded profiler reported a fatal GPU marker")
+                if tuple(command.argv) != argv:
+                    failure_reason_code = "runner-argv-mismatch"
+                    outcome_kind = (
+                        "known"
+                        if _outcome_is_known(recipe, worker_outcome)
+                        else "unknown"
+                    )
+                    raise ValueError("profile runner changed the fixed argv")
+                if command.timed_out:
+                    failure_reason_code = "runner-timeout"
+                    outcome_kind = (
+                        "known"
+                        if _outcome_is_known(recipe, worker_outcome)
+                        else "unknown"
+                    )
+                    raise ValueError("bounded profiler timed out")
+                if command.output_limited:
+                    failure_reason_code = "runner-output-limit"
+                    outcome_kind = (
+                        "known"
+                        if _outcome_is_known(recipe, worker_outcome)
+                        else "unknown"
+                    )
+                    raise ValueError("bounded profiler exceeded its output cap")
+                if command.returncode != 0:
+                    outcome_kind = (
+                        "known"
+                        if _outcome_is_known(recipe, worker_outcome)
+                        else "unknown"
+                    )
+                    failure_reason_code = (
+                        "runner-known-nonzero"
+                        if outcome_kind == "known"
+                        else "runner-nonzero-unknown"
+                    )
+                    raise ValueError("bounded profiler returned a non-zero status")
+                if (
+                    worker_outcome is None
+                    or worker_outcome.get("status") != "SUCCESS"
+                    or worker_outcome.get("completion_trusted") is not True
+                ):
+                    outcome_kind = (
+                        "known"
+                        if _outcome_is_known(recipe, worker_outcome)
+                        else "unknown"
+                    )
+                    failure_reason_code = "worker-success-outcome-missing"
+                    raise ValueError(
+                        "bounded profiler returned without trusted success outcome"
+                    )
+                outcome_kind = "known"
+
+                failure_reason_code = "evidence-validation-or-persistence-failed"
+                result = _strict_json_object(
+                    _read_regular_file(
+                        output_directory / "result.json",
+                        limit=PROFILE_RESULT_LIMIT_BYTES,
+                        field="profiler result",
+                    ),
+                    field="profiler result",
+                )
+                if set(result) != set(expected_result) | {
+                    "metrics",
+                    "toolchain",
+                    "trace_descriptor",
+                } or any(
                     result.get(field) != value
                     for field, value in expected_result.items()
                 ):
@@ -1557,6 +1835,17 @@ def run_bounded_profile(
                 )
                 if not raw_trace:
                     raise ValueError("profiler raw trace must not be empty")
+                toolchain = _toolchain_summary(result)
+                trace_descriptor = _trace_descriptor(
+                    recipe, result, raw_trace=raw_trace
+                )
+                if recipe.requires_gpu and (
+                    trace_descriptor.get("toolchain_digest")
+                    != toolchain.get("digest")
+                ):
+                    raise ValueError(
+                        "profiler trace and toolchain descriptors are inconsistent"
+                    )
 
                 confirmed_subject = _read_only_history_subject(
                     state_dir=config.state_dir,
@@ -1628,10 +1917,12 @@ def run_bounded_profile(
                 )
                 evidence = {
                     "schema_version": PROFILE_COLLECTION_API_VERSION,
-                    "kind": "bounded_profiling_evidence_v1",
+                    "kind": "bounded_profiling_evidence_v2",
                     "recipe_id": recipe.recipe_id,
                     "case_id": recipe.case_id,
                     "profiler_image": PROFILER_IMAGE,
+                    "profiler_profile_digest": PROFILER_PROFILE_DIGEST,
+                    "worker_revision": PROFILER_WORKER_REVISION,
                     "campaign_id": subject.campaign_id,
                     "run_id": subject.run_id,
                     "budget_action_key": budget_action_key,
@@ -1650,6 +1941,8 @@ def run_bounded_profile(
                     "soak_gate_id": gate_id,
                     "soak_invariant_digest": invariant_digest,
                     "metrics": metrics,
+                    "toolchain": toolchain,
+                    "trace_descriptor": trace_descriptor,
                     "raw_trace": {
                         "object_id": raw_trace_object_id,
                         "byte_size": len(raw_trace),
@@ -1684,6 +1977,8 @@ def run_bounded_profile(
                 "recipe_id": recipe.recipe_id,
                 "case_id": recipe.case_id,
                 "profiler_image": PROFILER_IMAGE,
+                "profiler_profile_digest": PROFILER_PROFILE_DIGEST,
+                "worker_revision": PROFILER_WORKER_REVISION,
                 "campaign_id": subject.campaign_id,
                 "run_id": subject.run_id,
                 "budget_action_key": budget_action_key,
@@ -1708,6 +2003,8 @@ def run_bounded_profile(
                     "profiling_allowed": True,
                 },
                 "metrics": metrics,
+                "toolchain": toolchain,
+                "trace_descriptor": trace_descriptor,
                 "raw_trace": {
                     "object_id": raw_trace_object_id,
                     "byte_size": len(raw_trace),
@@ -1774,6 +2071,712 @@ def run_bounded_profile(
             raise
 
 
+class _CanaryWorkerFailure(Exception):
+    def __init__(self, cause: BaseException, *, known: bool, hard: bool = False):
+        super().__init__(str(cause))
+        self.cause = cause
+        self.known = known
+        self.hard = hard
+
+
+def _current_deployment_profile_subject(
+    config: ControllerConfig,
+    *,
+    campaign_id: str,
+) -> tuple[_ProfileSubject, BaselineRef, dict[str, Any]]:
+    """Resolve the one exact CURRENT bootstrap confirmation for deployment."""
+
+    controller = ResearchController(config)
+    pin = controller._deployment_pin()
+    if pin is None:
+        raise ValueError("profile image canary requires a deployment baseline pin")
+    deployed = controller._best()
+    environment = controller._resolved_execution_environment(
+        CURRENT_RESEARCH_NAMESPACE
+    )
+    if not pin.execution_environment.is_resolved:
+        raise ValueError("profile image canary requires resolved deployment evidence")
+    try:
+        pin.execution_environment.require_match(
+            environment, context="profile image canary deployment"
+        )
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+    history_path = config.state_dir / "history.sqlite3"
+    connection = sqlite3.connect(
+        history_path.resolve().as_uri() + "?mode=ro",
+        uri=True,
+        isolation_level=None,
+    )
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        rows = connection.execute(
+            """
+            SELECT experiment_uid, artifact_id, candidate_hash, status,
+                   promotable, identity_json, result_json
+            FROM experiments
+            WHERE namespace_id = ? AND candidate_hash = ?
+              AND status = 'SUCCESS'
+            ORDER BY id
+            """,
+            (
+                CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                pin.candidate_hash,
+            ),
+        ).fetchall()
+    finally:
+        connection.close()
+    confirmations: list[tuple[str, ExperimentIdentity]] = []
+    parsed: list[tuple[str, ExperimentIdentity, dict[str, Any], bool]] = []
+    for row in rows:
+        try:
+            identity = ExperimentIdentity.from_value(
+                _strict_json_object(
+                    str(row["identity_json"]).encode("utf-8"),
+                    field="CURRENT bootstrap identity",
+                )
+            )
+            result = _strict_json_object(
+                str(row["result_json"]).encode("utf-8"),
+                field="CURRENT bootstrap result",
+            )
+        except (TypeError, ValueError):
+            continue
+        promotion = result.get("promotion")
+        parsed.append(
+            (
+                str(row["experiment_uid"]),
+                identity,
+                result,
+                bool(row["promotable"]),
+            )
+        )
+        if (
+            bool(row["promotable"])
+            and identity.namespace == CURRENT_RESEARCH_NAMESPACE
+            and identity.stage == "confirmation"
+            and identity.suite == "full"
+            and identity.replicate_kind == "confirmation"
+            and identity.execution_environment == environment
+            and str(identity.candidate_artifact_id) == row["artifact_id"]
+            and row["artifact_id"] == deployed.artifact_id
+            and result.get("status") == "SUCCESS"
+            and result.get("evaluation_protocol_id")
+            == CURRENT_C500_EVALUATION_PROTOCOL_ID
+            and result.get("request_identity") == identity.to_dict()
+            and isinstance(promotion, Mapping)
+            and promotion.get("phase") == "confirmation"
+            and promotion.get("confirmed") is True
+        ):
+            confirmations.append((str(row["experiment_uid"]), identity))
+    if len(confirmations) != 1:
+        raise ValueError(
+            "deployment does not have one exact CURRENT bootstrap confirmation"
+        )
+    confirmation_uid, identity = confirmations[0]
+    quick_matches = [
+        (uid, candidate_identity)
+        for uid, candidate_identity, candidate_result, promotable in parsed
+        if (
+            not promotable
+            and candidate_identity.run_id == identity.run_id
+            and candidate_identity.iteration == identity.iteration
+            and candidate_identity.namespace == CURRENT_RESEARCH_NAMESPACE
+            and candidate_identity.stage == "quick"
+            and candidate_identity.suite == "quick"
+            and candidate_identity.replicate_kind == "validation"
+            and candidate_identity.candidate_artifact_id
+            == identity.candidate_artifact_id
+            and candidate_identity.baseline == identity.baseline
+            and candidate_identity.execution_environment == environment
+            and candidate_result.get("status") == "SUCCESS"
+            and candidate_result.get("evaluation_protocol_id")
+            == CURRENT_C500_EVALUATION_PROTOCOL_ID
+            and candidate_result.get("request_identity")
+            == candidate_identity.to_dict()
+        )
+    ]
+    if len(quick_matches) != 1:
+        raise ValueError(
+            "CURRENT bootstrap confirmation has no exact quick case evidence"
+        )
+    experiment_uid, quick_identity = quick_matches[0]
+    subject = _read_only_history_subject(
+        state_dir=config.state_dir,
+        experiment_uid=experiment_uid,
+        namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+        execution_environment_digest=environment.digest,
+        recipe=BUILTIN_PROFILE_RECIPES["metax-hardware-counters-v1"],
+    )
+    subject = _ProfileSubject(
+        experiment_uid=subject.experiment_uid,
+        namespace_id=subject.namespace_id,
+        condition_digest=subject.condition_digest,
+        artifact_id=subject.artifact_id,
+        execution_environment_digest=subject.execution_environment_digest,
+        campaign_id=campaign_id,
+        run_id="profile-image-canary-" + experiment_uid.replace("-", "")[:32],
+        stage=subject.stage,
+        suite=subject.suite,
+        replicate_kind=subject.replicate_kind,
+        candidate_object_path=subject.candidate_object_path,
+        candidate_content_sha256=subject.candidate_content_sha256,
+    )
+    baseline_ref = BaselineRef.create(
+        namespace=CURRENT_RESEARCH_NAMESPACE,
+        artifact_id=subject.artifact_id,
+        source="campaign",
+        revision="profile-image-canary-" + confirmation_uid,
+        execution_environment=environment,
+    )
+    binding = {
+        "deployment_evidence_digest": pin.evidence_digest,
+        "deployment_git_commit": pin.git_commit,
+        "deployment_candidate_hash": pin.candidate_hash,
+        "current_confirmation_experiment_uid": confirmation_uid,
+        "current_confirmation_identity": identity.to_dict(),
+        "current_quick_experiment_uid": experiment_uid,
+        "current_quick_identity": quick_identity.to_dict(),
+        "execution_environment": environment.to_dict(),
+    }
+    return subject, baseline_ref, binding
+
+
+def _canary_snapshot(
+    *,
+    subject: _ProfileSubject,
+    baseline_ref: BaselineRef,
+    binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    value = {
+        "schema_version": 1,
+        "kind": "PROFILE_IMAGE_CANARY",
+        "namespace_id": subject.namespace_id,
+        "artifact_id": subject.artifact_id,
+        "candidate_sha256": subject.candidate_content_sha256,
+        "baseline_ref": baseline_ref.to_dict(),
+        "profiler_image": PROFILER_IMAGE,
+        "profiler_profile_digest": PROFILER_PROFILE_DIGEST,
+        "worker_revision": PROFILER_WORKER_REVISION,
+        "recipes": list(PROFILE_RECIPE_IDS),
+        "binding": dict(binding),
+    }
+    return json.loads(canonical_json_text(value))
+
+
+def _canary_budget() -> BudgetAmount:
+    return BudgetAmount(
+        wall_ms=int(PROFILE_CANARY_WALL_SECONDS * 1000),
+        gpu_ms=int(PROFILE_CANARY_GPU_SECONDS * 1000),
+    )
+
+
+def _require_canary_campaign(
+    store: CampaignStore,
+    *,
+    campaign_id: str,
+    snapshot: Mapping[str, Any],
+    baseline_ref: BaselineRef,
+) -> dict[str, Any]:
+    campaign = store.get_campaign(campaign_id)
+    expected_budget = _canary_budget().to_dict()
+    if (
+        campaign["namespace_id"] != CURRENT_RESEARCH_NAMESPACE.namespace_id
+        or campaign["mode"] != CampaignMode.DISCOVERY.value
+        or campaign["snapshot"] != dict(snapshot)
+        or campaign["allow_staged_lineage"] is not False
+        or any(
+            int(campaign[field]) != expected_budget[budget_field]
+            for field, budget_field in (
+                ("max_candidates", "candidates"),
+                ("max_wall_ms", "wall_ms"),
+                ("max_gpu_ms", "gpu_ms"),
+                ("max_tokens", "tokens"),
+                ("max_cost_microusd", "cost_microusd"),
+            )
+        )
+    ):
+        raise ValueError("profile image canary Campaign identity or budget drifted")
+    if store.list_child_runs(campaign_id):
+        raise ValueError("profile image canary Campaign must not contain child runs")
+    revisions = store.list_baseline_revisions(campaign_id)
+    if (
+        len(revisions) != 1
+        or revisions[0]["revision_kind"] != "DEPLOYMENT_SEED"
+        or revisions[0]["artifact_id"] != str(baseline_ref.artifact_id)
+        or revisions[0]["baseline_ref"] != baseline_ref.to_dict()
+        or campaign["active_baseline_revision_id"] != revisions[0]["id"]
+    ):
+        raise ValueError("profile image canary baseline revision drifted")
+    return campaign
+
+
+def _expected_worker_echo(
+    *,
+    recipe: ProfileRecipe,
+    subject: _ProfileSubject,
+    invariant_digest: str,
+    budget_action_key: str,
+    lease: ResourceLease | None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "schema_version": PROFILE_COLLECTION_API_VERSION,
+        "worker_revision": PROFILER_WORKER_REVISION,
+        "profiler_profile_digest": PROFILER_PROFILE_DIGEST,
+        "profiler_image": PROFILER_IMAGE,
+        "recipe_id": recipe.recipe_id,
+        "case_id": recipe.case_id,
+        "experiment_uid": subject.experiment_uid,
+        "namespace_id": subject.namespace_id,
+        "condition_digest": subject.condition_digest,
+        "artifact_id": subject.artifact_id,
+        "candidate_sha256": subject.candidate_content_sha256,
+        "environment_digest": subject.execution_environment_digest,
+        "soak_invariant_digest": invariant_digest,
+        "campaign_id": subject.campaign_id,
+        "run_id": subject.run_id,
+        "budget_action_key": budget_action_key,
+    }
+    if lease is not None:
+        result.update(
+            {"resource_id": lease.resource_id, "fencing_epoch": lease.fencing_epoch}
+        )
+    return result
+
+
+def _execute_canary_recipe(
+    config: ControllerConfig,
+    *,
+    runner: _ProfileRunner,
+    recipe: ProfileRecipe,
+    subject: _ProfileSubject,
+    invariant_digest: str,
+    budget_action_key: str,
+    lease: ResourceLease | None,
+    container_suffix: str,
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="kar-profile-canary-") as temporary:
+        output_directory = Path(temporary).resolve()
+        output_directory.chmod(0o700)
+        container_name = "kar-profile-canary-" + container_suffix
+        argv = _profile_argv(
+            config,
+            recipe=recipe,
+            subject=subject,
+            output_directory=output_directory,
+            container_name=container_name,
+            invariant_digest=invariant_digest,
+            budget_action_key=budget_action_key,
+            lease=lease if recipe.requires_gpu else None,
+        )
+        expected = _expected_worker_echo(
+            recipe=recipe,
+            subject=subject,
+            invariant_digest=invariant_digest,
+            budget_action_key=budget_action_key,
+            lease=lease if recipe.requires_gpu else None,
+        )
+        try:
+            command = runner.run(
+                argv,
+                input_text=None,
+                timeout_sec=PROFILE_TIMEOUT_SECONDS,
+                max_output_bytes=PROFILE_OUTPUT_LIMIT_BYTES,
+                container_name=container_name,
+                docker_binary=config.docker_binary,
+            )
+        except OSError as exc:
+            raise _CanaryWorkerFailure(
+                ValueError("bounded profiler could not start"), known=True
+            ) from exc
+        except BaseException as exc:
+            outcome = None
+            try:
+                outcome = _read_worker_outcome(
+                    output_directory, expected=expected
+                )
+            except ValueError:
+                pass
+            raise _CanaryWorkerFailure(
+                exc,
+                known=_outcome_is_known(recipe, outcome),
+                hard=bool(outcome and outcome.get("status") == "HARD_FAILURE"),
+            ) from exc
+        outcome = _read_worker_outcome(output_directory, expected=expected)
+        hard = _command_has_fatal_gpu_marker(command) or bool(
+            outcome and outcome.get("status") == "HARD_FAILURE"
+        )
+        if hard:
+            raise _CanaryWorkerFailure(
+                ValueError("bounded profiler reported a fatal GPU marker"),
+                known=False,
+                hard=True,
+            )
+        known = _outcome_is_known(recipe, outcome)
+        if tuple(command.argv) != argv:
+            raise _CanaryWorkerFailure(
+                ValueError("profile runner changed the fixed argv"), known=known
+            )
+        if command.timed_out:
+            raise _CanaryWorkerFailure(
+                ValueError("bounded profiler timed out"), known=known
+            )
+        if command.output_limited:
+            raise _CanaryWorkerFailure(
+                ValueError("bounded profiler exceeded its output cap"), known=known
+            )
+        if command.returncode != 0:
+            raise _CanaryWorkerFailure(
+                ValueError("bounded profiler returned a non-zero status"), known=known
+            )
+        if (
+            outcome is None
+            or outcome.get("status") != "SUCCESS"
+            or outcome.get("completion_trusted") is not True
+        ):
+            raise _CanaryWorkerFailure(
+                ValueError("bounded profiler has no trusted success outcome"),
+                known=known,
+            )
+        result = _strict_json_object(
+            _read_regular_file(
+                output_directory / "result.json",
+                limit=PROFILE_RESULT_LIMIT_BYTES,
+                field="profiler result",
+            ),
+            field="profiler result",
+        )
+        if set(result) != set(expected) | {
+            "metrics",
+            "toolchain",
+            "trace_descriptor",
+        } or any(result.get(field) != value for field, value in expected.items()):
+            raise _CanaryWorkerFailure(
+                ValueError("profiler result did not echo the trusted request"),
+                known=True,
+            )
+        raw_trace = _read_regular_file(
+            output_directory / "raw.trace",
+            limit=PROFILE_RAW_TRACE_LIMIT_BYTES,
+            field="profiler raw trace",
+        )
+        if not raw_trace:
+            raise _CanaryWorkerFailure(
+                ValueError("profiler raw trace must not be empty"), known=True
+            )
+        try:
+            toolchain = _toolchain_summary(result)
+            trace_descriptor = _trace_descriptor(
+                recipe, result, raw_trace=raw_trace
+            )
+            metrics = _metric_summary(recipe, result)
+        except ValueError as exc:
+            raise _CanaryWorkerFailure(exc, known=True) from exc
+        raw_object = _store_cas_object(
+            config.controller_dir / "objects" / "sha256",
+            raw_trace,
+            field="private profiler image canary trace",
+        )
+        return {
+            "recipe_id": recipe.recipe_id,
+            "case_id": recipe.case_id,
+            "metrics": metrics,
+            "toolchain": toolchain,
+            "trace_descriptor": trace_descriptor,
+            "raw_trace": {
+                "object_id": raw_object,
+                "byte_size": len(raw_trace),
+                "visibility": "controller-private-cas",
+            },
+        }
+
+
+def run_profile_image_doctor(
+    config: ControllerConfig,
+    *,
+    campaign_database: str | os.PathLike[str],
+    campaign_id: str,
+    runner: _ProfileRunner | None = None,
+) -> dict[str, Any]:
+    """Qualify the active profiler image once before any soak can begin."""
+
+    if not isinstance(config, ControllerConfig):
+        raise TypeError("config must be ControllerConfig")
+    require_active_profiler()
+    if tuple(config.gpu_devices) != GPU1_DEVICES:
+        raise ValueError("profiler image canary requires the exact C500 devices")
+    _strict_token = _PROFILE_TOKEN.fullmatch(campaign_id) if isinstance(campaign_id, str) else None
+    if _strict_token is None:
+        raise ValueError("campaign_id must be a stable bounded identifier")
+    runtime_root = _runtime_root(config)
+    database = validate_production_campaign_database(
+        campaign_database, runtime_root=runtime_root
+    )
+    action_key = "profile-image-canary-v1"
+    profile_runner = runner or CommandRunner()
+    started = time.monotonic()
+    lease: ResourceLease | None = None
+    with campaign_maintenance_fence(runtime_root):
+        subject, baseline_ref, binding = _current_deployment_profile_subject(
+            config, campaign_id=campaign_id
+        )
+        snapshot = _canary_snapshot(
+            subject=subject, baseline_ref=baseline_ref, binding=binding
+        )
+        snapshot_digest = canonical_sha256(snapshot)
+        with gpu_lock(config.controller_dir / "gpu1.lock"):
+            with CampaignStore(database) as store:
+                other = store.connection.execute(
+                    """
+                    SELECT id FROM campaigns
+                    WHERE id != ? AND status NOT IN ('COMPLETED', 'CANCELLED')
+                    ORDER BY id LIMIT 1
+                    """,
+                    (campaign_id,),
+                ).fetchone()
+                if other is not None:
+                    raise ValueError(
+                        "profile image canary is forbidden while another Campaign is active"
+                    )
+                try:
+                    campaign = store.get_campaign(campaign_id)
+                except KeyError:
+                    campaign = store.create_campaign(
+                        campaign_id=campaign_id,
+                        namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                        mode=CampaignMode.DISCOVERY.value,
+                        snapshot=snapshot,
+                        budget_limit=_canary_budget(),
+                        initial_baseline_ref=baseline_ref,
+                        initial_policy_snapshot={
+                            "kind": "PROFILE_IMAGE_CANARY",
+                            "profiler_profile_digest": PROFILER_PROFILE_DIGEST,
+                        },
+                        allow_staged_lineage=False,
+                    )
+                _require_canary_campaign(
+                    store,
+                    campaign_id=campaign_id,
+                    snapshot=snapshot,
+                    baseline_ref=baseline_ref,
+                )
+                try:
+                    existing = store.get_budget_action(
+                        campaign_id, idempotency_key=action_key
+                    )
+                except KeyError:
+                    existing = None
+                if existing is not None:
+                    if (
+                        existing["status"] == "SETTLED"
+                        and campaign["status"] == CampaignStatus.COMPLETED.value
+                    ):
+                        return {
+                            "schema_version": PROFILE_COLLECTION_API_VERSION,
+                            "command": "profile image-doctor",
+                            "status": "ALREADY_COMPLETED",
+                            "campaign_id": campaign_id,
+                            "budget_action_key": action_key,
+                            "profiler_image": PROFILER_IMAGE,
+                            "profiler_profile_digest": PROFILER_PROFILE_DIGEST,
+                            "advisory_only": True,
+                        }
+                    if existing["status"] != "RESERVED":
+                        raise ValueError(
+                            "profile image canary has a terminal incomplete action"
+                        )
+                    owned = store.get_active_resource_lease(PROFILE_RESOURCE_ID)
+                    _quarantine_profile_outcome(
+                        store,
+                        campaign_id=campaign_id,
+                        lease=(
+                            owned
+                            if owned is not None
+                            and owned.campaign_id == campaign_id
+                            else None
+                        ),
+                        hard=False,
+                        reason_code="profile-image-canary-crash-left-reservation",
+                    )
+                    raise ValueError(
+                        "profile image canary has an UNKNOWN outcome; replay is forbidden"
+                    )
+                if campaign["status"] == CampaignStatus.CREATED.value:
+                    store.start_campaign(campaign_id)
+                elif campaign["status"] != CampaignStatus.RUNNING.value:
+                    raise ValueError("profile image canary Campaign is not runnable")
+                store.reserve_budget(
+                    campaign_id,
+                    idempotency_key=action_key,
+                    action_kind="PROFILE_IMAGE_CANARY",
+                    amount=_canary_budget(),
+                )
+                lease = store.acquire_resource(
+                    campaign_id,
+                    resource_id=PROFILE_RESOURCE_ID,
+                    ttl_seconds=PROFILE_LEASE_TTL_SECONDS,
+                )
+                try:
+                    reports: list[dict[str, Any]] = []
+                    for recipe_id in PROFILE_RECIPE_IDS:
+                        confirmed, confirmed_ref, confirmed_binding = (
+                            _current_deployment_profile_subject(
+                                config, campaign_id=campaign_id
+                            )
+                        )
+                        if (
+                            confirmed != subject
+                            or confirmed_ref != baseline_ref
+                            or confirmed_binding != binding
+                        ):
+                            raise _CanaryWorkerFailure(
+                                ValueError(
+                                    "deployment profiling subject changed before Docker"
+                                ),
+                                known=True,
+                            )
+                        _require_canary_campaign(
+                            store,
+                            campaign_id=campaign_id,
+                            snapshot=snapshot,
+                            baseline_ref=baseline_ref,
+                        )
+                        _require_profile_lease(store, lease=lease)
+                        report = _execute_canary_recipe(
+                            config,
+                            runner=profile_runner,
+                            recipe=BUILTIN_PROFILE_RECIPES[recipe_id],
+                            subject=subject,
+                            invariant_digest=snapshot_digest,
+                            budget_action_key=action_key,
+                            lease=lease,
+                            container_suffix=hashlib.sha256(
+                                f"{campaign_id}:{recipe_id}".encode("utf-8")
+                            ).hexdigest()[:32],
+                        )
+                        reports.append(report)
+                    confirmed, confirmed_ref, confirmed_binding = (
+                        _current_deployment_profile_subject(
+                            config, campaign_id=campaign_id
+                        )
+                    )
+                    if (
+                        confirmed != subject
+                        or confirmed_ref != baseline_ref
+                        or confirmed_binding != binding
+                    ):
+                        raise _CanaryWorkerFailure(
+                            ValueError(
+                                "deployment profiling subject changed after Docker"
+                            ),
+                            known=True,
+                        )
+                    _require_profile_lease(store, lease=lease)
+                    elapsed = min(
+                        int(
+                            math.ceil((time.monotonic() - started) * 1000)
+                        ),
+                        int(PROFILE_CANARY_WALL_SECONDS * 1000),
+                    )
+                    summary = {
+                        "schema_version": PROFILE_COLLECTION_API_VERSION,
+                        "command": "profile image-doctor",
+                        "status": "READY",
+                        "campaign_id": campaign_id,
+                        "budget_action_key": action_key,
+                        "profiler_image": PROFILER_IMAGE,
+                        "profiler_profile_digest": PROFILER_PROFILE_DIGEST,
+                        "worker_revision": PROFILER_WORKER_REVISION,
+                        "subject": {
+                            "experiment_uid": subject.experiment_uid,
+                            "namespace_id": subject.namespace_id,
+                            "artifact_id": subject.artifact_id,
+                            "candidate_sha256": subject.candidate_content_sha256,
+                            "execution_environment_digest": (
+                                subject.execution_environment_digest
+                            ),
+                        },
+                        "recipes": reports,
+                        "advisory_only": True,
+                        "promotion_effect": "none",
+                        "baseline_effect": "none",
+                    }
+                    evidence_bytes = canonical_json_text(summary).encode("utf-8")
+                    summary["evidence_object_id"] = _store_cas_object(
+                        config.state_dir / "objects" / "sha256",
+                        evidence_bytes,
+                        field="scientific profiler image canary summary",
+                    )
+                    store.settle_budget(
+                        campaign_id,
+                        idempotency_key=action_key,
+                        actual=BudgetAmount(
+                            wall_ms=elapsed,
+                            gpu_ms=min(
+                                elapsed,
+                                int(PROFILE_CANARY_GPU_SECONDS * 1000),
+                            ),
+                        ),
+                    )
+                    store.release_resource(lease)
+                    store.finish_campaign(
+                        campaign_id,
+                        reason="profile image canary passed",
+                    )
+                    return summary
+                except _CanaryWorkerFailure as failure:
+                    if failure.known and not failure.hard:
+                        elapsed = min(
+                            int(
+                                math.ceil((time.monotonic() - started) * 1000)
+                            ),
+                            int(PROFILE_CANARY_WALL_SECONDS * 1000),
+                        )
+                        store.settle_budget(
+                            campaign_id,
+                            idempotency_key=action_key,
+                            actual=BudgetAmount(
+                                wall_ms=elapsed,
+                                gpu_ms=min(
+                                    elapsed,
+                                    int(PROFILE_CANARY_GPU_SECONDS * 1000),
+                                ),
+                            ),
+                        )
+                        store.release_resource(lease)
+                        store.pause_campaign(
+                            campaign_id,
+                            status=CampaignStatus.PAUSED_OPERATOR.value,
+                            reason="profiler image canary known failure",
+                        )
+                    else:
+                        _quarantine_profile_outcome(
+                            store,
+                            campaign_id=campaign_id,
+                            lease=lease,
+                            hard=failure.hard,
+                            reason_code=(
+                                "profile-image-canary-hard-failure"
+                                if failure.hard
+                                else "profile-image-canary-unknown-outcome"
+                            ),
+                        )
+                    raise failure.cause
+                except BaseException:
+                    try:
+                        _quarantine_profile_outcome(
+                            store,
+                            campaign_id=campaign_id,
+                            lease=lease,
+                            hard=False,
+                            reason_code="profile-image-canary-host-unknown",
+                        )
+                    except BaseException:
+                        pass
+                    raise
+
+
 __all__ = [
     "BUILTIN_PROFILE_RECIPES",
     "DEFAULT_DEVICE_PATHS",
@@ -1782,10 +2785,14 @@ __all__ = [
     "PROFILE_COLLECTION_API_VERSION",
     "PROFILE_DOCTOR_API_VERSION",
     "PROFILE_RECIPE_IDS",
+    "PROFILER_ACTIVE",
     "PROFILER_IMAGE",
+    "PROFILER_PROFILE_DIGEST",
+    "PROFILER_WORKER_REVISION",
     "ProfileMetric",
     "ProfileRecipe",
     "ToolProbe",
     "run_bounded_profile",
+    "run_profile_image_doctor",
     "run_profiling_doctor",
 ]
