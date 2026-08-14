@@ -81,22 +81,31 @@ class ProfilingDoctorTests(unittest.TestCase):
 
         def run(argv, **kwargs):
             commands.append(tuple(argv))
-            return {
-                "status": "AVAILABLE",
-                "exit_code": 0,
-                "version_output": "3.2.1.10-df74b02",
-            }
+            if Path(argv[0]).name == "mcTracer":
+                return subprocess.CompletedProcess(
+                    argv,
+                    1,
+                    stdout=(
+                        b"mcTracer Help\n"
+                        b"Version 3.2.1.10-df74b02\n"
+                        b"Usage: mcTracer [options] command\n"
+                    ),
+                    stderr=b"",
+                )
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=b"mx-smi 1.0\n", stderr=b""
+            )
 
         with tempfile.TemporaryDirectory() as temporary:
             accessible = Path(temporary) / "capability"
             accessible.write_text("available\n", encoding="utf-8")
-            report = run_profiling_doctor(
-                tool_probes=DEFAULT_TOOL_PROBES,
-                library_paths=(accessible,),
-                device_paths=(accessible,),
-                executable_resolver=resolve,
-                command_runner=run,
-            )
+            with mock.patch.object(profiling.subprocess, "run", side_effect=run):
+                report = run_profiling_doctor(
+                    tool_probes=DEFAULT_TOOL_PROBES,
+                    library_paths=(accessible,),
+                    device_paths=(accessible,),
+                    executable_resolver=resolve,
+                )
 
         self.assertEqual(report["status"], "READY")
         self.assertEqual(
@@ -113,38 +122,51 @@ class ProfilingDoctorTests(unittest.TestCase):
         )
         self.assertEqual(trace["status"], "AVAILABLE")
 
-    def test_default_metax_trace_probe_nonzero_fails_closed(self) -> None:
-        commands: list[tuple[str, ...]] = []
-
-        def run(argv, **kwargs):
-            commands.append(tuple(argv))
-            if argv[-1] == "--help":
-                return {
-                    "status": "UNAVAILABLE",
-                    "exit_code": 127,
-                    "reason": "version probe returned a non-zero status",
-                    "version_output": "execvpe failed",
-                }
-            return {
-                "status": "AVAILABLE",
-                "exit_code": 0,
-                "version_output": "available",
-            }
-
-        with tempfile.TemporaryDirectory() as temporary:
-            accessible = Path(temporary) / "capability"
-            accessible.write_text("available\n", encoding="utf-8")
-            report = run_profiling_doctor(
-                tool_probes=DEFAULT_TOOL_PROBES[:2],
-                library_paths=(accessible,),
-                device_paths=(accessible,),
-                executable_resolver=lambda name: f"/trusted/bin/{name}",
-                command_runner=run,
-            )
-
-        self.assertEqual(report["status"], "UNAVAILABLE")
-        self.assertEqual(commands[-1], ("/trusted/bin/mcTracer", "--help"))
-        self.assertIn("metax-trace-collector", report["reasons"][0])
+    def test_mctracer_output_contract_rejects_spoofs_and_drift(self) -> None:
+        trace = next(
+            item
+            for item in DEFAULT_TOOL_PROBES
+            if item.tool_id == "metax-trace-collector"
+        )
+        self.assertEqual(trace.version_arguments, ("--help",))
+        self.assertEqual(trace.accepted_exit_codes, (1,))
+        valid = (
+            b"mcTracer Help\n"
+            b"Version 3.2.1.10-df74b02\n"
+            b"Usage: mcTracer [options] command\n"
+        )
+        cases = (
+            (1, b"arbitrary exit-one text\n", "signature mismatch"),
+            (
+                1,
+                valid.replace(b"3.2.1.10-df74b02", b"3.2.1.11-drifted"),
+                "signature mismatch",
+            ),
+            (0, valid, "unaccepted status"),
+            (2, valid, "unaccepted status"),
+            (1, valid + b"execvpe: No such file or directory\n", "failure marker"),
+        )
+        for exit_code, output, reason in cases:
+            with self.subTest(exit_code=exit_code, reason=reason), mock.patch.object(
+                profiling.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    ("/opt/maca-3.2.1/bin/mcTracer", "--help"),
+                    exit_code,
+                    stdout=output,
+                    stderr=b"",
+                ),
+            ):
+                result = profiling._bounded_version_command(
+                    ("/opt/maca-3.2.1/bin/mcTracer", "--help"),
+                    timeout_sec=1,
+                    output_limit_bytes=4096,
+                    accepted_exit_codes=trace.accepted_exit_codes,
+                    required_output_patterns=trace.required_output_patterns,
+                    forbidden_output_markers=trace.forbidden_output_markers,
+                )
+            self.assertEqual(result["status"], "UNAVAILABLE")
+            self.assertIn(reason, result["reason"])
 
     def test_missing_capabilities_have_explicit_unavailable_reasons(self) -> None:
         report = run_profiling_doctor(
@@ -169,6 +191,24 @@ class ProfilingDoctorTests(unittest.TestCase):
             (lambda: ToolProbe("bad id", ("tool",)), "tool_id"),
             (lambda: ToolProbe("trace", ()), "must not be empty"),
             (lambda: ToolProbe("trace", ("tool",), ("",)), "arguments"),
+            (
+                lambda: ToolProbe(
+                    "trace", ("tool",), accepted_exit_codes=()
+                ),
+                "accepted_exit_codes",
+            ),
+            (
+                lambda: ToolProbe(
+                    "trace", ("tool",), accepted_exit_codes=(True,)
+                ),
+                "accepted_exit_codes",
+            ),
+            (
+                lambda: ToolProbe(
+                    "trace", ("tool",), required_output_patterns=("[",)
+                ),
+                "output pattern",
+            ),
             (lambda: ProfileMetric("Bad", "integer", "count"), "metric_id"),
             (lambda: ProfileMetric("count", "text", "count"), "value_kind"),
             (lambda: ProfileMetric("count", "integer", ""), "unit"),
@@ -234,7 +274,7 @@ class ProfilingDoctorTests(unittest.TestCase):
                 ("/trusted/tool", "--version"), timeout_sec=1, output_limit_bytes=16
             )
         self.assertEqual(result["status"], "UNAVAILABLE")
-        self.assertIn("non-zero", result["reason"])
+        self.assertIn("unaccepted", result["reason"])
 
         noisy = subprocess.CompletedProcess(
             ("/trusted/tool", "--version"), 0, stdout=b"too much", stderr=b"noise"

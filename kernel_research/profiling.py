@@ -197,6 +197,9 @@ class ToolProbe:
     executable_names: tuple[str, ...]
     version_arguments: tuple[str, ...] = ("--version",)
     required: bool = True
+    accepted_exit_codes: tuple[int, ...] = (0,)
+    required_output_patterns: tuple[str, ...] = ()
+    forbidden_output_markers: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.tool_id or any(character.isspace() for character in self.tool_id):
@@ -209,6 +212,31 @@ class ToolProbe:
         for argument in self.version_arguments:
             if not argument or "\x00" in argument:
                 raise ValueError("version arguments must be fixed non-empty strings")
+        if (
+            not self.accepted_exit_codes
+            or len(set(self.accepted_exit_codes)) != len(self.accepted_exit_codes)
+            or any(
+                type(code) is not int or code < 0 or code > 255
+                for code in self.accepted_exit_codes
+            )
+        ):
+            raise ValueError(
+                "accepted_exit_codes must be unique byte-sized integers"
+            )
+        for pattern in self.required_output_patterns:
+            if not pattern or "\x00" in pattern:
+                raise ValueError(
+                    "required output patterns must be non-empty bounded text"
+                )
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError("required output pattern is invalid") from exc
+        for marker in self.forbidden_output_markers:
+            if not marker or "\x00" in marker:
+                raise ValueError(
+                    "forbidden output markers must be non-empty bounded text"
+                )
 
 
 DEFAULT_TOOL_PROBES = (
@@ -220,6 +248,24 @@ DEFAULT_TOOL_PROBES = (
         "metax-trace-collector",
         ("mcTracer", "mctracer"),
         version_arguments=("--help",),
+        accepted_exit_codes=(1,),
+        required_output_patterns=(
+            r"\b3\.2\.1\.10-df74b02\b",
+            r"(?i)\bhelp\b",
+            r"(?i)\busage\b",
+        ),
+        forbidden_output_markers=(
+            "fatal",
+            "segmentation fault",
+            "core dumped",
+            "execvpe",
+            "failed to execute",
+            "failed to run command",
+            "no such file or directory",
+            "error while loading shared libraries",
+            "cannot open shared object file",
+            "symbol lookup error",
+        ),
     ),
     # mcProfiler is commonly a UI/client while the Linux target exposes its
     # collector.  It is therefore useful evidence but not a Linux hard gate.
@@ -244,7 +290,13 @@ DEFAULT_DEVICE_PATHS = (
 
 
 def _bounded_version_command(
-    argv: Sequence[str], *, timeout_sec: float, output_limit_bytes: int
+    argv: Sequence[str],
+    *,
+    timeout_sec: float,
+    output_limit_bytes: int,
+    accepted_exit_codes: Sequence[int] = (0,),
+    required_output_patterns: Sequence[str] = (),
+    forbidden_output_markers: Sequence[str] = (),
 ) -> Mapping[str, Any]:
     """Execute one already-reviewed argv without a shell or inherited stdin."""
 
@@ -279,15 +331,40 @@ def _bounded_version_command(
             "exit_code": completed.returncode,
         }
     text = combined.decode("utf-8", errors="replace").strip()
+    lowered = text.casefold()
+    forbidden = next(
+        (
+            marker
+            for marker in forbidden_output_markers
+            if marker.casefold() in lowered
+        ),
+        None,
+    )
+    if forbidden is not None:
+        return {
+            "status": "UNAVAILABLE",
+            "exit_code": completed.returncode,
+            "version_output": text[:4096],
+            "reason": "version probe output contains a forbidden failure marker",
+        }
+    if completed.returncode not in set(accepted_exit_codes):
+        return {
+            "status": "UNAVAILABLE",
+            "exit_code": completed.returncode,
+            "version_output": text[:4096],
+            "reason": "version probe returned an unaccepted status",
+        }
+    if any(re.search(pattern, text) is None for pattern in required_output_patterns):
+        return {
+            "status": "UNAVAILABLE",
+            "exit_code": completed.returncode,
+            "version_output": text[:4096],
+            "reason": "version probe output signature mismatch",
+        }
     return {
-        "status": "AVAILABLE" if completed.returncode == 0 else "UNAVAILABLE",
+        "status": "AVAILABLE",
         "exit_code": completed.returncode,
         "version_output": text[:4096],
-        **(
-            {}
-            if completed.returncode == 0
-            else {"reason": "version probe returned a non-zero status"}
-        ),
     }
 
 
@@ -347,6 +424,9 @@ def run_profiling_doctor(
                 (resolved, *probe.version_arguments),
                 timeout_sec=timeout_sec,
                 output_limit_bytes=output_limit_bytes,
+                accepted_exit_codes=probe.accepted_exit_codes,
+                required_output_patterns=probe.required_output_patterns,
+                forbidden_output_markers=probe.forbidden_output_markers,
             )
         )
         tools.append(
