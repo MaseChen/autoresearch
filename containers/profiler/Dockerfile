@@ -13,11 +13,7 @@ COPY kernel_research /opt/kernel-research/lib/kernel_research
 RUN chmod 0555 /opt/kernel-research/bin/bounded-profiler \
     && test "$(stat -c '%a %u:%g' /opt/kernel-research/bin/bounded-profiler)" = "555 0:0" \
     && test -n "${SOURCE_REVISION}" \
-    && printf '%s' "${SOURCE_REVISION}" | grep -Eq '^[0-9a-f]{40}([0-9a-f]{24})?$' \
-    && HOME=/tmp/profile-home TMPDIR=/tmp TRITON_CACHE_DIR=/tmp/triton-cache \
-       /opt/kernel-research/bin/bounded-profiler verify-toolchain >/tmp/toolchain.json \
-    && test -s /tmp/toolchain.json \
-    && rm -f /tmp/toolchain.json
+    && printf '%s' "${SOURCE_REVISION}" | grep -Eq '^[0-9a-f]{40}([0-9a-f]{24})?$'
 
 ENV HOME=/tmp/profile-home \
     TMPDIR=/tmp \
@@ -25,5 +21,15 @@ ENV HOME=/tmp/profile-home \
     PYTHONPATH=/opt/kernel-research/lib
 
 USER 1000:1000
+
+RUN test "$(id -u):$(id -g)" = "1000:1000" \
+    && mkdir -p "${HOME}" "${TRITON_CACHE_DIR}" \
+    && chmod 0700 "${HOME}" "${TRITON_CACHE_DIR}" \
+    && test "$(stat -c '%a %u:%g' "${HOME}")" = "700 1000:1000" \
+    && cd "${HOME}" \
+    && /opt/kernel-research/bin/bounded-profiler verify-toolchain >/tmp/toolchain.json \
+    && test -s /tmp/toolchain.json \
+    && rm -f /tmp/toolchain.json
+
 WORKDIR /output
 ENTRYPOINT ["/opt/kernel-research/bin/bounded-profiler"]

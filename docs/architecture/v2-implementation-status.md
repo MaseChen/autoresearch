@@ -79,8 +79,8 @@ Before enabling the current C500 protocol for autonomous discovery:
 
 ## Repository verification snapshot
 
-The final host-only verification run for this implementation completed 492
-unit and integration tests with 80.06% branch-aware coverage. `compileall` and
+The final host-only verification run for this implementation completed 495
+unit and integration tests with 80.07% branch-aware coverage. `compileall` and
 the Git whitespace check also passed. These checks use mocks and isolated
 SQLite/runtime fixtures; they do not claim MetaX C500 execution, provider/OJ
 network access, or elapsed 24/72/168-hour soak evidence.

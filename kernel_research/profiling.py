@@ -87,6 +87,8 @@ from .profiler_contract import (
     PROFILER_BUILD_PROFILE_DIGEST,
     PROFILER_ENTRYPOINT,
     PROFILER_IMAGE,
+    PROFILER_IMAGE_GID,
+    PROFILER_IMAGE_UID,
     PROFILER_PLATFORM,
     PROFILER_RECIPES,
     PROFILER_WORKER_REVISION,
@@ -100,6 +102,8 @@ DEFAULT_OUTPUT_LIMIT_BYTES = 64 * 1024
 
 PROFILE_COLLECTION_API_VERSION = PROFILE_COLLECTION_SCHEMA_VERSION
 _PROFILE_BUDGET_CEILING_MS = int(PROFILE_TIMEOUT_SECONDS * 1000)
+_HOST_EFFECTIVE_UID = os.geteuid
+_HOST_EFFECTIVE_GID = os.getegid
 if tuple(str(path) for path in GPU1_DEVICES) != PROFILE_GPU_DEVICE_PATHS:
     raise RuntimeError("profiler GPU device contract drifted")
 
@@ -883,6 +887,27 @@ def _docker_mount(source: Path, destination: str, *, readonly: bool) -> str:
     return f"type=bind,src={rendered},dst={destination}{suffix}"
 
 
+def _require_profile_runtime_user(config: ControllerConfig) -> None:
+    if (
+        type(config.container_uid) is not int
+        or type(config.container_gid) is not int
+        or config.container_uid != PROFILER_IMAGE_UID
+        or config.container_gid != PROFILER_IMAGE_GID
+    ):
+        raise ValueError(
+            "bounded profiler requires the exact runtime user "
+            f"{PROFILER_IMAGE_UID}:{PROFILER_IMAGE_GID}"
+        )
+    if (
+        _HOST_EFFECTIVE_UID() != PROFILER_IMAGE_UID
+        or _HOST_EFFECTIVE_GID() != PROFILER_IMAGE_GID
+    ):
+        raise ValueError(
+            "bounded profiler requires the trusted host process user "
+            f"{PROFILER_IMAGE_UID}:{PROFILER_IMAGE_GID}"
+        )
+
+
 def _profile_argv(
     config: ControllerConfig,
     *,
@@ -894,6 +919,7 @@ def _profile_argv(
     budget_action_key: str,
     lease: ResourceLease | None,
 ) -> tuple[str, ...]:
+    _require_profile_runtime_user(config)
     if subject.campaign_id is None:
         raise ValueError("Campaign profiling requires a Campaign-owned subject")
     argv = [
@@ -1548,6 +1574,7 @@ def run_bounded_profile(
 
     if not isinstance(config, ControllerConfig):
         raise TypeError("config must be ControllerConfig")
+    _require_profile_runtime_user(config)
     if tuple(config.gpu_devices) != GPU1_DEVICES:
         raise ValueError("bounded profiling requires the exact trusted C500 devices")
     if (
@@ -2550,6 +2577,7 @@ def run_profile_image_doctor(
 
     if not isinstance(config, ControllerConfig):
         raise TypeError("config must be ControllerConfig")
+    _require_profile_runtime_user(config)
     require_active_profiler()
     if tuple(config.gpu_devices) != GPU1_DEVICES:
         raise ValueError("profiler image canary requires the exact C500 devices")

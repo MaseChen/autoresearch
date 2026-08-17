@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
 from types import SimpleNamespace
@@ -36,9 +38,13 @@ import kernel_research.profiling as host
 
 
 class ProfilerContractTests(unittest.TestCase):
-    A2_BUILD_PROFILE_DIGEST = (
+    A3_BUILD_PROFILE_DIGEST = (
         "sha256:56dbc236e1757fcb46822ee5d5e2db10"
         "ce60014bb1a2cdf235d6b001c55bae8a"
+    )
+    A4_BUILD_PROFILE_DIGEST = (
+        "sha256:a122359bc9c7d13356587964f51a4bdb"
+        "68676f0841856d005cb380f1bd5facc7"
     )
 
     def test_submit_a_profile_is_exact_and_inactive(self) -> None:
@@ -57,9 +63,9 @@ class ProfilerContractTests(unittest.TestCase):
             PROFILE_COLLECTION_SCHEMA_VERSION,
         )
         self.assertEqual(PROFILER_BUILD_PROFILE_DIGEST, canonical_sha256(build))
-        self.assertEqual(
-            PROFILER_BUILD_PROFILE_DIGEST,
-            self.A2_BUILD_PROFILE_DIGEST,
+        self.assertEqual(PROFILER_BUILD_PROFILE_DIGEST, self.A4_BUILD_PROFILE_DIGEST)
+        self.assertNotEqual(
+            PROFILER_BUILD_PROFILE_DIGEST, self.A3_BUILD_PROFILE_DIGEST
         )
         self.assertEqual(
             PROFILER_ACTIVATION_PROFILE_DIGEST,
@@ -68,7 +74,7 @@ class ProfilerContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "inactive"):
             require_active_profiler()
 
-    def test_commit_a_worker_echo_survives_commit_b_activation_only_change(self) -> None:
+    def test_a4_worker_echo_survives_activation_only_change(self) -> None:
         request = ProfilerWorkerTests._request()
         commit_a_echo = request.echo()
         commit_a_build = profiler_build_profile_snapshot()
@@ -153,6 +159,8 @@ class ProfilerContractTests(unittest.TestCase):
         )
         self.assertEqual(build["image_user"]["uid"], 1000)
         self.assertEqual(build["image_user"]["gid"], 1000)
+        self.assertEqual(build["image_user"]["runtime_binding"], "exact")
+        self.assertEqual(build["image_user"]["host_process_binding"], "exact")
         self.assertEqual(build["platform"], "linux/amd64")
         self.assertEqual(build["limits"]["action_timeout_seconds"], 900.0)
         self.assertEqual(build["limits"]["toolchain_help_timeout_seconds"], 10.0)
@@ -166,6 +174,14 @@ class ProfilerContractTests(unittest.TestCase):
         self.assertEqual(build["limits"]["pids"], 128)
         self.assertTrue(build["isolation"]["read_only_root"])
         self.assertEqual(build["isolation"]["network"], "none")
+        self.assertEqual(
+            build["isolation"]["tmpfs"],
+            "/tmp:rw,nosuid,nodev,size=64m,mode=700,uid=1000,gid=1000",
+        )
+        self.assertEqual(
+            build["isolation"]["tmpfs_owner"],
+            {"uid": 1000, "gid": 1000, "mode": "0700", "size": "64m"},
+        )
         self.assertEqual(build["resource"]["resource_id"], "gpu1")
         self.assertEqual(build["resource"]["lease_ttl_seconds"], 930.0)
         self.assertEqual(build["resource"]["canary_lease_ttl_seconds"], 1830.0)
@@ -224,6 +240,14 @@ class ProfilerContractTests(unittest.TestCase):
             f"USER {contract.PROFILER_IMAGE_UID}:{contract.PROFILER_IMAGE_GID}",
             dockerfile,
         )
+        self.assertLess(
+            dockerfile.index(
+                f"USER {contract.PROFILER_IMAGE_UID}:{contract.PROFILER_IMAGE_GID}"
+            ),
+            dockerfile.index("verify-toolchain"),
+        )
+        self.assertIn('test "$(id -u):$(id -g)" = "1000:1000"', dockerfile)
+        self.assertIn('cd "${HOME}"', dockerfile)
         self.assertIn("HOME=/tmp/profile-home", dockerfile)
         self.assertIn("TRITON_CACHE_DIR=/tmp/triton-cache", dockerfile)
         lowered = dockerfile.lower()
@@ -312,6 +336,9 @@ class ProfilerWorkerTests(unittest.TestCase):
             f"=====Help Info=====\nVersion:\n{MCTRACER_VERSION}\nUsage:\n"
         ).encode("utf-8")
         with (
+            mock.patch.object(worker.os, "geteuid", return_value=1000),
+            mock.patch.object(worker.os, "getegid", return_value=1000),
+            mock.patch.object(worker, "_prepare_runtime_directories"),
             mock.patch.object(worker, "_sha256_file", side_effect=self._hash_side_effect),
             mock.patch.object(
                 worker.subprocess,
@@ -352,6 +379,9 @@ class ProfilerWorkerTests(unittest.TestCase):
         for returncode, output in cases:
             with (
                 self.subTest(returncode=returncode, output=output[-30:]),
+                mock.patch.object(worker.os, "geteuid", return_value=1000),
+                mock.patch.object(worker.os, "getegid", return_value=1000),
+                mock.patch.object(worker, "_prepare_runtime_directories"),
                 mock.patch.object(worker, "_sha256_file", side_effect=self._hash_side_effect),
                 mock.patch.object(
                     worker.subprocess,
@@ -394,6 +424,9 @@ class ProfilerWorkerTests(unittest.TestCase):
             )
             with (
                 self.subTest(message=message),
+                mock.patch.object(worker.os, "geteuid", return_value=1000),
+                mock.patch.object(worker.os, "getegid", return_value=1000),
+                mock.patch.object(worker, "_prepare_runtime_directories"),
                 mock.patch.object(
                     worker, "_sha256_file", side_effect=self._hash_side_effect
                 ),
@@ -401,6 +434,43 @@ class ProfilerWorkerTests(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, message),
             ):
                 worker.verify_toolchain()
+
+    def test_toolchain_rejects_root_runtime_before_mctracer(self) -> None:
+        with (
+            mock.patch.object(worker.os, "geteuid", return_value=0),
+            mock.patch.object(worker.os, "getegid", return_value=0),
+            mock.patch.object(worker, "_sha256_file") as hash_file,
+            mock.patch.object(worker.subprocess, "run") as run,
+            self.assertRaisesRegex(
+                ValueError, "exact non-root runtime user 1000:1000"
+            ),
+        ):
+            worker.verify_toolchain()
+        hash_file.assert_not_called()
+        run.assert_not_called()
+
+    def test_runtime_directories_are_private_and_owned_by_nonroot_user(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            home = root / "profile-home"
+            cache = root / "triton-cache"
+            uid = os.geteuid()
+            gid = os.getegid()
+            with (
+                mock.patch.object(worker, "PROFILE_TMPDIR", str(root)),
+                mock.patch.object(worker, "PROFILE_HOME", str(home)),
+                mock.patch.object(worker, "PROFILE_TRITON_CACHE_DIR", str(cache)),
+                mock.patch.object(worker, "PROFILER_IMAGE_UID", uid),
+                mock.patch.object(worker, "PROFILER_IMAGE_GID", gid),
+            ):
+                worker._prepare_runtime_directories()
+                self.assertEqual(stat.S_IMODE(home.stat().st_mode), 0o700)
+                self.assertEqual(stat.S_IMODE(cache.stat().st_mode), 0o700)
+                self.assertEqual((home.stat().st_uid, home.stat().st_gid), (uid, gid))
+
+                home.chmod(0o755)
+                with self.assertRaisesRegex(ValueError, "private runtime-user-owned"):
+                    worker._prepare_runtime_directories()
 
     def test_strict_scalars_files_and_canonical_json_fail_closed(self) -> None:
         self.assertEqual(worker._strict_token("safe:value", "field"), "safe:value")
@@ -981,6 +1051,7 @@ class ProfilerWorkerTests(unittest.TestCase):
             "file_count": 1,
         }
         with (
+            mock.patch.object(worker, "_prepare_runtime_directories"),
             mock.patch.object(Path, "mkdir"),
             mock.patch.object(
                 worker, "_validate_request", return_value=(request, b"candidate")
@@ -1001,6 +1072,7 @@ class ProfilerWorkerTests(unittest.TestCase):
         self.assertEqual(write_outcome.call_args.kwargs["status"], "SUCCESS")
 
         with (
+            mock.patch.object(worker, "_prepare_runtime_directories"),
             mock.patch.object(Path, "mkdir"),
             mock.patch.object(
                 worker, "_validate_request", return_value=(request, b"candidate")

@@ -65,6 +65,8 @@ from .profiler_contract import (
     PROFILE_WARMUP_TIMEOUT_SECONDS,
     PROFILE_WORKER_OUTPUT_SCHEMA_VERSION,
     PROFILER_BUILD_PROFILE_DIGEST,
+    PROFILER_IMAGE_GID,
+    PROFILER_IMAGE_UID,
     PROFILER_RECIPES,
     PROFILER_WORKER_REVISION,
 )
@@ -266,9 +268,53 @@ def _sha256_file(path: Path, *, expected: str, field: str) -> dict[str, Any]:
     return {"path": str(resolved), "sha256": digest}
 
 
+def _require_worker_runtime_user() -> None:
+    if os.geteuid() != PROFILER_IMAGE_UID or os.getegid() != PROFILER_IMAGE_GID:
+        raise ValueError(
+            "profiler toolchain verification requires the exact non-root "
+            f"runtime user {PROFILER_IMAGE_UID}:{PROFILER_IMAGE_GID}"
+        )
+
+
+def _prepare_runtime_directories() -> None:
+    _require_worker_runtime_user()
+    root = Path(PROFILE_TMPDIR)
+    if (
+        not root.is_absolute()
+        or root.is_symlink()
+        or root.resolve() != root
+        or not root.is_dir()
+    ):
+        raise ValueError("profiler tmp root is not the fixed canonical directory")
+    for value, field in (
+        (PROFILE_HOME, "profiler HOME"),
+        (PROFILE_TRITON_CACHE_DIR, "profiler Triton cache"),
+    ):
+        path = Path(value)
+        if not path.is_absolute() or path.parent != root or path.is_symlink():
+            raise ValueError(f"{field} path differs from the fixed contract")
+        try:
+            path.mkdir(mode=0o700, parents=False, exist_ok=True)
+            metadata = path.lstat()
+        except OSError as exc:
+            raise ValueError(f"{field} is not writable by the runtime user") from exc
+        if (
+            path.is_symlink()
+            or not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_gid != os.getegid()
+        ):
+            raise ValueError(
+                f"{field} must be a private runtime-user-owned directory"
+            )
+
+
 def verify_toolchain() -> dict[str, Any]:
     """Validate exact image binaries, libraries, and mcTracer help semantics."""
 
+    _require_worker_runtime_user()
+    _prepare_runtime_directories()
     tools = {
         "mctracer": {
             **_sha256_file(
@@ -861,8 +907,7 @@ def run_worker(args: argparse.Namespace) -> int:
             "TRITON_CACHE_DIR": PROFILE_TRITON_CACHE_DIR,
         }
     )
-    Path(PROFILE_HOME).mkdir(mode=0o700, parents=False, exist_ok=True)
-    Path(PROFILE_TRITON_CACHE_DIR).mkdir(mode=0o700, parents=False, exist_ok=True)
+    _prepare_runtime_directories()
     request, candidate = _validate_request(args)
     _write_outcome(
         request,

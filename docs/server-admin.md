@@ -188,14 +188,17 @@ docker image inspect "$PROFILER_LOCAL_TAG" >profiler-image-local-inspect.json
 本地 native build 阶段不得登录或推送 GHCR。必须先验证 image platform、OCI
 revision、`USER 1000:1000`、entrypoint、`WORKDIR /output`，容器内 entrypoint 的
 mode/owner 必须为 `555 0:0`，并以 `--pull=never` 运行 `verify-toolchain`。其 worker
-build digest 必须仍为 A2 冻结值
-`sha256:56dbc236e1757fcb46822ee5d5e2db10ce60014bb1a2cdf235d6b001c55bae8a`。
+runtime 必须精确使用 `--user 1000:1000`，并挂载
+`/tmp:rw,nosuid,nodev,size=64m,mode=700,uid=1000,gid=1000`。build digest 必须为
+A4 冻结值
+`sha256:a122359bc9c7d13356587964f51a4bdb68676f0841856d005cb380f1bd5facc7`。
 
-`SOURCE_REVISION` 必须是独立的 native-builder 修正提交 A3；不得从已知身份耦合
-错误的 `e19cecc` 或 classic builder 无法解析的 A2 `559e8e9` 构建，也不得 amend
-任何旧提交。构建前确认该提交不修改 `kernel.py`，且工作树干净。A3 Dockerfile
-使用普通 `COPY`，随后在同一受信构建步骤中执行 `chmod 0555` 并以 `stat` 精确验证
-`555 0:0`；任何验证失败均停止构建。
+`SOURCE_REVISION` 必须是独立的 runtime-identity 修正提交 A4；不得从已知身份耦合
+错误的 `e19cecc`、classic builder 无法解析的 A2 `559e8e9`，或仅完成root构建探针
+但runtime资格失败的 A3 `1339fcc` 构建，也不得 amend任何旧提交。构建前确认该提交
+不修改 `kernel.py`，且工作树干净。A4 Dockerfile 使用普通 `COPY`，随后执行
+`chmod 0555`并验证`555 0:0`；toolchain probe必须位于`USER 1000:1000`之后，并先
+证明当前euid/egid和私有HOME均正确。任何验证失败均停止构建。
 
 把 build profile digest、build 输出的 RepoDigest、source commit、base RepoDigest、
 image ID、worker revision、mcTracer 与两个 MetaX 库 hash 归档。提交 B 只能把该精确

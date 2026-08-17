@@ -30,7 +30,10 @@ deployment authority merely because it uses the same candidate and device.
    isolation. Its digest excludes both the activation bit and final profiler
    RepoDigest, and is the only profile identity echoed by the worker. The host
    activation profile binds that build digest to `active` and the final exact
-   RepoDigest. The image never claims to know its own registry identity.
+   RepoDigest. The image never claims to know its own registry identity. The
+   runtime user is exactly `1000:1000`; its private `/tmp` tmpfs is mode `0700`
+   and explicitly owned by the same UID/GID. Neither value is configurable for
+   profiling.
 3. The build submission retains an all-zero image digest sentinel and
    `active=false`.
    Every production profiling launch rejects this state before Docker. Submit
@@ -96,16 +99,20 @@ deployment authority merely because it uses the same candidate and device.
   restrictions, inactive pre-Docker rejection, V2 host evidence, Campaign
   budget/lease/failure semantics, the A-to-B identity transition, aggregate
   64 MiB enforcement, and explicit soak identity.
-- A clean Linux/amd64 build from the independent native-builder correction
-  Submit A3 is pushed using a temporary Docker credential directory. Submit B
+- A clean Linux/amd64 build from the independent runtime-identity correction
+  Submit A4 is pushed using a temporary Docker credential directory. Submit B
   pins the returned RepoDigest and is deployed through the normal Admin update
   path. The classic builder is selected explicitly with `DOCKER_BUILDKIT=0`.
 - The superseded `e19cecc` Submit A must not be built: it coupled activation
   state to the worker echo. Submit A2 `559e8e9` fixed that identity but its
   `COPY --chmod` instruction cannot be parsed by the reviewed Docker 28.2.2
-  classic builder. Submit A3 changes only the reviewed image assembly and
-  documentation/tests; it is never an amend or an in-place server workaround.
-  Its worker build profile digest remains byte-for-byte identical to A2.
+  classic builder. Submit A3 `1339fcc` fixed native image assembly, but its
+  build-time toolchain probe ran as root and its runtime `0700` tmpfs remained
+  root-owned; the resulting image failed non-root runtime qualification and was
+  not pushed. Submit A4 binds runtime UID/GID and tmpfs ownership into a new
+  build profile, upgrades the worker identity, and runs the build-time probe
+  only after `USER 1000:1000`. It is never an amend or an in-place server
+  workaround.
 - The first trusted server action is one image-doctor Campaign. Soak does not
   begin until its compile manifest and hardware mctx archive both pass. Any
   canary fix produces a new image and activation commit.

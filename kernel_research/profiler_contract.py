@@ -30,7 +30,7 @@ PROFILER_PLATFORM = "linux/amd64"
 # activation bit below.  Host launchers check the bit before invoking Docker.
 PROFILER_IMAGE = PROFILER_IMAGE_REPOSITORY + "@sha256:" + ("0" * 64)
 PROFILER_ACTIVE = False
-PROFILER_WORKER_REVISION = "metax-bounded-profiler-worker-v1"
+PROFILER_WORKER_REVISION = "metax-bounded-profiler-worker-v2"
 PROFILER_ENTRYPOINT = "/opt/kernel-research/bin/bounded-profiler"
 PROFILER_IMAGE_UID = 1000
 PROFILER_IMAGE_GID = 1000
@@ -87,7 +87,12 @@ PROFILE_PID_LIMIT = 128
 PROFILE_RESOURCE_ID = "gpu1"
 PROFILE_LEASE_TTL_SECONDS = PROFILE_TIMEOUT_SECONDS + 30.0
 PROFILE_CANARY_LEASE_TTL_SECONDS = PROFILE_CANARY_WALL_SECONDS + 30.0
-PROFILE_DOCKER_TMPFS = "/tmp:rw,nosuid,nodev,size=64m,mode=700"
+PROFILE_DOCKER_TMPFS_MODE = "0700"
+PROFILE_DOCKER_TMPFS_SIZE = "64m"
+PROFILE_DOCKER_TMPFS = (
+    f"/tmp:rw,nosuid,nodev,size={PROFILE_DOCKER_TMPFS_SIZE},mode=700,"
+    f"uid={PROFILER_IMAGE_UID},gid={PROFILER_IMAGE_GID}"
+)
 PROFILE_GPU_DEVICE_PATHS = (
     "/dev/mxcd",
     "/dev/dri/card2",
@@ -153,7 +158,8 @@ def profiler_build_profile_snapshot() -> dict[str, Any]:
         "image_user": {
             "uid": PROFILER_IMAGE_UID,
             "gid": PROFILER_IMAGE_GID,
-            "runtime_override": "trusted-controller-config",
+            "runtime_binding": "exact",
+            "host_process_binding": "exact",
         },
         "toolchain": {
             "mctracer": {
@@ -232,6 +238,12 @@ def profiler_build_profile_snapshot() -> dict[str, Any]:
             "cap_drop": "ALL",
             "no_new_privileges": True,
             "tmpfs": PROFILE_DOCKER_TMPFS,
+            "tmpfs_owner": {
+                "uid": PROFILER_IMAGE_UID,
+                "gid": PROFILER_IMAGE_GID,
+                "mode": PROFILE_DOCKER_TMPFS_MODE,
+                "size": PROFILE_DOCKER_TMPFS_SIZE,
+            },
         },
         "resource": {
             "resource_id": PROFILE_RESOURCE_ID,

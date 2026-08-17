@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+from dataclasses import replace
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -614,6 +615,14 @@ _DEFAULT_SUBJECT_CAMPAIGN = object()
 
 class BoundedProfilingTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._profile_euid = mock.patch.object(
+            profiling, "_HOST_EFFECTIVE_UID", return_value=1000
+        )
+        self._profile_egid = mock.patch.object(
+            profiling, "_HOST_EFFECTIVE_GID", return_value=1000
+        )
+        self._profile_euid.start()
+        self._profile_egid.start()
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
         self.state = self.root / "state"
@@ -683,6 +692,8 @@ class BoundedProfilingTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+        self._profile_egid.stop()
+        self._profile_euid.stop()
 
     def _record(
         self,
@@ -863,6 +874,17 @@ class BoundedProfilingTests(unittest.TestCase):
         self.assertIn("--network=none", argv)
         self.assertIn("--read-only", argv)
         self.assertIn("no-new-privileges", argv)
+        self.assertEqual(
+            argv[argv.index("--user") + 1],
+            f"{profiling.PROFILER_IMAGE_UID}:{profiling.PROFILER_IMAGE_GID}",
+        )
+        self.assertEqual(
+            argv[argv.index("--tmpfs") + 1],
+            profiling.PROFILE_DOCKER_TMPFS,
+        )
+        self.assertIn("mode=700", profiling.PROFILE_DOCKER_TMPFS)
+        self.assertIn("uid=1000", profiling.PROFILE_DOCKER_TMPFS)
+        self.assertIn("gid=1000", profiling.PROFILE_DOCKER_TMPFS)
         self.assertNotIn("--device", argv)
         self.assertEqual(kwargs["timeout_sec"], PROFILE_TIMEOUT_SECONDS)
         self.assertEqual(kwargs["max_output_bytes"], PROFILE_OUTPUT_LIMIT_BYTES)
@@ -925,6 +947,52 @@ class BoundedProfilingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "terminal budget intent"):
             self._collect(replay, _FakeGate())
         self.assertEqual(replay.calls, [])
+
+    def test_runtime_user_drift_fails_before_campaign_or_docker(self):
+        runner = _FakeProfileRunner()
+        for field in ("container_uid", "container_gid"):
+            with self.subTest(field=field):
+                config = replace(self.config, **{field: 1001})
+                with self.assertRaisesRegex(ValueError, "exact runtime user 1000:1000"):
+                    run_bounded_profile(
+                        config,
+                        campaign_database=self.campaign_database,
+                        campaign_id=self.campaign_id,
+                        gate_id="production",
+                        experiment_uid=self.uid,
+                        namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                        execution_environment_digest=self.environment.digest,
+                        recipe_id="metax-compile-metadata-v1",
+                        runner=runner,
+                        _gate_factory=lambda store, gate_id, collector: _FakeGate(),
+                    )
+                with self.assertRaisesRegex(ValueError, "exact runtime user 1000:1000"):
+                    profiling.run_profile_image_doctor(
+                        config,
+                        campaign_database=self.campaign_database,
+                        campaign_id="runtime-user-canary",
+                        runner=runner,
+                    )
+        with (
+            mock.patch.object(profiling, "_HOST_EFFECTIVE_UID", return_value=0),
+            self.assertRaisesRegex(
+                ValueError, "trusted host process user 1000:1000"
+            ),
+        ):
+            run_bounded_profile(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id=self.campaign_id,
+                gate_id="production",
+                experiment_uid=self.uid,
+                namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                execution_environment_digest=self.environment.digest,
+                recipe_id="metax-compile-metadata-v1",
+                runner=runner,
+                _gate_factory=lambda store, gate_id, collector: _FakeGate(),
+            )
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self._campaign_rows("budget_actions"), [])
 
     def test_hardware_recipe_requires_quick_and_mounts_only_exact_devices(self):
         self._record(stage="quick", suite="quick")
