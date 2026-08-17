@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted; image profile inactive until a reviewed RepoDigest is published.
+Accepted; the reviewed A4 image is pinned and active, pending the trusted
+server canary and a fresh qualification soak.
 
 ## Context
 
@@ -99,10 +100,14 @@ deployment authority merely because it uses the same candidate and device.
   restrictions, inactive pre-Docker rejection, V2 host evidence, Campaign
   budget/lease/failure semantics, the A-to-B identity transition, aggregate
   64 MiB enforcement, and explicit soak identity.
-- A clean Linux/amd64 build from the independent runtime-identity correction
-  Submit A4 is pushed using a temporary Docker credential directory. Submit B
-  pins the returned RepoDigest and is deployed through the normal Admin update
-  path. The classic builder is selected explicitly with `DOCKER_BUILDKIT=0`.
+- The clean Linux/amd64 build from independent runtime-identity correction A4
+  `92469041b4786d970ef93c05c14ef09ece8628a2` was built with the classic builder,
+  pushed using a temporary Docker credential directory, pulled by digest, and
+  requalified as the same image ID. Submit B pins
+  `ghcr.io/masechen/autoresearch-metax-profiler@sha256:9d5516991a89945e7ad008c33ee847667831f5f7fc39fccf7030745f4ffa9acb`
+  without changing the A4 build profile digest
+  `sha256:a122359bc9c7d13356587964f51a4bdb68676f0841856d005cb380f1bd5facc7`.
+  Deployment still uses the normal Admin update path.
 - The superseded `e19cecc` Submit A must not be built: it coupled activation
   state to the worker echo. Submit A2 `559e8e9` fixed that identity but its
   `COPY --chmod` instruction cannot be parsed by the reviewed Docker 28.2.2

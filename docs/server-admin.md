@@ -161,7 +161,19 @@ Profiler 使用独立私有镜像，不得在服务器上把 evaluator tag 临�
 提交 A 的 activation profile 固定为 `active=false`；它只提供可审核的
 Dockerfile、worker、host 接口和测试。build profile 不含 activation 位或最终镜像
 RepoDigest，因此提交 A 构建的 worker 在提交 B 激活后仍能回显同一个 build digest。
-先从提交 A 的干净 Linux/amd64 工作树记录身份并构建：
+已完成的 A4 构建身份为：
+
+- source commit：`92469041b4786d970ef93c05c14ef09ece8628a2`
+- image ID：`sha256:d6b214ade63ba37db7bea8c97f2d2e5c296178ce444654fc8af14566b99800e0`
+- RepoDigest：`ghcr.io/masechen/autoresearch-metax-profiler@sha256:9d5516991a89945e7ad008c33ee847667831f5f7fc39fccf7030745f4ffa9acb`
+- build profile digest：`sha256:a122359bc9c7d13356587964f51a4bdb68676f0841856d005cb380f1bd5facc7`
+- activation profile digest：`sha256:bfd57223ce8bac17fdb38c63c29df8400b9bf3dc8f3d280530f62542b8435e13`
+- 服务器证据：`/home/mx/autoresearch-evidence/profiler-image-a4-20260817T080230Z`
+- 最终证据清单 SHA-256：`7013e3d4ab34468f4fe8b6eee164e78206e379f4bc0ff948bbed937cf480a1e8`
+
+该证据包的最终 `sha256sum -c SHA256SUMS` 为成功；旧清单作为
+`SHA256SUMS.pre-quiescence` 保留。以下命令是可重复构建记录，不应在部署 Submit B
+时重新构建镜像：
 
 ```bash
 export SOURCE_REVISION="$(git rev-parse HEAD)"

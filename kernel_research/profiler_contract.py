@@ -25,11 +25,14 @@ PROFILER_BASE_IMAGE = (
 )
 PROFILER_IMAGE_REPOSITORY = "ghcr.io/masechen/autoresearch-metax-profiler"
 PROFILER_PLATFORM = "linux/amd64"
-# Submit A is deliberately non-runnable.  Submit B must replace this sentinel
-# with the RepoDigest returned by the reviewed Linux/amd64 build and set the
-# activation bit below.  Host launchers check the bit before invoking Docker.
-PROFILER_IMAGE = PROFILER_IMAGE_REPOSITORY + "@sha256:" + ("0" * 64)
-PROFILER_ACTIVE = False
+# Submit B binds the independently reviewed A4 Linux/amd64 build to its exact
+# GHCR RepoDigest.  These two activation values are deliberately excluded from
+# the build profile echoed by the already-built worker.
+PROFILER_IMAGE = (
+    PROFILER_IMAGE_REPOSITORY
+    + "@sha256:9d5516991a89945e7ad008c33ee847667831f5f7fc39fccf7030745f4ffa9acb"
+)
+PROFILER_ACTIVE = True
 PROFILER_WORKER_REVISION = "metax-bounded-profiler-worker-v2"
 PROFILER_ENTRYPOINT = "/opt/kernel-research/bin/bounded-profiler"
 PROFILER_IMAGE_UID = 1000
@@ -288,7 +291,7 @@ PROFILER_ACTIVATION_PROFILE_DIGEST = canonical_sha256(
 
 
 def require_active_profiler() -> None:
-    """Fail before Docker while Submit A's profile is intentionally inactive."""
+    """Fail before Docker unless an exact reviewed RepoDigest is active."""
 
     if not PROFILER_ACTIVE:
         raise ValueError(

@@ -1809,7 +1809,14 @@ class BoundedProfilingTests(unittest.TestCase):
     def test_inactive_profile_rejects_production_before_docker(self):
         self._record()
         runner = _FakeProfileRunner()
-        with self.assertRaisesRegex(ValueError, "profiler image is inactive"):
+        with (
+            mock.patch.object(
+                profiling,
+                "require_active_profiler",
+                side_effect=ValueError("profiler image is inactive"),
+            ) as activation_gate,
+            self.assertRaisesRegex(ValueError, "profiler image is inactive"),
+        ):
             run_bounded_profile(
                 self.config,
                 campaign_database=self.campaign_database,
@@ -1820,6 +1827,7 @@ class BoundedProfilingTests(unittest.TestCase):
                 execution_environment_digest=self.environment.digest,
                 recipe_id="metax-compile-metadata-v1",
             )
+        activation_gate.assert_called_once_with()
         self.assertEqual(runner.calls, [])
 
     def test_image_doctor_cli_exposes_no_runtime_profiler_controls(self):

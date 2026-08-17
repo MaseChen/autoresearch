@@ -46,16 +46,25 @@ class ProfilerContractTests(unittest.TestCase):
         "sha256:a122359bc9c7d13356587964f51a4bdb"
         "68676f0841856d005cb380f1bd5facc7"
     )
+    ACTIVATED_IMAGE = (
+        "ghcr.io/masechen/autoresearch-metax-profiler@sha256:"
+        "9d5516991a89945e7ad008c33ee847667831f5f7fc39fccf7030745f4ffa9acb"
+    )
+    ACTIVATION_PROFILE_DIGEST = (
+        "sha256:bfd57223ce8bac17fdb38c63c29df840"
+        "0b9bf3dc8f3d280530f62542b8435e13"
+    )
 
-    def test_submit_a_profile_is_exact_and_inactive(self) -> None:
+    def test_submit_b_profile_is_exact_and_active(self) -> None:
         build = profiler_build_profile_snapshot()
         activation = profiler_activation_profile_snapshot()
-        self.assertFalse(PROFILER_ACTIVE)
+        self.assertTrue(PROFILER_ACTIVE)
         self.assertEqual(build["base_image"], PROFILER_BASE_IMAGE)
         self.assertNotIn("active", build)
         self.assertNotIn("profiler_image", build)
-        self.assertEqual(activation["profiler_image"], PROFILER_IMAGE)
-        self.assertFalse(activation["active"])
+        self.assertEqual(PROFILER_IMAGE, self.ACTIVATED_IMAGE)
+        self.assertEqual(activation["profiler_image"], self.ACTIVATED_IMAGE)
+        self.assertTrue(activation["active"])
         self.assertTrue(PROFILER_IMAGE.startswith(PROFILER_IMAGE_REPOSITORY))
         self.assertEqual(build["worker_revision"], PROFILER_WORKER_REVISION)
         self.assertEqual(
@@ -71,20 +80,22 @@ class ProfilerContractTests(unittest.TestCase):
             PROFILER_ACTIVATION_PROFILE_DIGEST,
             canonical_sha256(activation),
         )
-        with self.assertRaisesRegex(ValueError, "inactive"):
-            require_active_profiler()
+        self.assertEqual(
+            PROFILER_ACTIVATION_PROFILE_DIGEST,
+            self.ACTIVATION_PROFILE_DIGEST,
+        )
+        require_active_profiler()
 
     def test_a4_worker_echo_survives_activation_only_change(self) -> None:
         request = ProfilerWorkerTests._request()
         commit_a_echo = request.echo()
         commit_a_build = profiler_build_profile_snapshot()
-        final_image = PROFILER_IMAGE_REPOSITORY + "@sha256:" + "a" * 64
-        with (
-            mock.patch.object(contract, "PROFILER_ACTIVE", True),
-            mock.patch.object(contract, "PROFILER_IMAGE", final_image),
-        ):
-            commit_b_build = profiler_build_profile_snapshot()
-            commit_b_activation = profiler_activation_profile_snapshot()
+        commit_a_activation = profiler_activation_profile_snapshot(
+            active=False,
+            profiler_image=PROFILER_IMAGE_REPOSITORY + "@sha256:" + "0" * 64,
+        )
+        commit_b_build = profiler_build_profile_snapshot()
+        commit_b_activation = profiler_activation_profile_snapshot()
         self.assertEqual(commit_b_build, commit_a_build)
         self.assertEqual(
             canonical_sha256(commit_b_build),
@@ -102,7 +113,7 @@ class ProfilerContractTests(unittest.TestCase):
         self.assertNotIn("active", commit_a_echo)
         self.assertNotIn("profiler_activation_profile_digest", commit_a_echo)
         self.assertNotEqual(
-            canonical_sha256(profiler_activation_profile_snapshot()),
+            canonical_sha256(commit_a_activation),
             canonical_sha256(commit_b_activation),
         )
         subject = host._ProfileSubject(
@@ -119,21 +130,13 @@ class ProfilerContractTests(unittest.TestCase):
             candidate_object_path=Path("/state/object"),
             candidate_content_sha256=request.candidate_sha256,
         )
-        with (
-            mock.patch.object(host, "PROFILER_IMAGE", final_image),
-            mock.patch.object(
-                host,
-                "PROFILER_ACTIVATION_PROFILE_DIGEST",
-                canonical_sha256(commit_b_activation),
-            ),
-        ):
-            commit_b_expected = host._expected_worker_echo(
-                recipe=host.BUILTIN_PROFILE_RECIPES[request.recipe_id],
-                subject=subject,
-                invariant_digest=request.soak_invariant_digest,
-                budget_action_key=request.budget_action_key,
-                lease=None,
-            )
+        commit_b_expected = host._expected_worker_echo(
+            recipe=host.BUILTIN_PROFILE_RECIPES[request.recipe_id],
+            subject=subject,
+            invariant_digest=request.soak_invariant_digest,
+            budget_action_key=request.budget_action_key,
+            lease=None,
+        )
         self.assertEqual(commit_b_expected, commit_a_echo)
 
     def test_build_profile_freezes_every_worker_and_runtime_axis(self) -> None:
