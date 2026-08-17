@@ -53,6 +53,7 @@ from .profiler_contract import (
     MCTRACER_PATH,
     MCTRACER_SHA256,
     MCTRACER_VERSION,
+    METAX_TOOLCHAIN_VERSION,
     MCTOOLS_EXT_LITE_PATH,
     MCTOOLS_EXT_LITE_SHA256,
     MCTOOLS_EXT_PATH,
@@ -61,12 +62,17 @@ from .profiler_contract import (
     PROFILE_CANDIDATE_LIMIT_BYTES,
     PROFILE_COLLECTION_SCHEMA_VERSION,
     PROFILE_CANARY_GPU_SECONDS,
+    PROFILE_CANARY_RAW_TRACE_TOTAL_LIMIT_BYTES,
+    PROFILE_CANARY_LEASE_TTL_SECONDS,
     PROFILE_CANARY_WALL_SECONDS,
     PROFILE_CPU_LIMIT,
+    PROFILE_DOCKER_TMPFS,
+    PROFILE_GPU_DEVICE_PATHS,
     PROFILE_LEASE_TTL_SECONDS,
     PROFILE_MEMORY_LIMIT,
     PROFILE_OUTCOME_CONTAINER_PATH,
     PROFILE_OUTCOME_LIMIT_BYTES,
+    PROFILE_OUTPUT_CONTAINER_DIRECTORY,
     PROFILE_OUTPUT_LIMIT_BYTES,
     PROFILE_PID_LIMIT,
     PROFILE_RAW_TRACE_LIMIT_BYTES,
@@ -77,9 +83,11 @@ from .profiler_contract import (
     PROFILE_TRACE_CONTAINER_PATH,
     PROFILE_UNAVAILABLE_REASON_CODES,
     PROFILER_ACTIVE,
+    PROFILER_ACTIVATION_PROFILE_DIGEST,
+    PROFILER_BUILD_PROFILE_DIGEST,
     PROFILER_ENTRYPOINT,
     PROFILER_IMAGE,
-    PROFILER_PROFILE_DIGEST,
+    PROFILER_PLATFORM,
     PROFILER_RECIPES,
     PROFILER_WORKER_REVISION,
     require_active_profiler,
@@ -92,6 +100,8 @@ DEFAULT_OUTPUT_LIMIT_BYTES = 64 * 1024
 
 PROFILE_COLLECTION_API_VERSION = PROFILE_COLLECTION_SCHEMA_VERSION
 _PROFILE_BUDGET_CEILING_MS = int(PROFILE_TIMEOUT_SECONDS * 1000)
+if tuple(str(path) for path in GPU1_DEVICES) != PROFILE_GPU_DEVICE_PATHS:
+    raise RuntimeError("profiler GPU device contract drifted")
 
 _HISTORY_SCHEMA_VERSION = 3
 _PROFILE_REASON_TEXT = {
@@ -891,6 +901,8 @@ def _profile_argv(
         "run",
         "--rm",
         "--pull=never",
+        "--platform",
+        PROFILER_PLATFORM,
         "--name",
         container_name,
         "--label",
@@ -914,7 +926,7 @@ def _profile_argv(
         "--cpus",
         str(PROFILE_CPU_LIMIT),
         "--tmpfs",
-        "/tmp:rw,nosuid,nodev,size=64m,mode=700",
+        PROFILE_DOCKER_TMPFS,
         "--mount",
         _docker_mount(
             subject.candidate_object_path,
@@ -922,7 +934,11 @@ def _profile_argv(
             readonly=True,
         ),
         "--mount",
-        _docker_mount(output_directory, "/output", readonly=False),
+        _docker_mount(
+            output_directory,
+            PROFILE_OUTPUT_CONTAINER_DIRECTORY,
+            readonly=False,
+        ),
     ]
     if recipe.requires_gpu:
         for device in config.gpu_devices:
@@ -1055,6 +1071,7 @@ def _toolchain_summary(result: Mapping[str, Any]) -> dict[str, Any]:
     if set(toolchain) != {
         "schema_version",
         "worker_revision",
+        "profiler_build_profile_digest",
         "tools",
         "help_contract",
         "digest",
@@ -1063,6 +1080,8 @@ def _toolchain_summary(result: Mapping[str, Any]) -> dict[str, Any]:
     if (
         toolchain["schema_version"] != 1
         or toolchain["worker_revision"] != PROFILER_WORKER_REVISION
+        or toolchain["profiler_build_profile_digest"]
+        != PROFILER_BUILD_PROFILE_DIGEST
     ):
         raise ValueError("profiler toolchain descriptor identity drifted")
     tools = toolchain["tools"]
@@ -1080,10 +1099,12 @@ def _toolchain_summary(result: Mapping[str, Any]) -> dict[str, Any]:
         },
         "libmcToolsExt_lite.so": {
             "path": MCTOOLS_EXT_LITE_PATH,
+            "version": METAX_TOOLCHAIN_VERSION,
             "sha256": MCTOOLS_EXT_LITE_SHA256,
         },
         "libmcToolsExt.so": {
             "path": MCTOOLS_EXT_PATH,
+            "version": METAX_TOOLCHAIN_VERSION,
             "sha256": MCTOOLS_EXT_SHA256,
         },
     }
@@ -1288,7 +1309,11 @@ def _profile_action_key(
 ) -> str:
     digest = canonical_sha256(
         {
-            "kind": "bounded_profile_action_v1",
+            "kind": "bounded_profile_action_v2",
+            "profiler_build_profile_digest": PROFILER_BUILD_PROFILE_DIGEST,
+            "profiler_activation_profile_digest": (
+                PROFILER_ACTIVATION_PROFILE_DIGEST
+            ),
             "campaign_id": campaign_id,
             "gate_id": gate_id,
             "recipe_id": recipe.recipe_id,
@@ -1719,8 +1744,9 @@ def run_bounded_profile(
                 expected_result: dict[str, Any] = {
                     "schema_version": PROFILE_COLLECTION_API_VERSION,
                     "worker_revision": PROFILER_WORKER_REVISION,
-                    "profiler_profile_digest": PROFILER_PROFILE_DIGEST,
-                    "profiler_image": PROFILER_IMAGE,
+                    "profiler_build_profile_digest": (
+                        PROFILER_BUILD_PROFILE_DIGEST
+                    ),
                     "recipe_id": recipe.recipe_id,
                     "case_id": recipe.case_id,
                     "experiment_uid": subject.experiment_uid,
@@ -1921,7 +1947,12 @@ def run_bounded_profile(
                     "recipe_id": recipe.recipe_id,
                     "case_id": recipe.case_id,
                     "profiler_image": PROFILER_IMAGE,
-                    "profiler_profile_digest": PROFILER_PROFILE_DIGEST,
+                    "profiler_build_profile_digest": (
+                        PROFILER_BUILD_PROFILE_DIGEST
+                    ),
+                    "profiler_activation_profile_digest": (
+                        PROFILER_ACTIVATION_PROFILE_DIGEST
+                    ),
                     "worker_revision": PROFILER_WORKER_REVISION,
                     "campaign_id": subject.campaign_id,
                     "run_id": subject.run_id,
@@ -1977,7 +2008,12 @@ def run_bounded_profile(
                 "recipe_id": recipe.recipe_id,
                 "case_id": recipe.case_id,
                 "profiler_image": PROFILER_IMAGE,
-                "profiler_profile_digest": PROFILER_PROFILE_DIGEST,
+                "profiler_build_profile_digest": (
+                    PROFILER_BUILD_PROFILE_DIGEST
+                ),
+                "profiler_activation_profile_digest": (
+                    PROFILER_ACTIVATION_PROFILE_DIGEST
+                ),
                 "worker_revision": PROFILER_WORKER_REVISION,
                 "campaign_id": subject.campaign_id,
                 "run_id": subject.run_id,
@@ -2257,7 +2293,10 @@ def _canary_snapshot(
         "candidate_sha256": subject.candidate_content_sha256,
         "baseline_ref": baseline_ref.to_dict(),
         "profiler_image": PROFILER_IMAGE,
-        "profiler_profile_digest": PROFILER_PROFILE_DIGEST,
+        "profiler_build_profile_digest": PROFILER_BUILD_PROFILE_DIGEST,
+        "profiler_activation_profile_digest": (
+            PROFILER_ACTIVATION_PROFILE_DIGEST
+        ),
         "worker_revision": PROFILER_WORKER_REVISION,
         "recipes": list(PROFILE_RECIPE_IDS),
         "binding": dict(binding),
@@ -2323,8 +2362,7 @@ def _expected_worker_echo(
     result: dict[str, Any] = {
         "schema_version": PROFILE_COLLECTION_API_VERSION,
         "worker_revision": PROFILER_WORKER_REVISION,
-        "profiler_profile_digest": PROFILER_PROFILE_DIGEST,
-        "profiler_image": PROFILER_IMAGE,
+        "profiler_build_profile_digest": PROFILER_BUILD_PROFILE_DIGEST,
         "recipe_id": recipe.recipe_id,
         "case_id": recipe.case_id,
         "experiment_uid": subject.experiment_uid,
@@ -2355,7 +2393,16 @@ def _execute_canary_recipe(
     budget_action_key: str,
     lease: ResourceLease | None,
     container_suffix: str,
+    timeout_seconds: float,
 ) -> dict[str, Any]:
+    if (
+        not isinstance(timeout_seconds, (int, float))
+        or isinstance(timeout_seconds, bool)
+        or not math.isfinite(float(timeout_seconds))
+        or float(timeout_seconds) <= 0
+        or float(timeout_seconds) > PROFILE_TIMEOUT_SECONDS
+    ):
+        raise ValueError("profile canary timeout is outside the trusted bound")
     with tempfile.TemporaryDirectory(prefix="kar-profile-canary-") as temporary:
         output_directory = Path(temporary).resolve()
         output_directory.chmod(0o700)
@@ -2381,7 +2428,7 @@ def _execute_canary_recipe(
             command = runner.run(
                 argv,
                 input_text=None,
-                timeout_sec=PROFILE_TIMEOUT_SECONDS,
+                timeout_sec=float(timeout_seconds),
                 max_output_bytes=PROFILE_OUTPUT_LIMIT_BYTES,
                 container_name=container_name,
                 docker_binary=config.docker_binary,
@@ -2551,7 +2598,12 @@ def run_profile_image_doctor(
                         initial_baseline_ref=baseline_ref,
                         initial_policy_snapshot={
                             "kind": "PROFILE_IMAGE_CANARY",
-                            "profiler_profile_digest": PROFILER_PROFILE_DIGEST,
+                            "profiler_build_profile_digest": (
+                                PROFILER_BUILD_PROFILE_DIGEST
+                            ),
+                            "profiler_activation_profile_digest": (
+                                PROFILER_ACTIVATION_PROFILE_DIGEST
+                            ),
                         },
                         allow_staged_lineage=False,
                     )
@@ -2579,7 +2631,12 @@ def run_profile_image_doctor(
                             "campaign_id": campaign_id,
                             "budget_action_key": action_key,
                             "profiler_image": PROFILER_IMAGE,
-                            "profiler_profile_digest": PROFILER_PROFILE_DIGEST,
+                            "profiler_build_profile_digest": (
+                                PROFILER_BUILD_PROFILE_DIGEST
+                            ),
+                            "profiler_activation_profile_digest": (
+                                PROFILER_ACTIVATION_PROFILE_DIGEST
+                            ),
                             "advisory_only": True,
                         }
                     if existing["status"] != "RESERVED":
@@ -2615,11 +2672,23 @@ def run_profile_image_doctor(
                 lease = store.acquire_resource(
                     campaign_id,
                     resource_id=PROFILE_RESOURCE_ID,
-                    ttl_seconds=PROFILE_LEASE_TTL_SECONDS,
+                    ttl_seconds=PROFILE_CANARY_LEASE_TTL_SECONDS,
                 )
                 try:
                     reports: list[dict[str, Any]] = []
                     for recipe_id in PROFILE_RECIPE_IDS:
+                        remaining_seconds = (
+                            PROFILE_CANARY_WALL_SECONDS
+                            - (time.monotonic() - started)
+                        )
+                        if remaining_seconds <= 0:
+                            raise _CanaryWorkerFailure(
+                                ValueError(
+                                    "profile image canary exhausted its wall budget "
+                                    "before Docker"
+                                ),
+                                known=True,
+                            )
                         confirmed, confirmed_ref, confirmed_binding = (
                             _current_deployment_profile_subject(
                                 config, campaign_id=campaign_id
@@ -2654,8 +2723,33 @@ def run_profile_image_doctor(
                             container_suffix=hashlib.sha256(
                                 f"{campaign_id}:{recipe_id}".encode("utf-8")
                             ).hexdigest()[:32],
+                            timeout_seconds=min(
+                                PROFILE_TIMEOUT_SECONDS, remaining_seconds
+                            ),
                         )
                         reports.append(report)
+                    raw_trace_total_bytes = sum(
+                        int(report["raw_trace"]["byte_size"])
+                        for report in reports
+                    )
+                    if (
+                        raw_trace_total_bytes
+                        > PROFILE_CANARY_RAW_TRACE_TOTAL_LIMIT_BYTES
+                    ):
+                        raise _CanaryWorkerFailure(
+                            ValueError(
+                                "profile image canary raw traces exceed the "
+                                "64 MiB aggregate limit"
+                            ),
+                            known=True,
+                        )
+                    if time.monotonic() - started > PROFILE_CANARY_WALL_SECONDS:
+                        raise _CanaryWorkerFailure(
+                            ValueError(
+                                "profile image canary exceeded its wall budget"
+                            ),
+                            known=True,
+                        )
                     confirmed, confirmed_ref, confirmed_binding = (
                         _current_deployment_profile_subject(
                             config, campaign_id=campaign_id
@@ -2686,8 +2780,14 @@ def run_profile_image_doctor(
                         "campaign_id": campaign_id,
                         "budget_action_key": action_key,
                         "profiler_image": PROFILER_IMAGE,
-                        "profiler_profile_digest": PROFILER_PROFILE_DIGEST,
+                        "profiler_build_profile_digest": (
+                            PROFILER_BUILD_PROFILE_DIGEST
+                        ),
+                        "profiler_activation_profile_digest": (
+                            PROFILER_ACTIVATION_PROFILE_DIGEST
+                        ),
                         "worker_revision": PROFILER_WORKER_REVISION,
+                        "raw_trace_total_bytes": raw_trace_total_bytes,
                         "subject": {
                             "experiment_uid": subject.experiment_uid,
                             "namespace_id": subject.namespace_id,
@@ -2786,8 +2886,9 @@ __all__ = [
     "PROFILE_DOCTOR_API_VERSION",
     "PROFILE_RECIPE_IDS",
     "PROFILER_ACTIVE",
+    "PROFILER_ACTIVATION_PROFILE_DIGEST",
+    "PROFILER_BUILD_PROFILE_DIGEST",
     "PROFILER_IMAGE",
-    "PROFILER_PROFILE_DIGEST",
     "PROFILER_WORKER_REVISION",
     "ProfileMetric",
     "ProfileRecipe",

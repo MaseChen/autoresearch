@@ -158,12 +158,19 @@ bootstrap 本身只产生证据，不修改 Git、配置或 deployment pin。上
 ## MetaX bounded profiler 镜像
 
 Profiler 使用独立私有镜像，不得在服务器上把 evaluator tag 临时当作 profiler。
-提交 A 的 profile 固定为 `active=false`；它只提供可审核的 Dockerfile、worker、host
-接口和测试。先从提交 A 的干净 Linux/amd64 工作树构建：
+提交 A 的 activation profile 固定为 `active=false`；它只提供可审核的
+Dockerfile、worker、host 接口和测试。build profile 不含 activation 位或最终镜像
+RepoDigest，因此提交 A 构建的 worker 在提交 B 激活后仍能回显同一个 build digest。
+先从提交 A 的干净 Linux/amd64 工作树记录身份并构建：
 
 ```bash
 export SOURCE_REVISION="$(git rev-parse HEAD)"
 export DOCKER_CONFIG="$(mktemp -d /tmp/autoresearch-ghcr.XXXXXX)"
+
+PYTHONPATH=. python -c '
+from kernel_research.profiler_contract import PROFILER_BUILD_PROFILE_DIGEST
+print(PROFILER_BUILD_PROFILE_DIGEST)
+' | tee profiler-build-profile-digest.txt
 
 printf '%s' "$GHCR_WRITE_TOKEN" | docker login ghcr.io \
   --username masechen --password-stdin
@@ -180,10 +187,17 @@ rm -rf "$DOCKER_CONFIG"
 unset DOCKER_CONFIG GHCR_WRITE_TOKEN
 ```
 
-把 build 输出的 RepoDigest、source commit、base RepoDigest、image ID、worker revision、
-mcTracer 与两个 MetaX 库 hash 归档。提交 B 只能把该精确
+`SOURCE_REVISION` 必须是独立的修正提交 A2；不得从已知身份耦合错误的
+`e19cecc` 构建，也不得 amend 该提交。构建前确认该提交不修改 `kernel.py`，且
+工作树干净。
+
+把 build profile digest、build 输出的 RepoDigest、source commit、base RepoDigest、
+image ID、worker revision、mcTracer 与两个 MetaX 库 hash 归档。提交 B 只能把该精确
 `ghcr.io/masechen/autoresearch-metax-profiler@sha256:...` 写入轻量 contract 并将
-`active=true`；不得同时修改 worker、recipe 或 `kernel.py`。
+`active=true`；不得同时修改 build profile 的任何字段、worker、recipe 或
+`kernel.py`。提交 B 的测试必须证明 build digest 与提交 A 归档值完全相同，同时
+activation digest 已绑定最终 RepoDigest。worker 输出只允许回显 build digest；镜像
+RepoDigest 由宿主的 activation profile 和精确 Docker argv 验证。
 
 服务器使用临时只读凭证拉取精确 digest，立即 logout 并删除临时
 `DOCKER_CONFIG`。随后通过 `kernel-autoresearch-admin update --doctor` 部署提交 B，
@@ -200,7 +214,8 @@ kernel-research profile image-doctor \
 无 child-run 的 CURRENT Campaign，固定预留 1800 秒 wall 与 900 秒 GPU，按
 maintenance fence → `gpu1.lock` → lease 的顺序执行 compile manifest 和固定
 `quick_decode_gate_up` mctx。成功 Campaign 自动结束；原始 trace 只进入私有 CAS，
-白名单摘要不具 promotion 或 baseline 权限。
+两个 recipe 的 raw trace 合计不得超过 64 MiB，白名单摘要不具 promotion 或
+baseline 权限。
 
 UNKNOWN 或 hard failure 会保留 reservation 并 quarantine；不得重放。修复必须产生
 新镜像、新激活提交和全新 canary Campaign。canary READY 后才能创建全新 Discovery

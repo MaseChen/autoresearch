@@ -32,26 +32,39 @@ from .profiler_contract import (
     MCTRACER_PATH,
     MCTRACER_SHA256,
     MCTRACER_VERSION,
+    METAX_TOOLCHAIN_VERSION,
     MCTOOLS_EXT_LITE_PATH,
     MCTOOLS_EXT_LITE_SHA256,
     MCTOOLS_EXT_PATH,
     MCTOOLS_EXT_SHA256,
     PROFILE_CANDIDATE_CONTAINER_PATH,
     PROFILE_CANDIDATE_LIMIT_BYTES,
+    PROFILE_CANDIDATE_TMP_DIRECTORY,
+    PROFILE_CANDIDATE_TMP_PATH,
     PROFILE_COLLECTION_SCHEMA_VERSION,
     PROFILE_HOME,
     PROFILE_OUTCOME_CONTAINER_PATH,
     PROFILE_OUTCOME_LIMIT_BYTES,
+    PROFILE_OUTPUT_CONTAINER_DIRECTORY,
     PROFILE_RAW_TRACE_LIMIT_BYTES,
     PROFILE_RESULT_CONTAINER_PATH,
     PROFILE_RESULT_LIMIT_BYTES,
+    PROFILE_TARGET_OUTPUT_LIMIT_BYTES,
+    PROFILE_TARGET_SENTINEL_CONTAINER_PATH,
+    PROFILE_TARGET_TIMEOUT_SECONDS,
     PROFILE_TRACE_CONTAINER_PATH,
+    PROFILE_TRACE_DIRECTORY_CONTAINER_PATH,
     PROFILE_TRACE_FILE_LIMIT,
     PROFILE_TRACE_MEMBER_LIMIT_BYTES,
+    PROFILE_TRACE_NAME,
+    PROFILE_TMPDIR,
+    PROFILE_TOOLCHAIN_HELP_OUTPUT_LIMIT_BYTES,
+    PROFILE_TOOLCHAIN_HELP_TIMEOUT_SECONDS,
     PROFILE_TRITON_CACHE_DIR,
+    PROFILE_WARMUP_SENTINEL_CONTAINER_PATH,
+    PROFILE_WARMUP_TIMEOUT_SECONDS,
     PROFILE_WORKER_OUTPUT_SCHEMA_VERSION,
-    PROFILER_IMAGE,
-    PROFILER_PROFILE_DIGEST,
+    PROFILER_BUILD_PROFILE_DIGEST,
     PROFILER_RECIPES,
     PROFILER_WORKER_REVISION,
 )
@@ -80,12 +93,12 @@ _EXECUTION_FAILURE_MARKERS = (
     "symbol lookup error",
     "segmentation fault",
 )
-_TRACE_DIRECTORY = Path("/output/metax-mctx")
-_WARMUP_SENTINEL = Path("/output/warmup-sentinel.json")
-_TARGET_SENTINEL = Path("/output/target-sentinel.json")
-_TRACE_NAME = "bounded-profile"
-_WARMUP_TIMEOUT_SECONDS = 240.0
-_TARGET_TIMEOUT_SECONDS = 540.0
+_TRACE_DIRECTORY = Path(PROFILE_TRACE_DIRECTORY_CONTAINER_PATH)
+_WARMUP_SENTINEL = Path(PROFILE_WARMUP_SENTINEL_CONTAINER_PATH)
+_TARGET_SENTINEL = Path(PROFILE_TARGET_SENTINEL_CONTAINER_PATH)
+_TRACE_NAME = PROFILE_TRACE_NAME
+_WARMUP_TIMEOUT_SECONDS = PROFILE_WARMUP_TIMEOUT_SECONDS
+_TARGET_TIMEOUT_SECONDS = PROFILE_TARGET_TIMEOUT_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,8 +130,7 @@ class WorkerRequest:
         value: dict[str, Any] = {
             "schema_version": PROFILE_COLLECTION_SCHEMA_VERSION,
             "worker_revision": PROFILER_WORKER_REVISION,
-            "profiler_profile_digest": PROFILER_PROFILE_DIGEST,
-            "profiler_image": PROFILER_IMAGE,
+            "profiler_build_profile_digest": PROFILER_BUILD_PROFILE_DIGEST,
             "recipe_id": self.recipe_id,
             "case_id": self.case_id,
             "experiment_uid": self.experiment_uid,
@@ -190,7 +202,10 @@ def _regular_bytes(path: Path, *, exact_path: str, limit: int, field: str) -> by
 def _atomic_write(path: Path, content: bytes, *, limit: int, field: str) -> None:
     if len(content) > limit:
         raise ValueError(f"{field} exceeds its fixed size limit")
-    if path.parent != Path("/output") or path.is_symlink():
+    if (
+        path.parent != Path(PROFILE_OUTPUT_CONTAINER_DIRECTORY)
+        or path.is_symlink()
+    ):
         raise ValueError(f"{field} must use the fixed output directory")
     if path.exists() and not path.is_file():
         raise ValueError(f"{field} target must be a regular file")
@@ -261,16 +276,22 @@ def verify_toolchain() -> dict[str, Any]:
             ),
             "version": MCTRACER_VERSION,
         },
-        "libmcToolsExt_lite.so": _sha256_file(
-            Path(MCTOOLS_EXT_LITE_PATH),
-            expected=MCTOOLS_EXT_LITE_SHA256,
-            field="libmcToolsExt_lite.so",
-        ),
-        "libmcToolsExt.so": _sha256_file(
-            Path(MCTOOLS_EXT_PATH),
-            expected=MCTOOLS_EXT_SHA256,
-            field="libmcToolsExt.so",
-        ),
+        "libmcToolsExt_lite.so": {
+            **_sha256_file(
+                Path(MCTOOLS_EXT_LITE_PATH),
+                expected=MCTOOLS_EXT_LITE_SHA256,
+                field="libmcToolsExt_lite.so",
+            ),
+            "version": METAX_TOOLCHAIN_VERSION,
+        },
+        "libmcToolsExt.so": {
+            **_sha256_file(
+                Path(MCTOOLS_EXT_PATH),
+                expected=MCTOOLS_EXT_SHA256,
+                field="libmcToolsExt.so",
+            ),
+            "version": METAX_TOOLCHAIN_VERSION,
+        },
     }
     try:
         probe = subprocess.run(
@@ -279,12 +300,12 @@ def verify_toolchain() -> dict[str, Any]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
-            timeout=10.0,
+            timeout=PROFILE_TOOLCHAIN_HELP_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError("mcTracer help probe is unavailable") from exc
     output = probe.stdout + b"\n" + probe.stderr
-    if len(output) > 64 * 1024:
+    if len(output) > PROFILE_TOOLCHAIN_HELP_OUTPUT_LIMIT_BYTES:
         raise ValueError("mcTracer help probe exceeded its output limit")
     try:
         text = output.decode("utf-8")
@@ -302,6 +323,7 @@ def verify_toolchain() -> dict[str, Any]:
     descriptor = {
         "schema_version": 1,
         "worker_revision": PROFILER_WORKER_REVISION,
+        "profiler_build_profile_digest": PROFILER_BUILD_PROFILE_DIGEST,
         "tools": tools,
         "help_contract": {
             "argv": [MCTRACER_PATH, "--help"],
@@ -477,11 +499,11 @@ def _compile_recipe(
 
 
 def _copy_candidate_to_tmp(candidate: bytes) -> Path:
-    root = Path("/tmp/candidate")
+    root = Path(PROFILE_CANDIDATE_TMP_DIRECTORY)
     root.mkdir(mode=0o700, parents=False, exist_ok=True)
     if root.is_symlink() or root.resolve() != root:
         raise ValueError("candidate tmp directory is not canonical")
-    path = root / "kernel.py"
+    path = Path(PROFILE_CANDIDATE_TMP_PATH)
     descriptor = os.open(
         path,
         os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
@@ -697,13 +719,13 @@ def _hardware_recipe(
     runtime_environment = {
         **os.environ,
         "HOME": PROFILE_HOME,
-        "TMPDIR": "/tmp",
+        "TMPDIR": PROFILE_TMPDIR,
         "TRITON_CACHE_DIR": PROFILE_TRITON_CACHE_DIR,
     }
     try:
         warmup_result = subprocess.run(
             warmup_command,
-            cwd="/output",
+            cwd=PROFILE_OUTPUT_CONTAINER_DIRECTORY,
             env=runtime_environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -714,7 +736,7 @@ def _hardware_recipe(
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError("profile warmup timed out without trusted completion") from exc
     warmup_output = warmup_result.stdout + b"\n" + warmup_result.stderr
-    if len(warmup_output) > 256 * 1024:
+    if len(warmup_output) > PROFILE_TARGET_OUTPUT_LIMIT_BYTES:
         raise ValueError("profile warmup output exceeded its fixed limit")
     warmup_text = warmup_output.decode("utf-8", errors="replace").lower()
     if any(marker in warmup_text for marker in _FATAL_MARKERS):
@@ -755,7 +777,7 @@ def _hardware_recipe(
     try:
         command_result = subprocess.run(
             command,
-            cwd="/output",
+            cwd=PROFILE_OUTPUT_CONTAINER_DIRECTORY,
             env=runtime_environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -766,7 +788,7 @@ def _hardware_recipe(
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError("mcTracer target timed out without trusted completion") from exc
     combined = command_result.stdout + b"\n" + command_result.stderr
-    if len(combined) > 256 * 1024:
+    if len(combined) > PROFILE_TARGET_OUTPUT_LIMIT_BYTES:
         raise ValueError("mcTracer target output exceeded its fixed limit")
     text = combined.decode("utf-8", errors="replace").lower()
     hard = any(marker in text for marker in _FATAL_MARKERS)
@@ -835,7 +857,7 @@ def run_worker(args: argparse.Namespace) -> int:
     os.environ.update(
         {
             "HOME": PROFILE_HOME,
-            "TMPDIR": "/tmp",
+            "TMPDIR": PROFILE_TMPDIR,
             "TRITON_CACHE_DIR": PROFILE_TRITON_CACHE_DIR,
         }
     )
@@ -969,7 +991,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             _WARMUP_SENTINEL if args.phase == "warmup" else _TARGET_SENTINEL
         )
         if (
-            args.candidate != "/tmp/candidate/kernel.py"
+            args.candidate != PROFILE_CANDIDATE_TMP_PATH
             or args.sentinel != str(expected_sentinel)
         ):
             raise ValueError("hardware target paths differ from the fixed contract")

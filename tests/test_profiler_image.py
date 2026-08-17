@@ -20,33 +20,151 @@ from kernel_research.profiler_contract import (
     MCTOOLS_EXT_SHA256,
     PROFILE_COLLECTION_SCHEMA_VERSION,
     PROFILER_ACTIVE,
+    PROFILER_ACTIVATION_PROFILE_DIGEST,
     PROFILER_BASE_IMAGE,
+    PROFILER_BUILD_PROFILE_DIGEST,
     PROFILER_IMAGE,
     PROFILER_IMAGE_REPOSITORY,
-    PROFILER_PROFILE_DIGEST,
     PROFILER_WORKER_REVISION,
-    profiler_profile_snapshot,
+    profiler_activation_profile_snapshot,
+    profiler_build_profile_snapshot,
     require_active_profiler,
 )
 import kernel_research.profiler_contract as contract
 import kernel_research.profiler_worker as worker
+import kernel_research.profiling as host
 
 
 class ProfilerContractTests(unittest.TestCase):
     def test_submit_a_profile_is_exact_and_inactive(self) -> None:
-        snapshot = profiler_profile_snapshot()
+        build = profiler_build_profile_snapshot()
+        activation = profiler_activation_profile_snapshot()
         self.assertFalse(PROFILER_ACTIVE)
-        self.assertEqual(snapshot["base_image"], PROFILER_BASE_IMAGE)
-        self.assertEqual(snapshot["profiler_image"], PROFILER_IMAGE)
+        self.assertEqual(build["base_image"], PROFILER_BASE_IMAGE)
+        self.assertNotIn("active", build)
+        self.assertNotIn("profiler_image", build)
+        self.assertEqual(activation["profiler_image"], PROFILER_IMAGE)
+        self.assertFalse(activation["active"])
         self.assertTrue(PROFILER_IMAGE.startswith(PROFILER_IMAGE_REPOSITORY))
-        self.assertEqual(snapshot["worker_revision"], PROFILER_WORKER_REVISION)
+        self.assertEqual(build["worker_revision"], PROFILER_WORKER_REVISION)
         self.assertEqual(
-            snapshot["collection_schema_version"],
+            build["collection_schema_version"],
             PROFILE_COLLECTION_SCHEMA_VERSION,
         )
-        self.assertEqual(PROFILER_PROFILE_DIGEST, canonical_sha256(snapshot))
+        self.assertEqual(PROFILER_BUILD_PROFILE_DIGEST, canonical_sha256(build))
+        self.assertEqual(
+            PROFILER_ACTIVATION_PROFILE_DIGEST,
+            canonical_sha256(activation),
+        )
         with self.assertRaisesRegex(ValueError, "inactive"):
             require_active_profiler()
+
+    def test_commit_a_worker_echo_survives_commit_b_activation_only_change(self) -> None:
+        request = ProfilerWorkerTests._request()
+        commit_a_echo = request.echo()
+        commit_a_build = profiler_build_profile_snapshot()
+        final_image = PROFILER_IMAGE_REPOSITORY + "@sha256:" + "a" * 64
+        with (
+            mock.patch.object(contract, "PROFILER_ACTIVE", True),
+            mock.patch.object(contract, "PROFILER_IMAGE", final_image),
+        ):
+            commit_b_build = profiler_build_profile_snapshot()
+            commit_b_activation = profiler_activation_profile_snapshot()
+        self.assertEqual(commit_b_build, commit_a_build)
+        self.assertEqual(
+            canonical_sha256(commit_b_build),
+            PROFILER_BUILD_PROFILE_DIGEST,
+        )
+        self.assertEqual(
+            commit_a_echo["profiler_build_profile_digest"],
+            PROFILER_BUILD_PROFILE_DIGEST,
+        )
+        self.assertEqual(
+            commit_b_activation["build_profile_digest"],
+            commit_a_echo["profiler_build_profile_digest"],
+        )
+        self.assertNotIn("profiler_image", commit_a_echo)
+        self.assertNotIn("active", commit_a_echo)
+        self.assertNotIn("profiler_activation_profile_digest", commit_a_echo)
+        self.assertNotEqual(
+            canonical_sha256(profiler_activation_profile_snapshot()),
+            canonical_sha256(commit_b_activation),
+        )
+        subject = host._ProfileSubject(
+            experiment_uid=request.experiment_uid,
+            namespace_id=request.namespace_id,
+            condition_digest=request.condition_digest,
+            artifact_id=request.artifact_id,
+            execution_environment_digest=request.environment_digest,
+            campaign_id=request.campaign_id,
+            run_id=request.run_id,
+            stage="smoke",
+            suite="smoke",
+            replicate_kind="validation",
+            candidate_object_path=Path("/state/object"),
+            candidate_content_sha256=request.candidate_sha256,
+        )
+        with (
+            mock.patch.object(host, "PROFILER_IMAGE", final_image),
+            mock.patch.object(
+                host,
+                "PROFILER_ACTIVATION_PROFILE_DIGEST",
+                canonical_sha256(commit_b_activation),
+            ),
+        ):
+            commit_b_expected = host._expected_worker_echo(
+                recipe=host.BUILTIN_PROFILE_RECIPES[request.recipe_id],
+                subject=subject,
+                invariant_digest=request.soak_invariant_digest,
+                budget_action_key=request.budget_action_key,
+                lease=None,
+            )
+        self.assertEqual(commit_b_expected, commit_a_echo)
+
+    def test_build_profile_freezes_every_worker_and_runtime_axis(self) -> None:
+        build = profiler_build_profile_snapshot()
+        self.assertEqual(
+            set(build),
+            {
+                "schema_version",
+                "platform",
+                "base_image",
+                "worker_revision",
+                "entrypoint",
+                "image_user",
+                "toolchain",
+                "recipes",
+                "paths",
+                "limits",
+                "isolation",
+                "resource",
+                "collection_schema_version",
+                "worker_output_schema_version",
+            },
+        )
+        self.assertEqual(build["image_user"]["uid"], 1000)
+        self.assertEqual(build["image_user"]["gid"], 1000)
+        self.assertEqual(build["platform"], "linux/amd64")
+        self.assertEqual(build["limits"]["action_timeout_seconds"], 900.0)
+        self.assertEqual(build["limits"]["toolchain_help_timeout_seconds"], 10.0)
+        self.assertEqual(build["limits"]["raw_trace_bytes"], 64 * 1024 * 1024)
+        self.assertEqual(
+            build["limits"]["canary_raw_trace_total_bytes"],
+            64 * 1024 * 1024,
+        )
+        self.assertEqual(build["limits"]["memory"], "4g")
+        self.assertEqual(build["limits"]["cpus"], 4.0)
+        self.assertEqual(build["limits"]["pids"], 128)
+        self.assertTrue(build["isolation"]["read_only_root"])
+        self.assertEqual(build["isolation"]["network"], "none")
+        self.assertEqual(build["resource"]["resource_id"], "gpu1")
+        self.assertEqual(build["resource"]["lease_ttl_seconds"], 930.0)
+        self.assertEqual(build["resource"]["canary_lease_ttl_seconds"], 1830.0)
+        self.assertEqual(len(build["resource"]["gpu_device_paths"]), 3)
+        self.assertEqual(
+            set(profiler_activation_profile_snapshot()),
+            {"schema_version", "build_profile_digest", "active", "profiler_image"},
+        )
 
     def test_activation_rejects_sentinel_and_accepts_exact_ghcr_digest(self) -> None:
         with (
@@ -78,7 +196,10 @@ class ProfilerContractTests(unittest.TestCase):
         self.assertIn('ENTRYPOINT ["/opt/kernel-research/bin/bounded-profiler"]', dockerfile)
         self.assertIn("verify-toolchain", dockerfile)
         self.assertIn("org.opencontainers.image.revision", dockerfile)
-        self.assertIn("USER 1000:1000", dockerfile)
+        self.assertIn(
+            f"USER {contract.PROFILER_IMAGE_UID}:{contract.PROFILER_IMAGE_GID}",
+            dockerfile,
+        )
         self.assertIn("HOME=/tmp/profile-home", dockerfile)
         self.assertIn("TRITON_CACHE_DIR=/tmp/triton-cache", dockerfile)
         lowered = dockerfile.lower()
@@ -178,6 +299,10 @@ class ProfilerWorkerTests(unittest.TestCase):
         ):
             descriptor = worker.verify_toolchain()
         self.assertEqual(descriptor["tools"]["mctracer"]["sha256"], MCTRACER_SHA256)
+        self.assertEqual(
+            descriptor["profiler_build_profile_digest"],
+            PROFILER_BUILD_PROFILE_DIGEST,
+        )
         self.assertEqual(
             descriptor["tools"]["libmcToolsExt_lite.so"]["sha256"],
             MCTOOLS_EXT_LITE_SHA256,

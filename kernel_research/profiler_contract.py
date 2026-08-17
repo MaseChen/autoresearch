@@ -14,7 +14,8 @@ from typing import Any, Mapping
 from .platform.canonical import canonical_sha256
 
 
-PROFILER_PROFILE_SCHEMA_VERSION = 1
+PROFILER_BUILD_PROFILE_SCHEMA_VERSION = 1
+PROFILER_ACTIVATION_PROFILE_SCHEMA_VERSION = 1
 PROFILE_COLLECTION_SCHEMA_VERSION = 2
 PROFILE_WORKER_OUTPUT_SCHEMA_VERSION = 2
 
@@ -23,6 +24,7 @@ PROFILER_BASE_IMAGE = (
     "5f1da890360acc5a81438d0e35a80079b34f30d1fa64fc954fef2e9a1ae45b64"
 )
 PROFILER_IMAGE_REPOSITORY = "ghcr.io/masechen/autoresearch-metax-profiler"
+PROFILER_PLATFORM = "linux/amd64"
 # Submit A is deliberately non-runnable.  Submit B must replace this sentinel
 # with the RepoDigest returned by the reviewed Linux/amd64 build and set the
 # activation bit below.  Host launchers check the bit before invoking Docker.
@@ -30,8 +32,11 @@ PROFILER_IMAGE = PROFILER_IMAGE_REPOSITORY + "@sha256:" + ("0" * 64)
 PROFILER_ACTIVE = False
 PROFILER_WORKER_REVISION = "metax-bounded-profiler-worker-v1"
 PROFILER_ENTRYPOINT = "/opt/kernel-research/bin/bounded-profiler"
+PROFILER_IMAGE_UID = 1000
+PROFILER_IMAGE_GID = 1000
 
 MCTRACER_VERSION = "3.5.3.20-ef9e10e"
+METAX_TOOLCHAIN_VERSION = "3.5.3"
 MCTRACER_PATH = "/opt/maca-3.5.3/bin/mcTracer"
 MCTRACER_SHA256 = (
     "92430f0c558e561e6d0b10c63b13c25606f3b147f50aef64cd2f04bfaddb12ff"
@@ -49,17 +54,30 @@ PROFILE_RESULT_CONTAINER_PATH = "/output/result.json"
 PROFILE_OUTCOME_CONTAINER_PATH = "/output/outcome.json"
 PROFILE_TRACE_CONTAINER_PATH = "/output/raw.trace"
 PROFILE_CANDIDATE_CONTAINER_PATH = "/input/candidate.cas"
+PROFILE_OUTPUT_CONTAINER_DIRECTORY = "/output"
+PROFILE_TRACE_DIRECTORY_CONTAINER_PATH = "/output/metax-mctx"
+PROFILE_WARMUP_SENTINEL_CONTAINER_PATH = "/output/warmup-sentinel.json"
+PROFILE_TARGET_SENTINEL_CONTAINER_PATH = "/output/target-sentinel.json"
+PROFILE_TRACE_NAME = "bounded-profile"
 PROFILE_HOME = "/tmp/profile-home"
 PROFILE_TMPDIR = "/tmp"
 PROFILE_TRITON_CACHE_DIR = "/tmp/triton-cache"
+PROFILE_CANDIDATE_TMP_DIRECTORY = "/tmp/candidate"
+PROFILE_CANDIDATE_TMP_PATH = "/tmp/candidate/kernel.py"
 
 PROFILE_TIMEOUT_SECONDS = 900.0
+PROFILE_WARMUP_TIMEOUT_SECONDS = 240.0
+PROFILE_TARGET_TIMEOUT_SECONDS = 540.0
+PROFILE_TOOLCHAIN_HELP_TIMEOUT_SECONDS = 10.0
 PROFILE_CANARY_WALL_SECONDS = 1800.0
 PROFILE_CANARY_GPU_SECONDS = 900.0
 PROFILE_OUTPUT_LIMIT_BYTES = 256 * 1024
+PROFILE_TOOLCHAIN_HELP_OUTPUT_LIMIT_BYTES = 64 * 1024
+PROFILE_TARGET_OUTPUT_LIMIT_BYTES = 256 * 1024
 PROFILE_RESULT_LIMIT_BYTES = 64 * 1024
 PROFILE_OUTCOME_LIMIT_BYTES = 64 * 1024
 PROFILE_RAW_TRACE_LIMIT_BYTES = 64 * 1024 * 1024
+PROFILE_CANARY_RAW_TRACE_TOTAL_LIMIT_BYTES = 64 * 1024 * 1024
 PROFILE_CANDIDATE_LIMIT_BYTES = 2 * 1024 * 1024
 PROFILE_TRACE_FILE_LIMIT = 256
 PROFILE_TRACE_MEMBER_LIMIT_BYTES = 32 * 1024 * 1024
@@ -68,6 +86,13 @@ PROFILE_CPU_LIMIT = 4.0
 PROFILE_PID_LIMIT = 128
 PROFILE_RESOURCE_ID = "gpu1"
 PROFILE_LEASE_TTL_SECONDS = PROFILE_TIMEOUT_SECONDS + 30.0
+PROFILE_CANARY_LEASE_TTL_SECONDS = PROFILE_CANARY_WALL_SECONDS + 30.0
+PROFILE_DOCKER_TMPFS = "/tmp:rw,nosuid,nodev,size=64m,mode=700"
+PROFILE_GPU_DEVICE_PATHS = (
+    "/dev/mxcd",
+    "/dev/dri/card2",
+    "/dev/dri/renderD129",
+)
 
 PROFILE_UNAVAILABLE_REASON_CODES = frozenset(
     {
@@ -116,16 +141,20 @@ PROFILER_RECIPES: Mapping[str, Mapping[str, Any]] = MappingProxyType(_RECIPES)
 PROFILER_RECIPE_IDS = tuple(PROFILER_RECIPES)
 
 
-def profiler_profile_snapshot() -> dict[str, Any]:
-    """Return the canonical, JSON-safe profiler identity frozen into soak."""
+def profiler_build_profile_snapshot() -> dict[str, Any]:
+    """Return only identity that is knowable when the image is built."""
 
     return {
-        "schema_version": PROFILER_PROFILE_SCHEMA_VERSION,
-        "active": PROFILER_ACTIVE,
+        "schema_version": PROFILER_BUILD_PROFILE_SCHEMA_VERSION,
+        "platform": PROFILER_PLATFORM,
         "base_image": PROFILER_BASE_IMAGE,
-        "profiler_image": PROFILER_IMAGE,
         "worker_revision": PROFILER_WORKER_REVISION,
         "entrypoint": PROFILER_ENTRYPOINT,
+        "image_user": {
+            "uid": PROFILER_IMAGE_UID,
+            "gid": PROFILER_IMAGE_GID,
+            "runtime_override": "trusted-controller-config",
+        },
         "toolchain": {
             "mctracer": {
                 "path": MCTRACER_PATH,
@@ -134,10 +163,12 @@ def profiler_profile_snapshot() -> dict[str, Any]:
             },
             "libmcToolsExt_lite.so": {
                 "path": MCTOOLS_EXT_LITE_PATH,
+                "version": METAX_TOOLCHAIN_VERSION,
                 "sha256": MCTOOLS_EXT_LITE_SHA256,
             },
             "libmcToolsExt.so": {
                 "path": MCTOOLS_EXT_PATH,
+                "version": METAX_TOOLCHAIN_VERSION,
                 "sha256": MCTOOLS_EXT_SHA256,
             },
         },
@@ -151,23 +182,97 @@ def profiler_profile_snapshot() -> dict[str, Any]:
             }
             for recipe_id in PROFILER_RECIPE_IDS
         ],
+        "paths": {
+            "candidate": PROFILE_CANDIDATE_CONTAINER_PATH,
+            "result": PROFILE_RESULT_CONTAINER_PATH,
+            "outcome": PROFILE_OUTCOME_CONTAINER_PATH,
+            "raw_trace": PROFILE_TRACE_CONTAINER_PATH,
+            "output_directory": PROFILE_OUTPUT_CONTAINER_DIRECTORY,
+            "trace_directory": PROFILE_TRACE_DIRECTORY_CONTAINER_PATH,
+            "warmup_sentinel": PROFILE_WARMUP_SENTINEL_CONTAINER_PATH,
+            "target_sentinel": PROFILE_TARGET_SENTINEL_CONTAINER_PATH,
+            "trace_name": PROFILE_TRACE_NAME,
+            "home": PROFILE_HOME,
+            "tmpdir": PROFILE_TMPDIR,
+            "triton_cache": PROFILE_TRITON_CACHE_DIR,
+            "candidate_tmp_directory": PROFILE_CANDIDATE_TMP_DIRECTORY,
+            "candidate_tmp_path": PROFILE_CANDIDATE_TMP_PATH,
+        },
         "limits": {
             "action_timeout_seconds": PROFILE_TIMEOUT_SECONDS,
+            "warmup_timeout_seconds": PROFILE_WARMUP_TIMEOUT_SECONDS,
+            "target_timeout_seconds": PROFILE_TARGET_TIMEOUT_SECONDS,
+            "toolchain_help_timeout_seconds": (
+                PROFILE_TOOLCHAIN_HELP_TIMEOUT_SECONDS
+            ),
             "canary_wall_seconds": PROFILE_CANARY_WALL_SECONDS,
             "canary_gpu_seconds": PROFILE_CANARY_GPU_SECONDS,
+            "host_output_bytes": PROFILE_OUTPUT_LIMIT_BYTES,
+            "toolchain_help_output_bytes": (
+                PROFILE_TOOLCHAIN_HELP_OUTPUT_LIMIT_BYTES
+            ),
+            "target_output_bytes": PROFILE_TARGET_OUTPUT_LIMIT_BYTES,
             "candidate_bytes": PROFILE_CANDIDATE_LIMIT_BYTES,
             "result_bytes": PROFILE_RESULT_LIMIT_BYTES,
             "outcome_bytes": PROFILE_OUTCOME_LIMIT_BYTES,
             "raw_trace_bytes": PROFILE_RAW_TRACE_LIMIT_BYTES,
+            "canary_raw_trace_total_bytes": (
+                PROFILE_CANARY_RAW_TRACE_TOTAL_LIMIT_BYTES
+            ),
             "trace_files": PROFILE_TRACE_FILE_LIMIT,
             "trace_member_bytes": PROFILE_TRACE_MEMBER_LIMIT_BYTES,
+            "memory": PROFILE_MEMORY_LIMIT,
+            "cpus": PROFILE_CPU_LIMIT,
+            "pids": PROFILE_PID_LIMIT,
+        },
+        "isolation": {
+            "read_only_root": True,
+            "network": "none",
+            "ipc": "none",
+            "cap_drop": "ALL",
+            "no_new_privileges": True,
+            "tmpfs": PROFILE_DOCKER_TMPFS,
+        },
+        "resource": {
+            "resource_id": PROFILE_RESOURCE_ID,
+            "lease_ttl_seconds": PROFILE_LEASE_TTL_SECONDS,
+            "canary_lease_ttl_seconds": PROFILE_CANARY_LEASE_TTL_SECONDS,
+            "gpu_device_paths": list(PROFILE_GPU_DEVICE_PATHS),
         },
         "collection_schema_version": PROFILE_COLLECTION_SCHEMA_VERSION,
         "worker_output_schema_version": PROFILE_WORKER_OUTPUT_SCHEMA_VERSION,
     }
 
 
-PROFILER_PROFILE_DIGEST = canonical_sha256(profiler_profile_snapshot())
+PROFILER_BUILD_PROFILE_DIGEST = canonical_sha256(
+    profiler_build_profile_snapshot()
+)
+
+
+def profiler_activation_profile_snapshot(
+    *,
+    active: bool | None = None,
+    profiler_image: str | None = None,
+) -> dict[str, Any]:
+    """Bind one immutable image deployment to the build-time contract."""
+
+    selected_active = PROFILER_ACTIVE if active is None else active
+    selected_image = PROFILER_IMAGE if profiler_image is None else profiler_image
+    if not isinstance(selected_active, bool):
+        raise TypeError("profiler activation flag must be boolean")
+    if not isinstance(selected_image, str):
+        raise TypeError("profiler activation image must be a string")
+    return {
+        "schema_version": PROFILER_ACTIVATION_PROFILE_SCHEMA_VERSION,
+        "build_profile_digest": PROFILER_BUILD_PROFILE_DIGEST,
+        "active": selected_active,
+        "profiler_image": selected_image,
+    }
+
+
+PROFILER_ACTIVATION_PROFILE_DIGEST = canonical_sha256(
+    profiler_activation_profile_snapshot()
+)
 
 
 def require_active_profiler() -> None:
@@ -191,15 +296,17 @@ __all__ = [name for name in globals() if name.startswith("PROFILE") or name.star
 __all__.extend(
     [
         "PROFILER_ACTIVE",
+        "PROFILER_ACTIVATION_PROFILE_DIGEST",
         "PROFILER_BASE_IMAGE",
+        "PROFILER_BUILD_PROFILE_DIGEST",
         "PROFILER_ENTRYPOINT",
         "PROFILER_IMAGE",
         "PROFILER_IMAGE_REPOSITORY",
-        "PROFILER_PROFILE_DIGEST",
         "PROFILER_RECIPES",
         "PROFILER_RECIPE_IDS",
         "PROFILER_WORKER_REVISION",
-        "profiler_profile_snapshot",
+        "profiler_activation_profile_snapshot",
+        "profiler_build_profile_snapshot",
         "require_active_profiler",
     ]
 )

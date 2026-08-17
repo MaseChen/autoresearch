@@ -22,11 +22,10 @@ from kernel_research.campaign.soak_collector import (
 from kernel_research.campaign.store import CampaignStore
 from kernel_research.platform.identity import BaselineRef
 from kernel_research.profiler_contract import (
-    PROFILER_ACTIVE,
-    PROFILER_IMAGE,
-    PROFILER_PROFILE_DIGEST,
-    PROFILER_WORKER_REVISION,
-    profiler_profile_snapshot,
+    PROFILER_ACTIVATION_PROFILE_DIGEST,
+    PROFILER_BUILD_PROFILE_DIGEST,
+    profiler_activation_profile_snapshot,
+    profiler_build_profile_snapshot,
 )
 
 
@@ -421,11 +420,12 @@ class CampaignSoakCollectorTests(unittest.TestCase):
         self.assertEqual(
             clean.invariant_snapshot["profiler"],
             {
-                "active": PROFILER_ACTIVE,
-                "image": PROFILER_IMAGE,
-                "profile_digest": PROFILER_PROFILE_DIGEST,
-                "worker_revision": PROFILER_WORKER_REVISION,
-                "profile": profiler_profile_snapshot(),
+                "build_profile_digest": PROFILER_BUILD_PROFILE_DIGEST,
+                "activation_profile_digest": (
+                    PROFILER_ACTIVATION_PROFILE_DIGEST
+                ),
+                "build_profile": profiler_build_profile_snapshot(),
+                "activation_profile": profiler_activation_profile_snapshot(),
             },
         )
         self.assertEqual(

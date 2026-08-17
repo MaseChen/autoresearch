@@ -24,42 +24,55 @@ deployment authority merely because it uses the same candidate and device.
    network access. It copies only reviewed repository code and a fixed absolute
    entrypoint. The build fails unless the mcTracer binary, both MetaX support
    libraries, the DEVNULL help signature, and their frozen SHA-256 values match.
-2. Submit A retains an all-zero digest sentinel and `active=false`. Every
-   production profiling launch rejects this state before Docker. Submit B is
-   allowed only after a clean-tree build has been pushed to the private GHCR
-   repository and the returned RepoDigest has been independently inspected.
-3. The worker accepts exactly `metax-compile-metadata-v1` and
+2. Profiler identity has two one-way layers. The build profile freezes only
+   values knowable inside the corrective Submit A2 image: base image, worker, entrypoint,
+   toolchain, recipes, paths, user policy, timeouts, output/resource limits and
+   isolation. Its digest excludes both the activation bit and final profiler
+   RepoDigest, and is the only profile identity echoed by the worker. The host
+   activation profile binds that build digest to `active` and the final exact
+   RepoDigest. The image never claims to know its own registry identity.
+3. Submit A2 retains an all-zero image digest sentinel and `active=false`.
+   Every production profiling launch rejects this state before Docker. Submit
+   B may change only those two activation values after a clean-tree image build
+   is pushed and independently inspected. The build profile digest must remain
+   byte-for-byte unchanged across A and B; Docker still launches the exact
+   host-pinned RepoDigest with `--pull=never`.
+4. The worker accepts exactly `metax-compile-metadata-v1` and
    `metax-hardware-counters-v1`. Candidate bundle identity and entrypoint bytes,
    CURRENT namespace, fixed case, limits, output paths, and request echo are
    mandatory. Unknown argv, path aliases, symlinks, and excessive output fail.
-4. Compile metadata emits a non-empty canonical manifest trace. Unproven
+5. Compile metadata emits a non-empty canonical manifest trace. Unproven
    register, shared-memory, and spill metrics are
    `UNAVAILABLE/COUNTER_NOT_EXPOSED`; they are never inferred from unstable
    compiler text.
-5. Hardware collection runs only `quick_decode_gate_up`, with ten warmups and
+6. Hardware collection runs only `quick_decode_gate_up`, with ten warmups and
    ten tracked launches. mcTracer receives only fixed `--mctx`, `--odname`, and
    `--name` values. Exit 0 or 1 is accepted only with the exact target sentinel,
    passing correctness, no fatal/loader/exec marker, and a non-empty bounded
    trace. Trace files are packed into a deterministic metadata-normalized tar.
-6. `outcome.json` is written atomically before GPU execution, after trusted
+7. `outcome.json` is written atomically before GPU execution, after trusted
    target completion, and after evidence commit. A missing or incomplete
    outcome after GPU start is UNKNOWN and quarantines the lease. A fatal GPU
    marker is a hard failure. Proven pre-GPU or completed failures settle budget
    and release the lease. Container return code alone is never authoritative.
-7. `profile image-doctor` creates or verifies a dedicated no-child CURRENT
+8. `profile image-doctor` creates or verifies a dedicated no-child CURRENT
    Campaign. It derives the candidate exclusively from the deployment pin,
    Git, History/CAS, the unique CURRENT bootstrap confirmation, and resolved
    execution environment. One `PROFILE_IMAGE_CANARY` action reserves 1,800
    seconds wall and 900 seconds GPU. Lock order is Campaign maintenance fence,
    `gpu1.lock`, then Campaign resource lease. Both recipes must pass.
-8. Canary and ordinary collection write raw traces only to the controller
+9. Both canary recipes are individually bounded and their combined raw trace
+   byte size must not exceed 64 MiB. The aggregate check occurs before READY;
+   overflow is a known completed failure that settles budget and releases the
+   lease.
+10. Canary and ordinary collection write raw traces only to the controller
    private CAS and a whitelisted advisory summary to scientific CAS. They never
    write History or change a baseline. Collection schema V2 binds the complete
    toolchain and trace descriptor; there is no V1 dual-write because no
    production V1 profiling evidence exists.
-9. The soak invariant contains the profiler profile digest, exact image
-   RepoDigest, worker revision, activation bit, recipes, toolchain, and limits.
-   Changing any of them invalidates prior soak completion and restarts the
+11. The soak invariant contains both complete build and activation profiles and
+   their digests. Changing the RepoDigest, activation bit, worker, recipe,
+   toolchain, path, or limit invalidates prior soak completion and restarts the
    24/72/168-hour sequence.
 
 ## Rejected alternatives
@@ -80,10 +93,14 @@ deployment authority merely because it uses the same candidate and device.
 
 - Local tests cover contract drift, worker output and trace bounds, Dockerfile
   restrictions, inactive pre-Docker rejection, V2 host evidence, Campaign
-  budget/lease/failure semantics, and explicit soak identity.
-- A clean Linux/amd64 build from Submit A is pushed using a temporary Docker
+  budget/lease/failure semantics, the A-to-B identity transition, aggregate
+  64 MiB enforcement, and explicit soak identity.
+- A clean Linux/amd64 build from the independent corrective Submit A2 is pushed
+  using a temporary Docker
   credential directory. Submit B pins the returned RepoDigest and is deployed
   through the normal Admin update path.
+- The superseded `e19cecc` Submit A must not be built: it coupled activation
+  state to the worker echo. Submit A2 is a new commit, never an amend of it.
 - The first trusted server action is one image-doctor Campaign. Soak does not
   begin until its compile manifest and hardware mctx archive both pass. Any
   canary fix produces a new image and activation commit.

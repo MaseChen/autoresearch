@@ -492,8 +492,9 @@ class _FakeProfileRunner:
             result = {
                 "schema_version": profiling.PROFILE_COLLECTION_API_VERSION,
                 "worker_revision": profiling.PROFILER_WORKER_REVISION,
-                "profiler_profile_digest": profiling.PROFILER_PROFILE_DIGEST,
-                "profiler_image": profiling.PROFILER_IMAGE,
+                "profiler_build_profile_digest": (
+                    profiling.PROFILER_BUILD_PROFILE_DIGEST
+                ),
                 "recipe_id": recipe,
                 "case_id": case_id,
                 "experiment_uid": uid,
@@ -526,6 +527,9 @@ class _FakeProfileRunner:
             toolchain = {
                 "schema_version": 1,
                 "worker_revision": profiling.PROFILER_WORKER_REVISION,
+                "profiler_build_profile_digest": (
+                    profiling.PROFILER_BUILD_PROFILE_DIGEST
+                ),
                 "tools": {
                     "mctracer": {
                         "path": profiling.MCTRACER_PATH,
@@ -534,10 +538,12 @@ class _FakeProfileRunner:
                     },
                     "libmcToolsExt_lite.so": {
                         "path": profiling.MCTOOLS_EXT_LITE_PATH,
+                        "version": profiling.METAX_TOOLCHAIN_VERSION,
                         "sha256": profiling.MCTOOLS_EXT_LITE_SHA256,
                     },
                     "libmcToolsExt.so": {
                         "path": profiling.MCTOOLS_EXT_PATH,
+                        "version": profiling.METAX_TOOLCHAIN_VERSION,
                         "sha256": profiling.MCTOOLS_EXT_SHA256,
                     },
                 },
@@ -892,8 +898,12 @@ class BoundedProfilingTests(unittest.TestCase):
         self.assertEqual(evidence["schema_version"], 2)
         self.assertEqual(evidence["kind"], "bounded_profiling_evidence_v2")
         self.assertEqual(
-            evidence["profiler_profile_digest"],
-            profiling.PROFILER_PROFILE_DIGEST,
+            evidence["profiler_build_profile_digest"],
+            profiling.PROFILER_BUILD_PROFILE_DIGEST,
+        )
+        self.assertEqual(
+            evidence["profiler_activation_profile_digest"],
+            profiling.PROFILER_ACTIVATION_PROFILE_DIGEST,
         )
         self.assertIn("toolchain", evidence)
         self.assertIn("trace_descriptor", evidence)
@@ -1830,6 +1840,16 @@ class BoundedProfilingTests(unittest.TestCase):
             )
         self.assertEqual(report["status"], "READY")
         self.assertEqual(len(runner.calls), 2)
+        self.assertTrue(
+            all(
+                0 < float(kwargs["timeout_sec"]) <= PROFILE_TIMEOUT_SECONDS
+                for _argv, kwargs in runner.calls
+            )
+        )
+        self.assertEqual(
+            report["raw_trace_total_bytes"],
+            len(runner.raw_trace) * 2,
+        )
         self.assertEqual(
             [
                 argv[argv.index("--recipe") + 1]
@@ -1850,6 +1870,110 @@ class BoundedProfilingTests(unittest.TestCase):
             self.assertEqual(action["status"], "SETTLED")
             self.assertEqual(action["reserved"]["wall_ms"], 1_800_000)
             self.assertEqual(action["reserved"]["gpu_ms"], 900_000)
+            self.assertEqual(
+                store.connection.execute(
+                    "SELECT status FROM resource_leases ORDER BY rowid DESC LIMIT 1"
+                ).fetchone()[0],
+                "RELEASED",
+            )
+
+    def test_image_doctor_rejects_aggregate_raw_trace_over_64_mib(self):
+        identity = self._record(stage="confirmation", suite="full")
+        with sqlite3.connect(self.state / "history.sqlite3") as connection:
+            row = connection.execute(
+                """
+                SELECT e.candidate_hash, a.object_path
+                FROM experiments e JOIN candidate_artifacts a
+                  ON a.artifact_id = e.artifact_id
+                WHERE e.experiment_uid = ?
+                """,
+                (identity.experiment_uid,),
+            ).fetchone()
+        assert row is not None
+        canary_id = "profile-image-canary-aggregate-limit"
+        subject = profiling._ProfileSubject(
+            experiment_uid=identity.experiment_uid,
+            namespace_id=identity.namespace_id,
+            condition_digest=identity.condition_digest,
+            artifact_id=str(identity.candidate_artifact_id),
+            execution_environment_digest=identity.execution_environment.digest,
+            campaign_id=canary_id,
+            run_id="profile-image-canary-aggregate-run",
+            stage="confirmation",
+            suite="full",
+            replicate_kind="confirmation",
+            candidate_object_path=self.state / row[1],
+            candidate_content_sha256=row[0],
+        )
+        baseline_ref = BaselineRef.create(
+            namespace=CURRENT_RESEARCH_NAMESPACE,
+            artifact_id=identity.candidate_artifact_id,
+            source="campaign",
+            revision="profile-image-canary-aggregate-fixture",
+            execution_environment=self.environment,
+        )
+        binding = {
+            "deployment_evidence_digest": "sha256:" + "d" * 64,
+            "deployment_git_commit": "e" * 40,
+            "deployment_candidate_hash": row[0],
+            "current_confirmation_experiment_uid": identity.experiment_uid,
+            "current_confirmation_identity": identity.to_dict(),
+            "execution_environment": self.environment.to_dict(),
+        }
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                Path(str(self.campaign_database) + suffix).unlink()
+            except FileNotFoundError:
+                pass
+
+        def report(_config, *, recipe, **_kwargs):
+            return {
+                "recipe_id": recipe.recipe_id,
+                "case_id": recipe.case_id,
+                "metrics": {},
+                "toolchain": {},
+                "trace_descriptor": {},
+                "raw_trace": {
+                    "object_id": "sha256:" + "f" * 64,
+                    "byte_size": 6,
+                    "visibility": "controller-private-cas",
+                },
+            }
+
+        with (
+            mock.patch.object(profiling, "require_active_profiler"),
+            mock.patch.object(
+                profiling,
+                "_current_deployment_profile_subject",
+                return_value=(subject, baseline_ref, binding),
+            ),
+            mock.patch.object(
+                profiling, "_execute_canary_recipe", side_effect=report
+            ) as execute,
+            mock.patch.object(
+                profiling, "PROFILE_CANARY_RAW_TRACE_TOTAL_LIMIT_BYTES", 10
+            ),
+            self.assertRaisesRegex(ValueError, "aggregate limit"),
+        ):
+            profiling.run_profile_image_doctor(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id=canary_id,
+                runner=_FakeProfileRunner(),
+            )
+        self.assertEqual(execute.call_count, 2)
+        with CampaignStore(self.campaign_database) as store:
+            self.assertEqual(
+                store.get_campaign(canary_id)["status"],
+                "PAUSED_OPERATOR",
+            )
+            self.assertEqual(
+                store.get_budget_action(
+                    canary_id,
+                    idempotency_key="profile-image-canary-v1",
+                )["status"],
+                "SETTLED",
+            )
             self.assertEqual(
                 store.connection.execute(
                     "SELECT status FROM resource_leases ORDER BY rowid DESC LIMIT 1"
