@@ -25,13 +25,14 @@ deployment authority merely because it uses the same candidate and device.
    entrypoint. The build fails unless the mcTracer binary, both MetaX support
    libraries, the DEVNULL help signature, and their frozen SHA-256 values match.
 2. Profiler identity has two one-way layers. The build profile freezes only
-   values knowable inside the corrective Submit A2 image: base image, worker, entrypoint,
+   values knowable inside the corrected build image: base image, worker, entrypoint,
    toolchain, recipes, paths, user policy, timeouts, output/resource limits and
    isolation. Its digest excludes both the activation bit and final profiler
    RepoDigest, and is the only profile identity echoed by the worker. The host
    activation profile binds that build digest to `active` and the final exact
    RepoDigest. The image never claims to know its own registry identity.
-3. Submit A2 retains an all-zero image digest sentinel and `active=false`.
+3. The build submission retains an all-zero image digest sentinel and
+   `active=false`.
    Every production profiling launch rejects this state before Docker. Submit
    B may change only those two activation values after a clean-tree image build
    is pushed and independently inspected. The build profile digest must remain
@@ -95,12 +96,16 @@ deployment authority merely because it uses the same candidate and device.
   restrictions, inactive pre-Docker rejection, V2 host evidence, Campaign
   budget/lease/failure semantics, the A-to-B identity transition, aggregate
   64 MiB enforcement, and explicit soak identity.
-- A clean Linux/amd64 build from the independent corrective Submit A2 is pushed
-  using a temporary Docker
-  credential directory. Submit B pins the returned RepoDigest and is deployed
-  through the normal Admin update path.
+- A clean Linux/amd64 build from the independent native-builder correction
+  Submit A3 is pushed using a temporary Docker credential directory. Submit B
+  pins the returned RepoDigest and is deployed through the normal Admin update
+  path. The classic builder is selected explicitly with `DOCKER_BUILDKIT=0`.
 - The superseded `e19cecc` Submit A must not be built: it coupled activation
-  state to the worker echo. Submit A2 is a new commit, never an amend of it.
+  state to the worker echo. Submit A2 `559e8e9` fixed that identity but its
+  `COPY --chmod` instruction cannot be parsed by the reviewed Docker 28.2.2
+  classic builder. Submit A3 changes only the reviewed image assembly and
+  documentation/tests; it is never an amend or an in-place server workaround.
+  Its worker build profile digest remains byte-for-byte identical to A2.
 - The first trusted server action is one image-doctor Campaign. Soak does not
   begin until its compile manifest and hardware mctx archive both pass. Any
   canary fix produces a new image and activation commit.

@@ -7,10 +7,12 @@ LABEL org.opencontainers.image.source="https://github.com/masechen/autoresearch"
       org.opencontainers.image.title="autoresearch-metax-profiler" \
       org.opencontainers.image.description="Bounded advisory-only MetaX profiler"
 
-COPY --chmod=0555 containers/profiler/bounded-profiler /opt/kernel-research/bin/bounded-profiler
+COPY containers/profiler/bounded-profiler /opt/kernel-research/bin/bounded-profiler
 COPY kernel_research /opt/kernel-research/lib/kernel_research
 
-RUN test -n "${SOURCE_REVISION}" \
+RUN chmod 0555 /opt/kernel-research/bin/bounded-profiler \
+    && test "$(stat -c '%a %u:%g' /opt/kernel-research/bin/bounded-profiler)" = "555 0:0" \
+    && test -n "${SOURCE_REVISION}" \
     && printf '%s' "${SOURCE_REVISION}" | grep -Eq '^[0-9a-f]{40}([0-9a-f]{24})?$' \
     && HOME=/tmp/profile-home TMPDIR=/tmp TRITON_CACHE_DIR=/tmp/triton-cache \
        /opt/kernel-research/bin/bounded-profiler verify-toolchain >/tmp/toolchain.json \

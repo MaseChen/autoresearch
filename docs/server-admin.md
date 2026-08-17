@@ -165,31 +165,37 @@ RepoDigest，因此提交 A 构建的 worker 在提交 B 激活后仍能回显�
 
 ```bash
 export SOURCE_REVISION="$(git rev-parse HEAD)"
-export DOCKER_CONFIG="$(mktemp -d /tmp/autoresearch-ghcr.XXXXXX)"
+export PROFILER_LOCAL_TAG="ghcr.io/masechen/autoresearch-metax-profiler:${SOURCE_REVISION}"
 
 PYTHONPATH=. python -c '
 from kernel_research.profiler_contract import PROFILER_BUILD_PROFILE_DIGEST
 print(PROFILER_BUILD_PROFILE_DIGEST)
 ' | tee profiler-build-profile-digest.txt
 
-printf '%s' "$GHCR_WRITE_TOKEN" | docker login ghcr.io \
-  --username masechen --password-stdin
-
-docker buildx build \
+DOCKER_BUILDKIT=0 docker build \
   --platform linux/amd64 \
+  --network=none \
+  --pull=false \
+  --no-cache \
   --build-arg "SOURCE_REVISION=$SOURCE_REVISION" \
   --file containers/profiler/Dockerfile \
-  --tag ghcr.io/masechen/autoresearch-metax-profiler:"$SOURCE_REVISION" \
-  --push .
+  --tag "$PROFILER_LOCAL_TAG" \
+  .
 
-docker logout ghcr.io
-rm -rf "$DOCKER_CONFIG"
-unset DOCKER_CONFIG GHCR_WRITE_TOKEN
+docker image inspect "$PROFILER_LOCAL_TAG" >profiler-image-local-inspect.json
 ```
 
-`SOURCE_REVISION` 必须是独立的修正提交 A2；不得从已知身份耦合错误的
-`e19cecc` 构建，也不得 amend 该提交。构建前确认该提交不修改 `kernel.py`，且
-工作树干净。
+本地 native build 阶段不得登录或推送 GHCR。必须先验证 image platform、OCI
+revision、`USER 1000:1000`、entrypoint、`WORKDIR /output`，容器内 entrypoint 的
+mode/owner 必须为 `555 0:0`，并以 `--pull=never` 运行 `verify-toolchain`。其 worker
+build digest 必须仍为 A2 冻结值
+`sha256:56dbc236e1757fcb46822ee5d5e2db10ce60014bb1a2cdf235d6b001c55bae8a`。
+
+`SOURCE_REVISION` 必须是独立的 native-builder 修正提交 A3；不得从已知身份耦合
+错误的 `e19cecc` 或 classic builder 无法解析的 A2 `559e8e9` 构建，也不得 amend
+任何旧提交。构建前确认该提交不修改 `kernel.py`，且工作树干净。A3 Dockerfile
+使用普通 `COPY`，随后在同一受信构建步骤中执行 `chmod 0555` 并以 `stat` 精确验证
+`555 0:0`；任何验证失败均停止构建。
 
 把 build profile digest、build 输出的 RepoDigest、source commit、base RepoDigest、
 image ID、worker revision、mcTracer 与两个 MetaX 库 hash 归档。提交 B 只能把该精确
@@ -199,8 +205,27 @@ image ID、worker revision、mcTracer 与两个 MetaX 库 hash 归档。提交 B
 activation digest 已绑定最终 RepoDigest。worker 输出只允许回显 build digest；镜像
 RepoDigest 由宿主的 activation profile 和精确 Docker argv 验证。
 
-服务器使用临时只读凭证拉取精确 digest，立即 logout 并删除临时
-`DOCKER_CONFIG`。随后通过 `kernel-autoresearch-admin update --doctor` 部署提交 B，
+只有本地检查全部通过且操作员批准约 12.71 GiB 上传后，才使用临时 write token
+执行 `docker push`，从成功输出解析唯一 registry digest，并按该 digest 再次 pull、
+inspect 和运行 `verify-toolchain`。然后立即 logout 并删除临时 `DOCKER_CONFIG`。
+凭证阶段必须独立开始，且使用受限目录：
+
+```bash
+export DOCKER_CONFIG="$(mktemp -d /tmp/autoresearch-ghcr.XXXXXX)"
+chmod 0700 "$DOCKER_CONFIG"
+
+printf '%s' "$GHCR_WRITE_TOKEN" | docker login ghcr.io \
+  --username masechen --password-stdin
+
+docker push "$PROFILER_LOCAL_TAG"
+
+docker logout ghcr.io
+rm -rf "$DOCKER_CONFIG"
+unset DOCKER_CONFIG GHCR_WRITE_TOKEN
+```
+
+服务器后续运行仅使用临时只读凭证拉取精确 digest。随后通过
+`kernel-autoresearch-admin update --doctor` 部署提交 B，
 完成 static、doctor 和完整主机回归。运行唯一公开 canary 入口：
 
 ```bash

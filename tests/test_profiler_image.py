@@ -36,6 +36,11 @@ import kernel_research.profiling as host
 
 
 class ProfilerContractTests(unittest.TestCase):
+    A2_BUILD_PROFILE_DIGEST = (
+        "sha256:56dbc236e1757fcb46822ee5d5e2db10"
+        "ce60014bb1a2cdf235d6b001c55bae8a"
+    )
+
     def test_submit_a_profile_is_exact_and_inactive(self) -> None:
         build = profiler_build_profile_snapshot()
         activation = profiler_activation_profile_snapshot()
@@ -52,6 +57,10 @@ class ProfilerContractTests(unittest.TestCase):
             PROFILE_COLLECTION_SCHEMA_VERSION,
         )
         self.assertEqual(PROFILER_BUILD_PROFILE_DIGEST, canonical_sha256(build))
+        self.assertEqual(
+            PROFILER_BUILD_PROFILE_DIGEST,
+            self.A2_BUILD_PROFILE_DIGEST,
+        )
         self.assertEqual(
             PROFILER_ACTIVATION_PROFILE_DIGEST,
             canonical_sha256(activation),
@@ -193,6 +202,21 @@ class ProfilerContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(f"FROM --platform=linux/amd64 {PROFILER_BASE_IMAGE}", dockerfile)
+        self.assertIn(
+            "COPY containers/profiler/bounded-profiler "
+            "/opt/kernel-research/bin/bounded-profiler",
+            dockerfile,
+        )
+        self.assertNotIn("COPY --chmod", dockerfile)
+        self.assertIn(
+            "chmod 0555 /opt/kernel-research/bin/bounded-profiler",
+            dockerfile,
+        )
+        self.assertIn(
+            "stat -c '%a %u:%g' /opt/kernel-research/bin/bounded-profiler",
+            dockerfile,
+        )
+        self.assertIn('= "555 0:0"', dockerfile)
         self.assertIn('ENTRYPOINT ["/opt/kernel-research/bin/bounded-profiler"]', dockerfile)
         self.assertIn("verify-toolchain", dockerfile)
         self.assertIn("org.opencontainers.image.revision", dockerfile)
