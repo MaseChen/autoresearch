@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -38,33 +39,32 @@ import kernel_research.profiling as host
 
 
 class ProfilerContractTests(unittest.TestCase):
-    A3_BUILD_PROFILE_DIGEST = (
-        "sha256:56dbc236e1757fcb46822ee5d5e2db10"
-        "ce60014bb1a2cdf235d6b001c55bae8a"
-    )
     A4_BUILD_PROFILE_DIGEST = (
         "sha256:a122359bc9c7d13356587964f51a4bdb"
         "68676f0841856d005cb380f1bd5facc7"
     )
-    ACTIVATED_IMAGE = (
-        "ghcr.io/masechen/autoresearch-metax-profiler@sha256:"
-        "9d5516991a89945e7ad008c33ee847667831f5f7fc39fccf7030745f4ffa9acb"
+    A5_BUILD_PROFILE_DIGEST = (
+        "sha256:13411bcfe57bcb74e1820e8ea60d30b6"
+        "f5245dceabfb8785a2573ddaff43b49f"
     )
     ACTIVATION_PROFILE_DIGEST = (
-        "sha256:bfd57223ce8bac17fdb38c63c29df840"
-        "0b9bf3dc8f3d280530f62542b8435e13"
+        "sha256:7673a0fd774f573dd2815136f0130fdf"
+        "615c78dbc2a07ac9176f1e8c631da77b"
     )
 
-    def test_submit_b_profile_is_exact_and_active(self) -> None:
+    def test_submit_a5_profile_is_exact_and_inactive(self) -> None:
         build = profiler_build_profile_snapshot()
         activation = profiler_activation_profile_snapshot()
-        self.assertTrue(PROFILER_ACTIVE)
+        self.assertFalse(PROFILER_ACTIVE)
         self.assertEqual(build["base_image"], PROFILER_BASE_IMAGE)
         self.assertNotIn("active", build)
         self.assertNotIn("profiler_image", build)
-        self.assertEqual(PROFILER_IMAGE, self.ACTIVATED_IMAGE)
-        self.assertEqual(activation["profiler_image"], self.ACTIVATED_IMAGE)
-        self.assertTrue(activation["active"])
+        self.assertEqual(
+            PROFILER_IMAGE,
+            PROFILER_IMAGE_REPOSITORY + "@sha256:" + "0" * 64,
+        )
+        self.assertEqual(activation["profiler_image"], PROFILER_IMAGE)
+        self.assertFalse(activation["active"])
         self.assertTrue(PROFILER_IMAGE.startswith(PROFILER_IMAGE_REPOSITORY))
         self.assertEqual(build["worker_revision"], PROFILER_WORKER_REVISION)
         self.assertEqual(
@@ -72,9 +72,10 @@ class ProfilerContractTests(unittest.TestCase):
             PROFILE_COLLECTION_SCHEMA_VERSION,
         )
         self.assertEqual(PROFILER_BUILD_PROFILE_DIGEST, canonical_sha256(build))
-        self.assertEqual(PROFILER_BUILD_PROFILE_DIGEST, self.A4_BUILD_PROFILE_DIGEST)
+        self.assertEqual(PROFILER_BUILD_PROFILE_DIGEST, self.A5_BUILD_PROFILE_DIGEST)
         self.assertNotEqual(
-            PROFILER_BUILD_PROFILE_DIGEST, self.A3_BUILD_PROFILE_DIGEST
+            PROFILER_BUILD_PROFILE_DIGEST,
+            self.A4_BUILD_PROFILE_DIGEST,
         )
         self.assertEqual(
             PROFILER_ACTIVATION_PROFILE_DIGEST,
@@ -84,9 +85,10 @@ class ProfilerContractTests(unittest.TestCase):
             PROFILER_ACTIVATION_PROFILE_DIGEST,
             self.ACTIVATION_PROFILE_DIGEST,
         )
-        require_active_profiler()
+        with self.assertRaisesRegex(ValueError, "inactive"):
+            require_active_profiler()
 
-    def test_a4_worker_echo_survives_activation_only_change(self) -> None:
+    def test_a5_worker_echo_survives_future_activation_only_change(self) -> None:
         request = ProfilerWorkerTests._request()
         commit_a_echo = request.echo()
         commit_a_build = profiler_build_profile_snapshot()
@@ -95,7 +97,12 @@ class ProfilerContractTests(unittest.TestCase):
             profiler_image=PROFILER_IMAGE_REPOSITORY + "@sha256:" + "0" * 64,
         )
         commit_b_build = profiler_build_profile_snapshot()
-        commit_b_activation = profiler_activation_profile_snapshot()
+        commit_b_activation = profiler_activation_profile_snapshot(
+            active=True,
+            profiler_image=(
+                PROFILER_IMAGE_REPOSITORY + "@sha256:" + "f" * 64
+            ),
+        )
         self.assertEqual(commit_b_build, commit_a_build)
         self.assertEqual(
             canonical_sha256(commit_b_build),
@@ -158,8 +165,10 @@ class ProfilerContractTests(unittest.TestCase):
                 "resource",
                 "collection_schema_version",
                 "worker_output_schema_version",
+                "phase_diagnostic_schema_version",
             },
         )
+        self.assertEqual(build["phase_diagnostic_schema_version"], 1)
         self.assertEqual(build["image_user"]["uid"], 1000)
         self.assertEqual(build["image_user"]["gid"], 1000)
         self.assertEqual(build["image_user"]["runtime_binding"], "exact")
@@ -167,6 +176,14 @@ class ProfilerContractTests(unittest.TestCase):
         self.assertEqual(build["platform"], "linux/amd64")
         self.assertEqual(build["limits"]["action_timeout_seconds"], 900.0)
         self.assertEqual(build["limits"]["toolchain_help_timeout_seconds"], 10.0)
+        self.assertEqual(
+            build["limits"]["phase_diagnostic_stream_bytes"],
+            16 * 1024,
+        )
+        self.assertEqual(
+            build["limits"]["phase_diagnostic_bytes"],
+            64 * 1024,
+        )
         self.assertEqual(build["limits"]["raw_trace_bytes"], 64 * 1024 * 1024)
         self.assertEqual(
             build["limits"]["canary_raw_trace_total_bytes"],
@@ -186,6 +203,14 @@ class ProfilerContractTests(unittest.TestCase):
             {"uid": 1000, "gid": 1000, "mode": "0700", "size": "64m"},
         )
         self.assertEqual(build["resource"]["resource_id"], "gpu1")
+        self.assertEqual(
+            build["paths"]["warmup_process"],
+            "/output/warmup-process.json",
+        )
+        self.assertEqual(
+            build["paths"]["tracked_process"],
+            "/output/tracked-process.json",
+        )
         self.assertEqual(build["resource"]["lease_ttl_seconds"], 930.0)
         self.assertEqual(build["resource"]["canary_lease_ttl_seconds"], 1830.0)
         self.assertEqual(len(build["resource"]["gpu_device_paths"]), 3)
@@ -653,6 +678,161 @@ class ProfilerWorkerTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertGreater(len(first), 0)
 
+    def test_phase_process_diagnostics_are_atomic_bounded_and_signal_aware(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            warmup_path = root / "warmup-process.json"
+            tracked_path = root / "tracked-process.json"
+            sentinel_path = root / "warmup-sentinel.json"
+            argv = ("python", "-m", "fixed-target")
+            large_stdout = b"x" * (
+                contract.PROFILE_PHASE_DIAGNOSTIC_STREAM_LIMIT_BYTES + 17
+            )
+            with (
+                mock.patch.object(
+                    worker, "PROFILE_OUTPUT_CONTAINER_DIRECTORY", str(root)
+                ),
+                mock.patch.object(worker, "_WARMUP_PROCESS", warmup_path),
+                mock.patch.object(worker, "_TRACKED_PROCESS", tracked_path),
+                mock.patch.object(
+                    worker.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess(
+                        argv,
+                        7,
+                        stdout=large_stdout,
+                        stderr=b"normal failure",
+                    ),
+                ),
+            ):
+                result, diagnostic = worker._run_hardware_phase(
+                    phase="warmup",
+                    argv=argv,
+                    timeout_seconds=10,
+                    sentinel_path=sentinel_path,
+                    environment={},
+                )
+            persisted = json.loads(warmup_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted, diagnostic)
+            self.assertLessEqual(
+                warmup_path.stat().st_size,
+                contract.PROFILE_PHASE_DIAGNOSTIC_LIMIT_BYTES,
+            )
+            self.assertEqual(result.returncode, 7)
+            self.assertIsNone(diagnostic["termination_signal"])
+            self.assertFalse(diagnostic["timed_out"])
+            self.assertEqual(diagnostic["sentinel"], {"status": "ABSENT"})
+            self.assertTrue(diagnostic["stdout"]["truncated"])
+            self.assertEqual(
+                diagnostic["stdout"]["sha256"],
+                "sha256:" + hashlib.sha256(large_stdout).hexdigest(),
+            )
+
+            with (
+                mock.patch.object(
+                    worker, "PROFILE_OUTPUT_CONTAINER_DIRECTORY", str(root)
+                ),
+                mock.patch.object(worker, "_TRACKED_PROCESS", tracked_path),
+                mock.patch.object(
+                    worker.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess(
+                        argv, -9, stdout=b"", stderr=b"terminated"
+                    ),
+                ),
+            ):
+                _result, signaled = worker._run_hardware_phase(
+                    phase="tracked",
+                    argv=argv,
+                    timeout_seconds=10,
+                    sentinel_path=root / "tracked-sentinel.json",
+                    environment={},
+                )
+            self.assertEqual(signaled["returncode"], -9)
+            self.assertEqual(signaled["termination_signal"], 9)
+
+            timeout = subprocess.TimeoutExpired(
+                argv,
+                10,
+                output=b"partial stdout",
+                stderr=b"partial stderr",
+            )
+            with (
+                mock.patch.object(
+                    worker, "PROFILE_OUTPUT_CONTAINER_DIRECTORY", str(root)
+                ),
+                mock.patch.object(worker, "_WARMUP_PROCESS", warmup_path),
+                mock.patch.object(worker.subprocess, "run", side_effect=timeout),
+                self.assertRaisesRegex(TimeoutError, "without trusted completion"),
+            ):
+                worker._run_hardware_phase(
+                    phase="warmup",
+                    argv=argv,
+                    timeout_seconds=10,
+                    sentinel_path=sentinel_path,
+                    environment={},
+                )
+            timed_out = json.loads(warmup_path.read_text(encoding="utf-8"))
+            self.assertTrue(timed_out["timed_out"])
+            self.assertIsNone(timed_out["returncode"])
+            self.assertEqual(
+                base64.b64decode(timed_out["stdout"]["content_base64"]),
+                b"partial stdout",
+            )
+
+    def test_phase_process_success_requires_exact_sentinel_consistency(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            process_path = root / "warmup-process.json"
+            sentinel_path = root / "warmup-sentinel.json"
+            sentinel = {
+                "case_id": "quick_decode_gate_up",
+                "phase": "warmup",
+                "status": "SUCCESS",
+            }
+            sentinel_path.write_text(
+                worker.canonical_json_text(sentinel),
+                encoding="utf-8",
+            )
+            argv = ("python", "-m", "fixed-target")
+            with (
+                mock.patch.object(
+                    worker, "PROFILE_OUTPUT_CONTAINER_DIRECTORY", str(root)
+                ),
+                mock.patch.object(worker, "_WARMUP_PROCESS", process_path),
+                mock.patch.object(
+                    worker.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess(
+                        argv, 0, stdout=b"complete", stderr=b""
+                    ),
+                ),
+            ):
+                result, diagnostic = worker._run_hardware_phase(
+                    phase="warmup",
+                    argv=argv,
+                    timeout_seconds=10,
+                    sentinel_path=sentinel_path,
+                    environment={},
+                )
+            worker._require_phase_sentinel_consistency(
+                phase="warmup",
+                argv=argv,
+                result=result,
+                diagnostic=diagnostic,
+                sentinel=sentinel,
+            )
+            with self.assertRaisesRegex(ValueError, "differs from its sentinel"):
+                worker._require_phase_sentinel_consistency(
+                    phase="warmup",
+                    argv=argv,
+                    result=result,
+                    diagnostic=diagnostic,
+                    sentinel={**sentinel, "status": "FAILED"},
+                )
+
     def test_trace_scan_rejects_symlinks_empty_and_bounds(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -718,6 +898,8 @@ class ProfilerWorkerTests(unittest.TestCase):
             ),
             mock.patch.object(worker, "_TRACE_DIRECTORY") as trace_dir,
             mock.patch.object(worker, "_write_outcome"),
+            mock.patch.object(worker, "_write_phase_process_diagnostic"),
+            mock.patch.object(worker, "_require_phase_sentinel_consistency"),
             mock.patch.object(
                 worker,
                 "_strict_json_file",
@@ -798,6 +980,10 @@ class ProfilerWorkerTests(unittest.TestCase):
                 ),
                 mock.patch.object(worker, "_TRACE_DIRECTORY") as trace_dir,
                 mock.patch.object(worker, "_write_outcome") as write_outcome,
+                mock.patch.object(worker, "_write_phase_process_diagnostic"),
+                mock.patch.object(
+                    worker, "_require_phase_sentinel_consistency"
+                ),
                 mock.patch.object(
                     worker, "_strict_json_file", side_effect=(warmup, tracked)
                 ),
@@ -899,6 +1085,8 @@ class ProfilerWorkerTests(unittest.TestCase):
             )
 
     def test_fixed_gpu_target_records_failure_without_raising(self) -> None:
+        from kernel_research import backends
+
         written: dict[str, object] = {}
 
         def capture(_path, value, **_kwargs):
@@ -922,6 +1110,59 @@ class ProfilerWorkerTests(unittest.TestCase):
             )
         self.assertEqual(written["status"], "FAILED")
         self.assertEqual(written["error_type"], "ValueError")
+
+        bootstrap_failure: dict[str, object] = {}
+
+        def capture_bootstrap(_path, value, **_kwargs):
+            bootstrap_failure.update(value)
+
+        with (
+            mock.patch.object(
+                worker,
+                "validate_candidate",
+                return_value=SimpleNamespace(valid=True, sha256="f" * 64),
+            ),
+            mock.patch.object(
+                backends,
+                "_load_c500_runtime",
+                return_value=(None, {"reason": "runtime import failed"}),
+            ),
+            mock.patch.object(
+                worker,
+                "_canonical_write",
+                side_effect=capture_bootstrap,
+            ),
+        ):
+            self.assertEqual(
+                worker._run_fixed_case_target(
+                    Path("/tmp/candidate/kernel.py"),
+                    Path("/output/warmup-sentinel.json"),
+                    phase="warmup",
+                ),
+                2,
+            )
+        self.assertEqual(bootstrap_failure["status"], "FAILED")
+        self.assertEqual(bootstrap_failure["error_type"], "RuntimeError")
+        self.assertIn("unavailable", bootstrap_failure["error"])
+
+        with (
+            mock.patch.object(
+                worker,
+                "validate_candidate",
+                return_value=SimpleNamespace(valid=False),
+            ),
+            mock.patch.object(
+                worker,
+                "_canonical_write",
+                side_effect=OSError("sentinel write failed"),
+            ),
+            self.assertRaisesRegex(OSError, "sentinel write failed"),
+        ):
+            worker._run_fixed_case_target(
+                Path("/tmp/candidate/kernel.py"),
+                Path("/output/target-sentinel.json"),
+                phase="tracked",
+            )
         with self.assertRaisesRegex(ValueError, "phase"):
             worker._run_fixed_case_target(
                 Path("/tmp/candidate/kernel.py"),
@@ -1026,6 +1267,10 @@ class ProfilerWorkerTests(unittest.TestCase):
                 ),
                 mock.patch.object(worker, "_TRACE_DIRECTORY") as trace_dir,
                 mock.patch.object(worker, "_write_outcome"),
+                mock.patch.object(worker, "_write_phase_process_diagnostic"),
+                mock.patch.object(
+                    worker, "_require_phase_sentinel_consistency"
+                ),
                 mock.patch.object(
                     worker, "_strict_json_file", side_effect=sentinels
                 ),
@@ -1099,6 +1344,47 @@ class ProfilerWorkerTests(unittest.TestCase):
         self.assertEqual(
             failure_outcome.call_args.kwargs["reason_code"],
             "WORKER_KNOWN_FAILURE",
+        )
+
+    def test_run_worker_keeps_missing_hardware_sentinel_unknown(self) -> None:
+        request = self._request("metax-hardware-counters-v1")
+        current_outcome = {
+            "status": "RUNNING",
+            "gpu_state": "STARTED",
+            "completion_trusted": False,
+        }
+        with (
+            mock.patch.object(worker, "_prepare_runtime_directories"),
+            mock.patch.object(Path, "mkdir"),
+            mock.patch.object(
+                worker, "_validate_request", return_value=(request, b"candidate")
+            ),
+            mock.patch.object(
+                worker,
+                "verify_toolchain",
+                return_value={"digest": "sha256:" + "5" * 64},
+            ),
+            mock.patch.object(
+                worker,
+                "_hardware_recipe",
+                side_effect=ValueError("hardware sentinel is missing"),
+            ),
+            mock.patch.object(
+                worker, "_strict_json_file", return_value=current_outcome
+            ),
+            mock.patch.object(worker, "_write_outcome") as write_outcome,
+            mock.patch.object(worker.sys, "stderr"),
+        ):
+            self.assertEqual(worker.run_worker(SimpleNamespace()), 2)
+        self.assertEqual(write_outcome.call_count, 2)
+        self.assertEqual(
+            write_outcome.call_args.kwargs,
+            {
+                "status": "FAILED",
+                "gpu_state": "STARTED",
+                "completion_trusted": False,
+                "reason_code": "WORKER_UNKNOWN_OUTCOME",
+            },
         )
 
     def test_internal_target_cli_rejects_path_alias_before_execution(self) -> None:

@@ -2,10 +2,10 @@
 
 ## Status
 
-Accepted; the reviewed A4 image is pinned and active. The first trusted server
-canary stopped safely with an UNKNOWN hardware-recipe outcome. Its original
-action is quarantined and non-replayable pending the reviewed host-side
-diagnostic and operator-abandon recovery path, followed by a new canary.
+Accepted; A5 is an inactive build submission pending a new image build and
+qualification. The reviewed A4 image reached a second trusted server canary,
+which stopped safely during the untraced hardware warmup with no completion
+sentinel. The action remains quarantined and non-replayable.
 
 ## Context
 
@@ -98,6 +98,16 @@ deployment authority merely because it uses the same candidate and device.
     reservation from leak accounting only when the complete Campaign, action,
     doctor, lease, abandonment and diagnostic proof agrees; any missing or
     altered link fails closed. The next image doctor always uses a new Campaign.
+14. Hardware warmup and tracked subprocesses each write one fixed atomic phase
+    diagnostic before the worker parses a sentinel:
+    `/output/warmup-process.json` and `/output/tracked-process.json`. Each binds
+    the worker/build identity, phase, argv digest, timeout, duration, return
+    code or termination signal, full stdout/stderr hashes, bounded output
+    excerpts, and the observed sentinel state. A phase diagnostic is diagnostic
+    only: it cannot establish GPU completion. Missing or inconsistent sentinel
+    evidence remains UNKNOWN; fatal GPU markers retain their independent hard
+    failure authority. The host copies available phase files into the same
+    private canary diagnostic CAS object before temporary output is removed.
 
 ## Rejected alternatives
 
@@ -115,6 +125,9 @@ deployment authority merely because it uses the same candidate and device.
   old action into a known outcome. Any subsequent qualification uses a new
   Campaign. If the worker, image or recipe changes, it also requires a new
   image/activation identity and a fresh soak clock.
+- Infer a known outcome from subprocess return code or phase diagnostic. A
+  normal nonzero exit, signal, timeout, partial output, or apparently clean
+  process still lacks completion authority without the exact sentinel.
 
 ## Validation and rollout
 
@@ -149,3 +162,15 @@ deployment authority merely because it uses the same candidate and device.
   Campaign, both compile manifest and hardware mctx archive must pass before
   soak begins. Any worker, recipe or image correction still requires a new
   build and activation commit.
+- The host-only diagnostic/recovery correction was then exercised by a new
+  canary. It successfully preserved the outer Docker diagnostic, proving the
+  hardware worker reached untraced warmup, but the A4 worker discarded the
+  inner subprocess result before sentinel parsing. A5 raises the worker
+  revision to `metax-bounded-profiler-worker-v3`, adds the two bounded phase
+  diagnostics to the build profile, and returns activation to `active=false`
+  with an all-zero image digest. Its build profile digest is
+  `sha256:13411bcfe57bcb74e1820e8ea60d30b6f5245dceabfb8785a2573ddaff43b49f`.
+  A5 does not change the candidate, mcTracer contract, recipe launch counts,
+  History, or baseline. It requires a new clean image build, push, digest pull,
+  runtime qualification, and separate activation commit before another new
+  canary Campaign may run.

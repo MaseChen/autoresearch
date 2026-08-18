@@ -2160,6 +2160,8 @@ _CANARY_DIAGNOSTIC_FILES = (
     "result.json",
     "warmup-sentinel.json",
     "target-sentinel.json",
+    "warmup-process.json",
+    "tracked-process.json",
 )
 
 

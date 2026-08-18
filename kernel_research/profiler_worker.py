@@ -9,6 +9,7 @@ after any GPU execution.
 from __future__ import annotations
 
 import argparse
+import base64
 from dataclasses import dataclass
 import hashlib
 import io
@@ -21,6 +22,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from typing import Any, Mapping, Sequence
 
 from .constants import CURRENT_C500_EVALUATION_PROTOCOL_ID, REQUIRED_MATCH_RATIO
@@ -46,12 +48,16 @@ from .profiler_contract import (
     PROFILE_OUTCOME_CONTAINER_PATH,
     PROFILE_OUTCOME_LIMIT_BYTES,
     PROFILE_OUTPUT_CONTAINER_DIRECTORY,
+    PROFILE_PHASE_DIAGNOSTIC_SCHEMA_VERSION,
+    PROFILE_PHASE_DIAGNOSTIC_LIMIT_BYTES,
+    PROFILE_PHASE_DIAGNOSTIC_STREAM_LIMIT_BYTES,
     PROFILE_RAW_TRACE_LIMIT_BYTES,
     PROFILE_RESULT_CONTAINER_PATH,
     PROFILE_RESULT_LIMIT_BYTES,
     PROFILE_TARGET_OUTPUT_LIMIT_BYTES,
     PROFILE_TARGET_SENTINEL_CONTAINER_PATH,
     PROFILE_TARGET_TIMEOUT_SECONDS,
+    PROFILE_TRACKED_PROCESS_CONTAINER_PATH,
     PROFILE_TRACE_CONTAINER_PATH,
     PROFILE_TRACE_DIRECTORY_CONTAINER_PATH,
     PROFILE_TRACE_FILE_LIMIT,
@@ -62,6 +68,7 @@ from .profiler_contract import (
     PROFILE_TOOLCHAIN_HELP_TIMEOUT_SECONDS,
     PROFILE_TRITON_CACHE_DIR,
     PROFILE_WARMUP_SENTINEL_CONTAINER_PATH,
+    PROFILE_WARMUP_PROCESS_CONTAINER_PATH,
     PROFILE_WARMUP_TIMEOUT_SECONDS,
     PROFILE_WORKER_OUTPUT_SCHEMA_VERSION,
     PROFILER_BUILD_PROFILE_DIGEST,
@@ -98,9 +105,25 @@ _EXECUTION_FAILURE_MARKERS = (
 _TRACE_DIRECTORY = Path(PROFILE_TRACE_DIRECTORY_CONTAINER_PATH)
 _WARMUP_SENTINEL = Path(PROFILE_WARMUP_SENTINEL_CONTAINER_PATH)
 _TARGET_SENTINEL = Path(PROFILE_TARGET_SENTINEL_CONTAINER_PATH)
+_WARMUP_PROCESS = Path(PROFILE_WARMUP_PROCESS_CONTAINER_PATH)
+_TRACKED_PROCESS = Path(PROFILE_TRACKED_PROCESS_CONTAINER_PATH)
 _TRACE_NAME = PROFILE_TRACE_NAME
 _WARMUP_TIMEOUT_SECONDS = PROFILE_WARMUP_TIMEOUT_SECONDS
 _TARGET_TIMEOUT_SECONDS = PROFILE_TARGET_TIMEOUT_SECONDS
+_PHASE_SENTINEL_SUMMARY_FIELDS = (
+    "schema_version",
+    "case_id",
+    "status",
+    "correctness_passed",
+    "target_completed",
+    "phase",
+    "warmup_launches",
+    "tracked_launches",
+    "target_success_sentinel",
+    "matched_ratio",
+    "error_type",
+    "error",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,7 +390,7 @@ def verify_toolchain() -> dict[str, Any]:
     ):
         raise ValueError("mcTracer help output does not match the frozen contract")
     descriptor = {
-        "schema_version": 1,
+        "schema_version": PROFILE_PHASE_DIAGNOSTIC_SCHEMA_VERSION,
         "worker_revision": PROFILER_WORKER_REVISION,
         "profiler_build_profile_digest": PROFILER_BUILD_PROFILE_DIGEST,
         "tools": tools,
@@ -561,6 +584,269 @@ def _copy_candidate_to_tmp(candidate: bytes) -> Path:
     finally:
         os.close(descriptor)
     return path
+
+
+def _process_output_bytes(value: object) -> bytes:
+    if value is None:
+        return b""
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        return value.encode("utf-8", errors="replace")
+    raise TypeError("profile phase process output has an unsupported type")
+
+
+def _phase_stream_evidence(value: object) -> dict[str, Any]:
+    content = _process_output_bytes(value)
+    selected = content[:PROFILE_PHASE_DIAGNOSTIC_STREAM_LIMIT_BYTES]
+    return {
+        "byte_size": len(content),
+        "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+        "captured_bytes": len(selected),
+        "truncated": len(selected) != len(content),
+        "content_base64": base64.b64encode(selected).decode("ascii"),
+    }
+
+
+def _phase_sentinel_observation(path: Path) -> dict[str, Any]:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return {"status": "ABSENT"}
+    except OSError as exc:
+        return {"status": "UNAVAILABLE", "error_type": type(exc).__name__}
+    if stat.S_ISLNK(metadata.st_mode):
+        return {"status": "REJECTED", "reason_code": "SYMLINK"}
+    if not stat.S_ISREG(metadata.st_mode):
+        return {"status": "REJECTED", "reason_code": "NON_REGULAR"}
+    try:
+        content = _regular_bytes(
+            path,
+            exact_path=str(path),
+            limit=PROFILE_RESULT_LIMIT_BYTES,
+            field="profile phase sentinel",
+        )
+    except (OSError, ValueError) as exc:
+        return {
+            "status": "UNAVAILABLE",
+            "error_type": type(exc).__name__,
+            "byte_size": int(metadata.st_size),
+        }
+    evidence: dict[str, Any] = {
+        "status": "PRESENT",
+        "byte_size": len(content),
+        "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+    }
+    try:
+        value = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        evidence.update(
+            {
+                "status": "INVALID",
+                "reason_code": "STRICT_JSON_REQUIRED",
+                "error_type": type(exc).__name__,
+            }
+        )
+        return evidence
+    if (
+        not isinstance(value, dict)
+        or canonical_json_text(value).encode("utf-8") != content
+    ):
+        evidence.update(
+            {
+                "status": "INVALID",
+                "reason_code": "CANONICAL_JSON_OBJECT_REQUIRED",
+            }
+        )
+        return evidence
+    evidence["document_summary"] = {
+        field: value[field]
+        for field in _PHASE_SENTINEL_SUMMARY_FIELDS
+        if field in value
+    }
+    return evidence
+
+
+def _phase_process_path(phase: str) -> Path:
+    if phase == "warmup":
+        return _WARMUP_PROCESS
+    if phase == "tracked":
+        return _TRACKED_PROCESS
+    raise ValueError("profile process diagnostic phase is not frozen")
+
+
+def _phase_process_diagnostic(
+    *,
+    phase: str,
+    argv: Sequence[str],
+    timeout_seconds: float,
+    duration_ms: int,
+    returncode: int | None,
+    timed_out: bool,
+    stdout: object,
+    stderr: object,
+    sentinel_path: Path,
+    launcher_error: BaseException | None,
+) -> dict[str, Any]:
+    if duration_ms < 0:
+        raise ValueError("profile phase duration cannot be negative")
+    return {
+        "schema_version": 1,
+        "kind": "METAX_PROFILE_PHASE_PROCESS_V1",
+        "worker_revision": PROFILER_WORKER_REVISION,
+        "profiler_build_profile_digest": PROFILER_BUILD_PROFILE_DIGEST,
+        "phase": phase,
+        "argv_digest": canonical_sha256(list(argv)),
+        "timeout_seconds": float(timeout_seconds),
+        "duration_ms": duration_ms,
+        "returncode": returncode,
+        "termination_signal": (
+            -returncode
+            if type(returncode) is int and returncode < 0
+            else None
+        ),
+        "timed_out": timed_out,
+        "launcher_error": (
+            None
+            if launcher_error is None
+            else {
+                "type": type(launcher_error).__name__,
+                "message": str(launcher_error)[:2000],
+            }
+        ),
+        "stdout": _phase_stream_evidence(stdout),
+        "stderr": _phase_stream_evidence(stderr),
+        "sentinel": _phase_sentinel_observation(sentinel_path),
+    }
+
+
+def _write_phase_process_diagnostic(
+    phase: str,
+    value: Mapping[str, Any],
+) -> None:
+    _canonical_write(
+        _phase_process_path(phase),
+        value,
+        limit=PROFILE_PHASE_DIAGNOSTIC_LIMIT_BYTES,
+        field=f"profile {phase} process diagnostic",
+    )
+
+
+def _run_hardware_phase(
+    *,
+    phase: str,
+    argv: Sequence[str],
+    timeout_seconds: float,
+    sentinel_path: Path,
+    environment: Mapping[str, str],
+) -> tuple[subprocess.CompletedProcess[bytes], dict[str, Any]]:
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            tuple(argv),
+            cwd=PROFILE_OUTPUT_CONTAINER_DIRECTORY,
+            env=dict(environment),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        diagnostic = _phase_process_diagnostic(
+            phase=phase,
+            argv=argv,
+            timeout_seconds=timeout_seconds,
+            duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+            returncode=None,
+            timed_out=True,
+            stdout=exc.stdout,
+            stderr=exc.stderr,
+            sentinel_path=sentinel_path,
+            launcher_error=None,
+        )
+        _write_phase_process_diagnostic(phase, diagnostic)
+        raise TimeoutError(
+            f"profile {phase} timed out without trusted completion"
+        ) from exc
+    except BaseException as exc:
+        diagnostic = _phase_process_diagnostic(
+            phase=phase,
+            argv=argv,
+            timeout_seconds=timeout_seconds,
+            duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+            returncode=None,
+            timed_out=False,
+            stdout=b"",
+            stderr=b"",
+            sentinel_path=sentinel_path,
+            launcher_error=exc,
+        )
+        _write_phase_process_diagnostic(phase, diagnostic)
+        raise
+    normalized = subprocess.CompletedProcess(
+        args=tuple(result.args),
+        returncode=int(result.returncode),
+        stdout=_process_output_bytes(result.stdout),
+        stderr=_process_output_bytes(result.stderr),
+    )
+    diagnostic = _phase_process_diagnostic(
+        phase=phase,
+        argv=argv,
+        timeout_seconds=timeout_seconds,
+        duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+        returncode=normalized.returncode,
+        timed_out=False,
+        stdout=normalized.stdout,
+        stderr=normalized.stderr,
+        sentinel_path=sentinel_path,
+        launcher_error=None,
+    )
+    _write_phase_process_diagnostic(phase, diagnostic)
+    return normalized, diagnostic
+
+
+def _require_phase_sentinel_consistency(
+    *,
+    phase: str,
+    argv: Sequence[str],
+    result: subprocess.CompletedProcess[bytes],
+    diagnostic: Mapping[str, Any],
+    sentinel: Mapping[str, Any],
+) -> None:
+    sentinel_bytes = canonical_json_text(dict(sentinel)).encode("utf-8")
+    observed = diagnostic.get("sentinel")
+    if not (
+        diagnostic.get("schema_version")
+        == PROFILE_PHASE_DIAGNOSTIC_SCHEMA_VERSION
+        and diagnostic.get("kind") == "METAX_PROFILE_PHASE_PROCESS_V1"
+        and diagnostic.get("worker_revision") == PROFILER_WORKER_REVISION
+        and diagnostic.get("profiler_build_profile_digest")
+        == PROFILER_BUILD_PROFILE_DIGEST
+        and diagnostic.get("phase") == phase
+        and diagnostic.get("argv_digest") == canonical_sha256(list(argv))
+        and diagnostic.get("returncode") == result.returncode
+        and diagnostic.get("timed_out") is False
+        and diagnostic.get("launcher_error") is None
+        and diagnostic.get("stdout", {}).get("sha256")
+        == "sha256:" + hashlib.sha256(result.stdout).hexdigest()
+        and diagnostic.get("stderr", {}).get("sha256")
+        == "sha256:" + hashlib.sha256(result.stderr).hexdigest()
+        and isinstance(observed, Mapping)
+        and observed.get("status") == "PRESENT"
+        and observed.get("byte_size") == len(sentinel_bytes)
+        and observed.get("sha256")
+        == "sha256:" + hashlib.sha256(sentinel_bytes).hexdigest()
+        and observed.get("document_summary")
+        == {
+            field: sentinel[field]
+            for field in _PHASE_SENTINEL_SUMMARY_FIELDS
+            if field in sentinel
+        }
+    ):
+        raise ValueError(
+            f"profile {phase} process diagnostic differs from its sentinel"
+        )
 
 
 def _run_fixed_case_target(
@@ -768,19 +1054,13 @@ def _hardware_recipe(
         "TMPDIR": PROFILE_TMPDIR,
         "TRITON_CACHE_DIR": PROFILE_TRITON_CACHE_DIR,
     }
-    try:
-        warmup_result = subprocess.run(
-            warmup_command,
-            cwd=PROFILE_OUTPUT_CONTAINER_DIRECTORY,
-            env=runtime_environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-            timeout=_WARMUP_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise TimeoutError("profile warmup timed out without trusted completion") from exc
+    warmup_result, warmup_process = _run_hardware_phase(
+        phase="warmup",
+        argv=warmup_command,
+        timeout_seconds=_WARMUP_TIMEOUT_SECONDS,
+        sentinel_path=_WARMUP_SENTINEL,
+        environment=runtime_environment,
+    )
     warmup_output = warmup_result.stdout + b"\n" + warmup_result.stderr
     if len(warmup_output) > PROFILE_TARGET_OUTPUT_LIMIT_BYTES:
         raise ValueError("profile warmup output exceeded its fixed limit")
@@ -798,6 +1078,13 @@ def _hardware_recipe(
         _WARMUP_SENTINEL,
         limit=PROFILE_RESULT_LIMIT_BYTES,
         field="profile warmup sentinel",
+    )
+    _require_phase_sentinel_consistency(
+        phase="warmup",
+        argv=warmup_command,
+        result=warmup_result,
+        diagnostic=warmup_process,
+        sentinel=warmup_sentinel,
     )
     warmup_success = (
         warmup_result.returncode == 0
@@ -820,19 +1107,13 @@ def _hardware_recipe(
             reason_code="WARMUP_FAILED",
         )
         raise ValueError("profile warmup did not produce trusted success evidence")
-    try:
-        command_result = subprocess.run(
-            command,
-            cwd=PROFILE_OUTPUT_CONTAINER_DIRECTORY,
-            env=runtime_environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-            timeout=_TARGET_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise TimeoutError("mcTracer target timed out without trusted completion") from exc
+    command_result, tracked_process = _run_hardware_phase(
+        phase="tracked",
+        argv=command,
+        timeout_seconds=_TARGET_TIMEOUT_SECONDS,
+        sentinel_path=_TARGET_SENTINEL,
+        environment=runtime_environment,
+    )
     combined = command_result.stdout + b"\n" + command_result.stderr
     if len(combined) > PROFILE_TARGET_OUTPUT_LIMIT_BYTES:
         raise ValueError("mcTracer target output exceeded its fixed limit")
@@ -851,6 +1132,13 @@ def _hardware_recipe(
         _TARGET_SENTINEL,
         limit=PROFILE_RESULT_LIMIT_BYTES,
         field="profile target sentinel",
+    )
+    _require_phase_sentinel_consistency(
+        phase="tracked",
+        argv=command,
+        result=command_result,
+        diagnostic=tracked_process,
+        sentinel=sentinel,
     )
     target_success = (
         sentinel.get("status") == "SUCCESS"

@@ -18,6 +18,7 @@ PROFILER_BUILD_PROFILE_SCHEMA_VERSION = 1
 PROFILER_ACTIVATION_PROFILE_SCHEMA_VERSION = 1
 PROFILE_COLLECTION_SCHEMA_VERSION = 2
 PROFILE_WORKER_OUTPUT_SCHEMA_VERSION = 2
+PROFILE_PHASE_DIAGNOSTIC_SCHEMA_VERSION = 1
 
 PROFILER_BASE_IMAGE = (
     "registry.cn-shanghai.aliyuncs.com/kcr-3rd/kesci_kernel_lab@sha256:"
@@ -25,15 +26,16 @@ PROFILER_BASE_IMAGE = (
 )
 PROFILER_IMAGE_REPOSITORY = "ghcr.io/masechen/autoresearch-metax-profiler"
 PROFILER_PLATFORM = "linux/amd64"
-# Submit B binds the independently reviewed A4 Linux/amd64 build to its exact
-# GHCR RepoDigest.  These two activation values are deliberately excluded from
-# the build profile echoed by the already-built worker.
+# Submit A5 changes the worker/build identity and is deliberately inactive
+# until its rebuilt Linux/amd64 image is independently pushed and qualified.
+# Activation values remain excluded from the build profile echoed by workers.
 PROFILER_IMAGE = (
     PROFILER_IMAGE_REPOSITORY
-    + "@sha256:9d5516991a89945e7ad008c33ee847667831f5f7fc39fccf7030745f4ffa9acb"
+    + "@sha256:"
+    + "0" * 64
 )
-PROFILER_ACTIVE = True
-PROFILER_WORKER_REVISION = "metax-bounded-profiler-worker-v2"
+PROFILER_ACTIVE = False
+PROFILER_WORKER_REVISION = "metax-bounded-profiler-worker-v3"
 PROFILER_ENTRYPOINT = "/opt/kernel-research/bin/bounded-profiler"
 PROFILER_IMAGE_UID = 1000
 PROFILER_IMAGE_GID = 1000
@@ -61,6 +63,8 @@ PROFILE_OUTPUT_CONTAINER_DIRECTORY = "/output"
 PROFILE_TRACE_DIRECTORY_CONTAINER_PATH = "/output/metax-mctx"
 PROFILE_WARMUP_SENTINEL_CONTAINER_PATH = "/output/warmup-sentinel.json"
 PROFILE_TARGET_SENTINEL_CONTAINER_PATH = "/output/target-sentinel.json"
+PROFILE_WARMUP_PROCESS_CONTAINER_PATH = "/output/warmup-process.json"
+PROFILE_TRACKED_PROCESS_CONTAINER_PATH = "/output/tracked-process.json"
 PROFILE_TRACE_NAME = "bounded-profile"
 PROFILE_HOME = "/tmp/profile-home"
 PROFILE_TMPDIR = "/tmp"
@@ -77,6 +81,8 @@ PROFILE_CANARY_GPU_SECONDS = 900.0
 PROFILE_OUTPUT_LIMIT_BYTES = 256 * 1024
 PROFILE_TOOLCHAIN_HELP_OUTPUT_LIMIT_BYTES = 64 * 1024
 PROFILE_TARGET_OUTPUT_LIMIT_BYTES = 256 * 1024
+PROFILE_PHASE_DIAGNOSTIC_STREAM_LIMIT_BYTES = 16 * 1024
+PROFILE_PHASE_DIAGNOSTIC_LIMIT_BYTES = 64 * 1024
 PROFILE_RESULT_LIMIT_BYTES = 64 * 1024
 PROFILE_OUTCOME_LIMIT_BYTES = 64 * 1024
 PROFILE_RAW_TRACE_LIMIT_BYTES = 64 * 1024 * 1024
@@ -200,6 +206,8 @@ def profiler_build_profile_snapshot() -> dict[str, Any]:
             "trace_directory": PROFILE_TRACE_DIRECTORY_CONTAINER_PATH,
             "warmup_sentinel": PROFILE_WARMUP_SENTINEL_CONTAINER_PATH,
             "target_sentinel": PROFILE_TARGET_SENTINEL_CONTAINER_PATH,
+            "warmup_process": PROFILE_WARMUP_PROCESS_CONTAINER_PATH,
+            "tracked_process": PROFILE_TRACKED_PROCESS_CONTAINER_PATH,
             "trace_name": PROFILE_TRACE_NAME,
             "home": PROFILE_HOME,
             "tmpdir": PROFILE_TMPDIR,
@@ -221,6 +229,10 @@ def profiler_build_profile_snapshot() -> dict[str, Any]:
                 PROFILE_TOOLCHAIN_HELP_OUTPUT_LIMIT_BYTES
             ),
             "target_output_bytes": PROFILE_TARGET_OUTPUT_LIMIT_BYTES,
+            "phase_diagnostic_stream_bytes": (
+                PROFILE_PHASE_DIAGNOSTIC_STREAM_LIMIT_BYTES
+            ),
+            "phase_diagnostic_bytes": PROFILE_PHASE_DIAGNOSTIC_LIMIT_BYTES,
             "candidate_bytes": PROFILE_CANDIDATE_LIMIT_BYTES,
             "result_bytes": PROFILE_RESULT_LIMIT_BYTES,
             "outcome_bytes": PROFILE_OUTCOME_LIMIT_BYTES,
@@ -256,6 +268,9 @@ def profiler_build_profile_snapshot() -> dict[str, Any]:
         },
         "collection_schema_version": PROFILE_COLLECTION_SCHEMA_VERSION,
         "worker_output_schema_version": PROFILE_WORKER_OUTPUT_SCHEMA_VERSION,
+        "phase_diagnostic_schema_version": (
+            PROFILE_PHASE_DIAGNOSTIC_SCHEMA_VERSION
+        ),
     }
 
 

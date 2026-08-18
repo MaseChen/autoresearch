@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import math
@@ -645,12 +646,18 @@ _DEFAULT_SUBJECT_CAMPAIGN = object()
 
 class BoundedProfilingTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._active_profiler = mock.patch.object(
+            profiling,
+            "require_active_profiler",
+            return_value=None,
+        )
         self._profile_euid = mock.patch.object(
             profiling, "_HOST_EFFECTIVE_UID", return_value=1000
         )
         self._profile_egid = mock.patch.object(
             profiling, "_HOST_EFFECTIVE_GID", return_value=1000
         )
+        self._active_profiler.start()
         self._profile_euid.start()
         self._profile_egid.start()
         self.temporary = tempfile.TemporaryDirectory()
@@ -724,6 +731,7 @@ class BoundedProfilingTests(unittest.TestCase):
         self.temporary.cleanup()
         self._profile_egid.stop()
         self._profile_euid.stop()
+        self._active_profiler.stop()
 
     def _record(
         self,
@@ -1954,6 +1962,14 @@ class BoundedProfilingTests(unittest.TestCase):
                 '{"phase":"warmup","status":"FAILED"}',
                 encoding="utf-8",
             )
+            (output / "warmup-process.json").write_text(
+                '{"phase":"warmup","returncode":2}',
+                encoding="utf-8",
+            )
+            (output / "tracked-process.json").write_text(
+                '{"phase":"tracked","returncode":null}',
+                encoding="utf-8",
+            )
 
         runner = _FakeProfileRunner(
             returncode=17,
@@ -2043,6 +2059,19 @@ class BoundedProfilingTests(unittest.TestCase):
             payload["worker_files"]["warmup-sentinel.json"]["status"],
             "PRESENT",
         )
+        for phase_file in ("warmup-process.json", "tracked-process.json"):
+            self.assertEqual(
+                payload["worker_files"][phase_file]["status"],
+                "PRESENT",
+            )
+            self.assertGreater(
+                len(
+                    base64.b64decode(
+                        payload["worker_files"][phase_file]["content_base64"]
+                    )
+                ),
+                0,
+            )
         self.assertIn(
             "warmup-sentinel.json",
             {entry["path"] for entry in payload["file_inventory"]["entries"]},

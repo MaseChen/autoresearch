@@ -263,6 +263,15 @@ UNKNOWN 或 hard failure 会保留 reservation 并 quarantine；不得重放。�
 输出会列出 intent、诊断对象和安全分类。修复若改变 worker、recipe 或镜像，必须产生
 新镜像和新激活提交；仅补宿主诊断或受信恢复边界时不得重建同一个已验证镜像。
 
+A5 起，hardware worker 还会在 sentinel 解析前固定写入
+`/output/warmup-process.json` 和 `/output/tracked-process.json`。两者包含 argv digest、
+returncode/termination signal、timeout、持续时间、完整 stdout/stderr hash、限长内容以及
+当时的 sentinel 状态。宿主私有诊断会收集存在的两个文件。process 文件本身不具完成
+权：没有严格 sentinel 时仍为 UNKNOWN，不能根据 returncode、日志或 phase 文件手工改
+成 known。A5 改变 worker/build profile，提交保持 `active=false` 和零 image digest；
+必须重新构建、推送、按 digest 拉取复验，再由独立 activation 提交启用。mcTracer help
+契约、固定 launch 次数和 `kernel.py` 均不得随 A5 改动。
+
 对已经进入 `PAUSED_UNKNOWN_OUTCOME` 或 `PAUSED_HARD_FAILURE` 的 image-doctor，先部署
 包含恢复能力的代码会被活动 Campaign 管理锁拒绝。这种情况下只能从该修复提交的干净
 detached recovery worktree 运行以下唯一入口，仍然读取正式配置和 canonical Campaign
