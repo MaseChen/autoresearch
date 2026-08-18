@@ -2,8 +2,10 @@
 
 ## Status
 
-Accepted; the reviewed A4 image is pinned and active, pending the trusted
-server canary and a fresh qualification soak.
+Accepted; the reviewed A4 image is pinned and active. The first trusted server
+canary stopped safely with an UNKNOWN hardware-recipe outcome. Its original
+action is quarantined and non-replayable pending the reviewed host-side
+diagnostic and operator-abandon recovery path, followed by a new canary.
 
 ## Context
 
@@ -79,6 +81,23 @@ deployment authority merely because it uses the same candidate and device.
    their digests. Changing the RepoDigest, activation bit, worker, recipe,
    toolchain, path, or limit invalidates prior soak completion and restarts the
    24/72/168-hour sequence.
+12. Before every canary recipe launch, the Campaign ledger stores an immutable
+    intent containing the fixed argv, recipe, image profiles, timeout and exact
+    resource fence. Before the temporary output directory is removed, success
+    and failure paths copy bounded stdout, stderr, worker outcome/result,
+    available warmup/target sentinels and a non-symlink file inventory into the
+    controller private CAS. The Campaign ledger links that object to the intent
+    and records return code, timeout/output-limit flags and the unchanged
+    known/UNKNOWN/hard classification. Diagnostics remain private and advisory.
+13. A quarantined canary action is never resumed. A dedicated operator command
+    first runs the ordinary trusted C500 doctor against the exact quarantined
+    resource and fencing epoch, then atomically records an immutable
+    abandonment, terminalizes the old Campaign, and changes only that old lease
+    from QUARANTINED to RELEASED. The original action stays RESERVED and its
+    UNKNOWN evidence stays intact. A later soak collector excludes this
+    reservation from leak accounting only when the complete Campaign, action,
+    doctor, lease, abandonment and diagnostic proof agrees; any missing or
+    altered link fails closed. The next image doctor always uses a new Campaign.
 
 ## Rejected alternatives
 
@@ -91,8 +110,11 @@ deployment authority merely because it uses the same candidate and device.
   absence is `UNAVAILABLE` with a fixed reason.
 - Activate a tag or image ID. Only a registry RepoDigest is stable enough for
   the soak identity and offline `--pull=never` execution.
-- Repair an UNKNOWN canary in place. The resource remains quarantined and a
-  changed image or worker is qualified in a new Campaign.
+- Repair or replay an UNKNOWN canary in place. A fresh doctor may establish
+  resource health and authorize explicit abandonment, but it cannot convert the
+  old action into a known outcome. Any subsequent qualification uses a new
+  Campaign. If the worker, image or recipe changes, it also requires a new
+  image/activation identity and a fresh soak clock.
 
 ## Validation and rollout
 
@@ -118,6 +140,12 @@ deployment authority merely because it uses the same candidate and device.
   build profile, upgrades the worker identity, and runs the build-time probe
   only after `USER 1000:1000`. It is never an amend or an in-place server
   workaround.
-- The first trusted server action is one image-doctor Campaign. Soak does not
-  begin until its compile manifest and hardware mctx archive both pass. Any
-  canary fix produces a new image and activation commit.
+- The first trusted server action reached the compile recipe and stored its
+  private CAS trace, then stopped during the hardware recipe without trusted
+  completion. The Campaign remains the immutable record of that UNKNOWN result;
+  it is not replayed or edited. A host-only diagnostic/recovery correction does
+  not change the reviewed A4 image or build profile. After trusted doctor plus
+  explicit abandonment, deployment of that control-plane correction, and a new
+  Campaign, both compile manifest and hardware mctx archive must pass before
+  soak begins. Any worker, recipe or image correction still requires a new
+  build and activation commit.

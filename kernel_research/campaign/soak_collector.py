@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from ..autorun.models import ControllerConfig
@@ -45,6 +46,7 @@ DOCKER_INVENTORY_TIMEOUT_SECONDS = 10.0
 DOCKER_INVENTORY_MAX_OUTPUT_BYTES = 64 * 1024
 GIT_PROBE_TIMEOUT_SECONDS = 10.0
 GIT_PROBE_MAX_OUTPUT_BYTES = 64 * 1024
+PROFILE_CANARY_DIAGNOSTIC_MAX_BYTES = 2 * 1024 * 1024
 
 COUNT_FIELDS = (
     "lease_overlap_count",
@@ -334,6 +336,64 @@ def _parse_json_fields(rows: list[dict[str, Any]], fields: Sequence[str]) -> Non
             canonical_json_text(decoded)
 
 
+def _read_private_canary_diagnostic(
+    config: ControllerConfig,
+    object_id: object,
+) -> tuple[dict[str, Any], int]:
+    digest = require_sha256_digest(
+        object_id,
+        field="profile canary diagnostic object id",
+    ).split(":", 1)[1]
+    root = (config.controller_dir / "objects" / "sha256").resolve()
+    path = root / digest[:2] / digest[2:]
+    if path.parent.resolve() != root / digest[:2]:
+        raise ValueError("profile canary diagnostic object path is unavailable")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > PROFILE_CANARY_DIAGNOSTIC_MAX_BYTES
+        ):
+            raise ValueError("profile canary diagnostic object is not bounded")
+        chunks: list[bytes] = []
+        remaining = int(before.st_size)
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                raise ValueError("profile canary diagnostic object was truncated")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ValueError("profile canary diagnostic object grew while reading")
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (
+        before.st_dev != after.st_dev
+        or before.st_ino != after.st_ino
+        or before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+    ):
+        raise ValueError("profile canary diagnostic object changed while reading")
+    payload = b"".join(chunks)
+    if hashlib.sha256(payload).hexdigest() != digest:
+        raise ValueError("profile canary diagnostic object digest is inconsistent")
+    try:
+        decoded = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("profile canary diagnostic object is not strict JSON") from exc
+    if not isinstance(decoded, dict):
+        raise ValueError("profile canary diagnostic object is not a JSON object")
+    if canonical_json_text(decoded).encode("utf-8") != payload:
+        raise ValueError("profile canary diagnostic object is not canonical")
+    return decoded, len(payload)
+
+
 def _timestamp(value: object) -> float:
     if not isinstance(value, str) or not value:
         raise ValueError("database timestamp is unavailable")
@@ -551,6 +611,53 @@ class SoakObservationCollector:
                             "baseline_ref_json",
                         }
                     ),
+                    "campaign_doctor_evidence": frozenset(
+                        {
+                            "digest",
+                            "campaign_id",
+                            "resource_id",
+                            "quarantine_fencing_epoch",
+                            "evidence_json",
+                        }
+                    ),
+                    "profile_canary_attempt_intents": frozenset(
+                        {
+                            "attempt_id",
+                            "campaign_id",
+                            "budget_action_key",
+                            "recipe_id",
+                            "intent_digest",
+                            "intent_json",
+                        }
+                    ),
+                    "profile_canary_attempt_diagnostics": frozenset(
+                        {
+                            "attempt_id",
+                            "campaign_id",
+                            "recipe_id",
+                            "classification",
+                            "reason_code",
+                            "returncode",
+                            "timed_out",
+                            "output_limited",
+                            "outcome_status",
+                            "diagnostic_object_id",
+                            "diagnostic_digest",
+                            "diagnostic_json",
+                        }
+                    ),
+                    "profile_canary_abandonments": frozenset(
+                        {
+                            "campaign_id",
+                            "budget_action_key",
+                            "doctor_evidence_digest",
+                            "resource_id",
+                            "quarantine_fencing_epoch",
+                            "diagnostic_unavailable",
+                            "abandonment_digest",
+                            "abandonment_json",
+                        }
+                    ),
                 },
             )
             campaigns = _rows(
@@ -571,6 +678,25 @@ class SoakObservationCollector:
                 "SELECT * FROM baseline_revisions "
                 "ORDER BY campaign_id, revision_index, id",
             )
+            doctor_evidence = _rows(
+                connection,
+                "SELECT * FROM campaign_doctor_evidence ORDER BY created_at, digest",
+            )
+            profile_intents = _rows(
+                connection,
+                "SELECT * FROM profile_canary_attempt_intents "
+                "ORDER BY created_at, attempt_id",
+            )
+            profile_diagnostics = _rows(
+                connection,
+                "SELECT * FROM profile_canary_attempt_diagnostics "
+                "ORDER BY created_at, attempt_id",
+            )
+            profile_abandonments = _rows(
+                connection,
+                "SELECT * FROM profile_canary_abandonments "
+                "ORDER BY created_at, campaign_id",
+            )
             connection.execute("COMMIT")
         finally:
             connection.close()
@@ -579,6 +705,10 @@ class SoakObservationCollector:
         _parse_json_fields(
             revisions, ("policy_snapshot_json", "baseline_ref_json")
         )
+        _parse_json_fields(doctor_evidence, ("evidence_json",))
+        _parse_json_fields(profile_intents, ("intent_json",))
+        _parse_json_fields(profile_diagnostics, ("diagnostic_json",))
+        _parse_json_fields(profile_abandonments, ("abandonment_json",))
         valid_child_statuses = {
             "PENDING", "RUNNING", "PROMOTED", "BUDGET_EXHAUSTED", "STOPPED",
             "FAILED", "HARD_FAILED", "UNKNOWN_GPU_OUTCOME",
@@ -636,12 +766,202 @@ class SoakObservationCollector:
             if isinstance(child.get("controller_run_id"), str)
             and child["controller_run_id"]
         }
+        campaign_by_id = {str(row["id"]): row for row in campaigns}
+        budget_by_key = {
+            (str(row["campaign_id"]), str(row["idempotency_key"])): row
+            for row in budgets
+        }
+        lease_by_fence = {
+            (str(row["resource_id"]), int(row["fencing_epoch"])): row
+            for row in leases
+        }
+        doctor_by_digest = {str(row["digest"]): row for row in doctor_evidence}
+        intent_by_attempt: dict[str, dict[str, Any]] = {}
+        for row in profile_intents:
+            intent = json.loads(str(row.get("intent_json")))
+            attempt_id = row.get("attempt_id")
+            if not (
+                isinstance(intent, dict)
+                and isinstance(attempt_id, str)
+                and attempt_id
+                and intent.get("attempt_id") == attempt_id
+                and intent.get("campaign_id") == row.get("campaign_id")
+                and intent.get("budget_action_key")
+                == row.get("budget_action_key")
+                and intent.get("recipe_id") == row.get("recipe_id")
+                and row.get("intent_digest") == canonical_sha256(intent)
+                and attempt_id not in intent_by_attempt
+            ):
+                raise ValueError("profile canary attempt intent is unavailable")
+            intent_by_attempt[attempt_id] = row
+        diagnostic_by_attempt = {
+            str(row["attempt_id"]): row for row in profile_diagnostics
+        }
+        terminal_diagnostics_by_campaign: dict[str, list[dict[str, Any]]] = {}
+        for row in profile_diagnostics:
+            ledger = json.loads(str(row.get("diagnostic_json")))
+            attempt_id = str(row.get("attempt_id"))
+            intent_row = intent_by_attempt.get(attempt_id)
+            if not isinstance(ledger, dict) or intent_row is None:
+                raise ValueError("profile canary diagnostic identity is unavailable")
+            private, byte_size = _read_private_canary_diagnostic(
+                self.config,
+                row.get("diagnostic_object_id"),
+            )
+            command = private.get("command")
+            outcome = private.get("outcome")
+            inventory = private.get("file_inventory")
+            outcome_status = (
+                outcome.get("status") if isinstance(outcome, dict) else None
+            )
+            if not (
+                row.get("diagnostic_digest") == canonical_sha256(ledger)
+                and ledger.get("attempt_id") == attempt_id
+                and ledger.get("campaign_id") == row.get("campaign_id")
+                and ledger.get("budget_action_key")
+                == intent_row.get("budget_action_key")
+                and ledger.get("recipe_id") == row.get("recipe_id")
+                and ledger.get("recipe_id") == intent_row.get("recipe_id")
+                and ledger.get("diagnostic_object_id")
+                == row.get("diagnostic_object_id")
+                and ledger.get("diagnostic_object_bytes") == byte_size
+                and ledger.get("classification") == row.get("classification")
+                and ledger.get("reason_code") == row.get("reason_code")
+                and ledger.get("returncode") == row.get("returncode")
+                and ledger.get("timed_out") is bool(row.get("timed_out"))
+                and ledger.get("output_limited")
+                is bool(row.get("output_limited"))
+                and ledger.get("outcome_status") == row.get("outcome_status")
+                and private.get("schema_version") == 1
+                and private.get("kind")
+                == "PROFILE_IMAGE_CANARY_PRIVATE_DIAGNOSTIC"
+                and private.get("attempt_id") == attempt_id
+                and private.get("campaign_id") == row.get("campaign_id")
+                and private.get("budget_action_key")
+                == intent_row.get("budget_action_key")
+                and private.get("recipe_id") == row.get("recipe_id")
+                and private.get("classification") == row.get("classification")
+                and private.get("reason_code") == row.get("reason_code")
+                and isinstance(command, dict)
+                and command.get("returncode") == row.get("returncode")
+                and command.get("timed_out") is bool(row.get("timed_out"))
+                and command.get("output_limited")
+                is bool(row.get("output_limited"))
+                and outcome_status == row.get("outcome_status")
+                and isinstance(inventory, dict)
+                and isinstance(inventory.get("entries"), list)
+                and ledger.get("inventory_entries")
+                == len(inventory["entries"])
+            ):
+                raise ValueError("profile canary diagnostic proof is inconsistent")
+            if row.get("classification") in {"UNKNOWN", "HARD_FAILURE"}:
+                terminal_diagnostics_by_campaign.setdefault(
+                    str(row.get("campaign_id")), []
+                ).append(
+                    {
+                        "attempt_id": attempt_id,
+                        "classification": row.get("classification"),
+                        "diagnostic_object_id": row.get("diagnostic_object_id"),
+                    }
+                )
+        trusted_abandoned_actions: set[tuple[str, str]] = set()
+        for row in profile_abandonments:
+            campaign_id = row.get("campaign_id")
+            action_key = row.get("budget_action_key")
+            evidence_digest = row.get("doctor_evidence_digest")
+            abandonment = json.loads(str(row.get("abandonment_json")))
+            if not (
+                isinstance(campaign_id, str)
+                and campaign_id
+                and isinstance(action_key, str)
+                and action_key
+                and isinstance(evidence_digest, str)
+                and isinstance(abandonment, dict)
+                and row.get("abandonment_digest")
+                == canonical_sha256(abandonment)
+                and row.get("diagnostic_unavailable") in {0, 1}
+                and abandonment.get("schema_version") == 1
+                and abandonment.get("kind")
+                == "PROFILE_IMAGE_CANARY_OPERATOR_ABANDONMENT"
+                and abandonment.get("campaign_id") == campaign_id
+                and abandonment.get("budget_action_key") == action_key
+                and abandonment.get("doctor_evidence_digest") == evidence_digest
+                and abandonment.get("resource_id") == row.get("resource_id")
+                and abandonment.get("quarantine_fencing_epoch")
+                == row.get("quarantine_fencing_epoch")
+                and abandonment.get("preserved_budget_status") == "RESERVED"
+                and abandonment.get("replay_permitted") is False
+                and abandonment.get("diagnostic_unavailable")
+                is bool(row["diagnostic_unavailable"])
+            ):
+                raise ValueError("profile canary abandonment identity is unavailable")
+            campaign = campaign_by_id.get(campaign_id)
+            budget = budget_by_key.get((campaign_id, action_key))
+            doctor = doctor_by_digest.get(evidence_digest)
+            resource_id = abandonment.get("resource_id")
+            fencing_epoch = abandonment.get("quarantine_fencing_epoch")
+            if type(fencing_epoch) is not int or fencing_epoch <= 0:
+                raise ValueError("profile canary abandonment fence is unavailable")
+            lease = lease_by_fence.get((str(resource_id), fencing_epoch))
+            if (
+                campaign is None
+                or campaign.get("status") != "CANCELLED"
+                or json.loads(str(campaign.get("snapshot_json"))).get("kind")
+                != "PROFILE_IMAGE_CANARY"
+                or budget is None
+                or budget.get("status") != "RESERVED"
+                or budget.get("action_kind") != "PROFILE_IMAGE_CANARY"
+                or doctor is None
+                or doctor.get("campaign_id") != campaign_id
+                or doctor.get("resource_id") != resource_id
+                or doctor.get("quarantine_fencing_epoch") != fencing_epoch
+                or json.loads(str(doctor.get("evidence_json"))).get("status")
+                != "SUCCESS"
+                or lease is None
+                or lease.get("campaign_id") != campaign_id
+                or lease.get("status") != "RELEASED"
+            ):
+                raise ValueError("profile canary abandonment proof is incomplete")
+            declared_diagnostics = abandonment.get("terminal_diagnostics")
+            if not isinstance(declared_diagnostics, list):
+                raise ValueError("profile canary terminal diagnostics are unavailable")
+            expected_diagnostics = terminal_diagnostics_by_campaign.get(
+                campaign_id, []
+            )
+            if declared_diagnostics != expected_diagnostics:
+                raise ValueError("profile canary terminal diagnostics are incomplete")
+            for declared in declared_diagnostics:
+                if not isinstance(declared, dict):
+                    raise ValueError("profile canary terminal diagnostic is invalid")
+                stored = diagnostic_by_attempt.get(str(declared.get("attempt_id")))
+                if (
+                    stored is None
+                    or stored.get("campaign_id") != campaign_id
+                    or stored.get("classification")
+                    not in {"UNKNOWN", "HARD_FAILURE"}
+                    or stored.get("classification") != declared.get("classification")
+                    or stored.get("diagnostic_object_id")
+                    != declared.get("diagnostic_object_id")
+                ):
+                    raise ValueError("profile canary terminal diagnostic is unproven")
+            if bool(row["diagnostic_unavailable"]) != (not expected_diagnostics):
+                raise ValueError("profile canary diagnostic availability is inconsistent")
+            trusted_abandoned_actions.add((campaign_id, action_key))
         budget_leaks = 0
         for budget in budgets:
             status = budget.get("status")
             if status not in {"RESERVED", "SETTLED", "CANCELLED"}:
                 raise ValueError("budget status is unavailable")
             if status != "RESERVED":
+                continue
+            if (
+                budget.get("action_kind") == "PROFILE_IMAGE_CANARY"
+                and (
+                    str(budget.get("campaign_id")),
+                    str(budget.get("idempotency_key")),
+                )
+                in trusted_abandoned_actions
+            ):
                 continue
             if budget.get("action_kind") != "CHILD_RUN":
                 budget_leaks += 1
@@ -702,6 +1022,10 @@ class SoakObservationCollector:
             "budgets": budgets,
             "leases": leases,
             "baseline_revisions": revisions,
+            "campaign_doctor_evidence": doctor_evidence,
+            "profile_canary_intents": profile_intents,
+            "profile_canary_diagnostics": profile_diagnostics,
+            "profile_canary_abandonments": profile_abandonments,
         }
         cursor = {
             "campaign_count": len(campaigns),
@@ -713,6 +1037,8 @@ class SoakObservationCollector:
             "baseline_revision_max_index": max(
                 (int(row["revision_index"]) for row in revisions), default=-1
             ),
+            "profile_canary_abandonment_count": len(profile_abandonments),
+            "profile_canary_attempt_count": len(profile_intents),
         }
         source = _source_record(
             name="campaign.sqlite3",
@@ -724,6 +1050,8 @@ class SoakObservationCollector:
                 "budget_action_count": len(budgets),
                 "lease_count": len(leases),
                 "baseline_revision_count": len(revisions),
+                "profile_canary_abandonment_count": len(profile_abandonments),
+                "profile_canary_attempt_count": len(profile_intents),
                 "activity": {
                     "terminal_children": terminal_children,
                     "staged_revisions": staged_revisions,

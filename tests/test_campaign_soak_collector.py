@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
+import hashlib
 import math
 from pathlib import Path
 import sqlite3
@@ -10,6 +11,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+import kernel_research.campaign.soak_collector as soak_collector
 from kernel_research.autorun.models import ControllerConfig
 from kernel_research.autorun.runtime import CommandResult
 from kernel_research.autorun.store import ControllerStore
@@ -20,7 +22,11 @@ from kernel_research.campaign.soak_collector import (
     SoakObservationCollector,
 )
 from kernel_research.campaign.store import CampaignStore
-from kernel_research.platform.identity import BaselineRef
+from kernel_research.platform.canonical import canonical_json_text, canonical_sha256
+from kernel_research.platform.identity import (
+    BaselineRef,
+    ExecutionEnvironmentDigest,
+)
 from kernel_research.profiler_contract import (
     PROFILER_ACTIVATION_PROFILE_DIGEST,
     PROFILER_BUILD_PROFILE_DIGEST,
@@ -34,6 +40,13 @@ NAMESPACE_B = "sha256:" + "b" * 64
 SOURCE = "source-sha256-v1:" + "1" * 64
 CANDIDATE = "c" * 64
 HARD_CANDIDATE = "d" * 64
+ENVIRONMENT = ExecutionEnvironmentDigest.resolved(
+    evaluator_image_digest="sha256:" + "6" * 64,
+    toolchain_digest="sha256:" + "7" * 64,
+    framework_digest="sha256:" + "8" * 64,
+    operator_abi_digest="sha256:" + "9" * 64,
+    build_flags_digest="sha256:" + "0" * 64,
+)
 
 
 def _utc(epoch: float) -> str:
@@ -280,6 +293,270 @@ class CampaignSoakCollectorTests(unittest.TestCase):
         self.assertEqual(observation.counts["lease_overlap_count"], 1)
         self.assertEqual(observation.counts["orphan_container_count"], 1)
         self.assertEqual(observation.counts["budget_leak_count"], 1)
+
+    def test_abandoned_canary_reservation_requires_complete_trusted_proof(
+        self,
+    ) -> None:
+        campaign_id = "profile-image-canary-abandoned"
+        action_key = "profile-image-canary-v1"
+        recipe_id = "metax-hardware-counters-v1"
+        profiler_image = "profiler@sha256:" + "a" * 64
+        build_digest = "sha256:" + "b" * 64
+        activation_digest = "sha256:" + "c" * 64
+        baseline = BaselineRef.create(
+            namespace=NAMESPACE_A,
+            artifact_id=SOURCE,
+            source="campaign",
+            revision="canary-deployment-seed-v2",
+            execution_environment=ENVIRONMENT,
+        )
+        self.campaign.create_campaign(
+            campaign_id=campaign_id,
+            namespace_id=NAMESPACE_A,
+            mode="DISCOVERY",
+            snapshot={
+                "kind": "PROFILE_IMAGE_CANARY",
+                "profiler_image": profiler_image,
+                "profiler_build_profile_digest": build_digest,
+                "profiler_activation_profile_digest": activation_digest,
+                "recipes": [recipe_id],
+            },
+            budget_limit=BudgetAmount(wall_ms=1_800_000, gpu_ms=900_000),
+            initial_baseline_ref=baseline,
+            initial_policy_snapshot={"kind": "PROFILE_IMAGE_CANARY"},
+            allow_staged_lineage=False,
+        )
+        self.campaign.start_campaign(campaign_id)
+        self.campaign.reserve_budget(
+            campaign_id,
+            idempotency_key=action_key,
+            action_kind="PROFILE_IMAGE_CANARY",
+            amount=BudgetAmount(wall_ms=1_800_000, gpu_ms=900_000),
+        )
+        lease = self.campaign.acquire_resource(
+            campaign_id,
+            resource_id="gpu1",
+            ttl_seconds=1_830,
+        )
+        intent_material = {
+            "schema_version": 1,
+            "kind": "PROFILE_IMAGE_CANARY_ATTEMPT",
+            "campaign_id": campaign_id,
+            "budget_action_key": action_key,
+            "recipe_id": recipe_id,
+            "case_id": "quick_decode_gate_up",
+            "requires_gpu": True,
+            "resource_id": "gpu1",
+            "fencing_epoch": lease.fencing_epoch,
+            "profiler_image": profiler_image,
+            "profiler_build_profile_digest": build_digest,
+            "profiler_activation_profile_digest": activation_digest,
+            "container_name": "kar-profile-canary-test",
+            "argv": ["docker", "run", "--rm", profiler_image],
+            "argv_digest": canonical_sha256(
+                ["docker", "run", "--rm", profiler_image]
+            ),
+            "timeout_seconds": 900.0,
+            "expected_worker_echo": {"recipe_id": recipe_id},
+        }
+        intent = {
+            **intent_material,
+            "attempt_id": (
+                "profile-canary-attempt-"
+                + canonical_sha256(intent_material).split(":", 1)[1]
+            ),
+        }
+        self.campaign.record_profile_canary_attempt_intent(
+            campaign_id,
+            intent=intent,
+        )
+        private_diagnostic = {
+            "schema_version": 1,
+            "kind": "PROFILE_IMAGE_CANARY_PRIVATE_DIAGNOSTIC",
+            "attempt_id": intent["attempt_id"],
+            "campaign_id": campaign_id,
+            "budget_action_key": action_key,
+            "recipe_id": recipe_id,
+            "classification": "UNKNOWN",
+            "reason_code": "NONZERO_EXIT",
+            "cause": {
+                "type": "ValueError",
+                "message": "bounded profiler returned non-zero",
+                "message_truncated": False,
+            },
+            "command": {
+                "available": True,
+                "argv": intent["argv"],
+                "returncode": 17,
+                "timed_out": False,
+                "output_limited": False,
+                "stdout": {"encoding": "utf-8", "content": "", "byte_size": 0},
+                "stderr": {"encoding": "utf-8", "content": "failure", "byte_size": 7},
+            },
+            "outcome": None,
+            "worker_files": {},
+            "file_inventory": {
+                "entries": [],
+                "truncated": False,
+                "scan_errors": [],
+            },
+        }
+        diagnostic_bytes = canonical_json_text(private_diagnostic).encode("utf-8")
+        diagnostic_object_id = "sha256:" + hashlib.sha256(
+            diagnostic_bytes
+        ).hexdigest()
+        diagnostic_digest = diagnostic_object_id.split(":", 1)[1]
+        diagnostic_path = (
+            self.controller_dir
+            / "objects"
+            / "sha256"
+            / diagnostic_digest[:2]
+            / diagnostic_digest[2:]
+        )
+        diagnostic_path.parent.mkdir(parents=True)
+        diagnostic_path.write_bytes(diagnostic_bytes)
+        self.campaign.record_profile_canary_attempt_diagnostic(
+            campaign_id,
+            diagnostic={
+                "schema_version": 1,
+                "kind": "PROFILE_IMAGE_CANARY_DIAGNOSTIC",
+                "attempt_id": intent["attempt_id"],
+                "campaign_id": campaign_id,
+                "budget_action_key": action_key,
+                "recipe_id": recipe_id,
+                "diagnostic_object_id": diagnostic_object_id,
+                "diagnostic_object_bytes": len(diagnostic_bytes),
+                "classification": "UNKNOWN",
+                "reason_code": "NONZERO_EXIT",
+                "returncode": 17,
+                "timed_out": False,
+                "output_limited": False,
+                "outcome_status": None,
+                "inventory_entries": 0,
+            },
+        )
+        self.campaign.release_resource(
+            lease,
+            quarantine=True,
+            reason="unknown canary outcome",
+        )
+        self.campaign.pause_campaign(
+            campaign_id,
+            status="PAUSED_UNKNOWN_OUTCOME",
+            reason="unknown canary outcome",
+        )
+        doctor = self.campaign.record_doctor_evidence(
+            campaign_id,
+            evidence={
+                "schema_version": 1,
+                "kind": "CAMPAIGN_RESUME_DOCTOR",
+                "status": "SUCCESS",
+                "campaign_id": campaign_id,
+                "resource_id": "gpu1",
+                "observed_epoch": time.time() + 1,
+                "namespace_id": NAMESPACE_A,
+                "config_digest": "sha256:" + "f" * 64,
+                "execution_environment": ENVIRONMENT.to_dict(),
+                "doctor_result": {
+                    "status": "SUCCESS",
+                    "c500_probe": {
+                        "environment": {"compile_probe_status": "PASSED"}
+                    },
+                },
+            },
+        )
+        self.campaign.abandon_profile_canary(
+            campaign_id,
+            doctor_evidence_digest=doctor["digest"],
+            budget_action_key=action_key,
+        )
+
+        trusted = self.collector.collect(
+            interval_start_epoch=0,
+            interval_end_epoch=time.time() + 5,
+        )
+        self.assertEqual(trusted.status, "AVAILABLE", trusted.to_dict())
+        self.assertEqual(trusted.counts["budget_leak_count"], 0)
+        self.assertEqual(
+            trusted.sources["campaign"]["summary"][
+                "profile_canary_abandonment_count"
+            ],
+            1,
+        )
+
+        diagnostic_path.write_text("corrupted", encoding="utf-8")
+        corrupt_diagnostic = self.collector.collect(
+            interval_start_epoch=0,
+            interval_end_epoch=time.time() + 5,
+        )
+        self.assertEqual(corrupt_diagnostic.status, "UNAVAILABLE")
+        self.assertIn(
+            "CAMPAIGN_DB_UNAVAILABLE",
+            corrupt_diagnostic.unavailable_reasons,
+        )
+        diagnostic_path.write_bytes(diagnostic_bytes)
+
+        self.campaign.connection.execute(
+            """
+            UPDATE resource_leases SET status = 'QUARANTINED'
+            WHERE campaign_id = ? AND fencing_epoch = ?
+            """,
+            (campaign_id, lease.fencing_epoch),
+        )
+        self.campaign.connection.commit()
+        tampered = self.collector.collect(
+            interval_start_epoch=0,
+            interval_end_epoch=time.time() + 5,
+        )
+        self.assertEqual(tampered.status, "UNAVAILABLE")
+        self.assertIn(
+            "CAMPAIGN_DB_UNAVAILABLE",
+            tampered.unavailable_reasons,
+        )
+
+    def test_private_canary_diagnostic_reader_is_bounded_and_canonical(
+        self,
+    ) -> None:
+        objects = self.controller_dir / "objects" / "sha256"
+
+        def store(payload: bytes) -> str:
+            digest = hashlib.sha256(payload).hexdigest()
+            path = objects / digest[:2] / digest[2:]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+            return "sha256:" + digest
+
+        valid_payload = canonical_json_text({"status": "private"}).encode()
+        valid_id = store(valid_payload)
+        value, byte_size = soak_collector._read_private_canary_diagnostic(
+            self.config,
+            valid_id,
+        )
+        self.assertEqual(value, {"status": "private"})
+        self.assertEqual(byte_size, len(valid_payload))
+
+        for label, payload, message in (
+            ("empty", b"", "bounded"),
+            ("invalid utf8", b"\xff", "strict JSON"),
+            ("scalar", b"[]", "JSON object"),
+            ("noncanonical", b'{"status": "private"}', "canonical"),
+        ):
+            with self.subTest(label=label), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                soak_collector._read_private_canary_diagnostic(
+                    self.config,
+                    store(payload),
+                )
+
+        oversized = b"x" * (
+            soak_collector.PROFILE_CANARY_DIAGNOSTIC_MAX_BYTES + 1
+        )
+        with self.assertRaisesRegex(ValueError, "bounded"):
+            soak_collector._read_private_canary_diagnostic(
+                self.config,
+                store(oversized),
+            )
 
     def test_hard_retry_counts_only_specific_iteration_in_same_namespace(self) -> None:
         baseline_revision = self._seed_campaign()

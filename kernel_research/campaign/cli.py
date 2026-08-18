@@ -190,6 +190,12 @@ def _status(args: argparse.Namespace) -> int:
                 "campaign": store.get_campaign(args.campaign_id),
                 "children": store.list_child_runs(args.campaign_id),
                 "lineage": store.list_baseline_revisions(args.campaign_id),
+                "profile_canary_attempts": (
+                    store.list_profile_canary_attempts(args.campaign_id)
+                ),
+                "profile_canary_abandonment": (
+                    store.get_profile_canary_abandonment(args.campaign_id)
+                ),
                 "integrity": store.integrity_check(),
             }
     return _success("campaign.status", result)

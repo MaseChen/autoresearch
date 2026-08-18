@@ -195,6 +195,7 @@ def trusted_resume_doctor(
     campaign_store: CampaignStore,
     campaign: Mapping[str, Any],
     resource_id: str,
+    trusted_namespace: ResearchNamespace | None = None,
     controller_factory: ControllerFactory = ResearchController,
     clock: Callable[[], float] = time.time,
 ) -> dict[str, Any]:
@@ -217,7 +218,17 @@ def trusted_resume_doctor(
     snapshot = campaign.get("snapshot")
     if not isinstance(snapshot, Mapping):
         raise ValueError("Campaign has no frozen snapshot")
-    namespace = _trusted_target_namespace(snapshot.get("namespace"))
+    if trusted_namespace is None:
+        namespace = _trusted_target_namespace(snapshot.get("namespace"))
+    else:
+        namespace = _trusted_target_namespace(trusted_namespace)
+        if (
+            snapshot.get("kind") != "PROFILE_IMAGE_CANARY"
+            or snapshot.get("namespace_id") != namespace.namespace_id
+        ):
+            raise ValueError(
+                "trusted namespace override is limited to an exact image canary"
+            )
     if campaign.get("namespace_id") != namespace.namespace_id:
         raise ValueError("Campaign namespace differs from its frozen snapshot")
     if not isinstance(resource_id, str) or not _TOKEN.fullmatch(resource_id):

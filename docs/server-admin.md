@@ -257,10 +257,39 @@ maintenance fence → `gpu1.lock` → lease 的顺序执行 compile manifest 和
 两个 recipe 的 raw trace 合计不得超过 64 MiB，白名单摘要不具 promotion 或
 baseline 权限。
 
-UNKNOWN 或 hard failure 会保留 reservation 并 quarantine；不得重放。修复必须产生
-新镜像、新激活提交和全新 canary Campaign。canary READY 后才能创建全新 Discovery
-Campaign，从零累计 24/72/168 小时 soak。正式 `profile collect` 仍须等三阶段全部
-合格后执行；所有数值 counter 可以是 `UNAVAILABLE/COUNTER_NOT_EXPOSED`，不得填零。
+UNKNOWN 或 hard failure 会保留 reservation 并 quarantine；不得重放。新版宿主会在
+每个 recipe 启动前记录不可变 intent，并在临时目录清理前把限长 stdout、stderr、
+`outcome.json`、已有 sentinel 和文件清单写入 controller 私有 CAS；Campaign status
+输出会列出 intent、诊断对象和安全分类。修复若改变 worker、recipe 或镜像，必须产生
+新镜像和新激活提交；仅补宿主诊断或受信恢复边界时不得重建同一个已验证镜像。
+
+对已经进入 `PAUSED_UNKNOWN_OUTCOME` 或 `PAUSED_HARD_FAILURE` 的 image-doctor，先部署
+包含恢复能力的代码会被活动 Campaign 管理锁拒绝。这种情况下只能从该修复提交的干净
+detached recovery worktree 运行以下唯一入口，仍然读取正式配置和 canonical Campaign
+数据库：
+
+```bash
+PYTHONPATH="$RECOVERY_WORKTREE" "$HOST_PYTHON" -m kernel_research \
+  profile image-doctor-abandon \
+  --config "$AUTORESEARCH_PRO_CONFIG" \
+  --database "$AUTORESEARCH_RUNTIME/campaign/campaign.sqlite3" \
+  --campaign-id "profile-image-canary-20260818T030324Z"
+```
+
+该入口不接受 doctor digest、资源、image、case、timeout 或 reason。它在 maintenance
+fence 和 `gpu1.lock` 内运行一次新的受信 C500 doctor，精确绑定旧 quarantine fence，
+随后把旧 Campaign 终态化为 `CANCELLED` 并将旧 lease 标为 `RELEASED`。它不会重放旧
+action，不会结算或删除原 `RESERVED` 预算，也不会写 History、promotion、baseline、
+Git 或部署 pin。旧版 canary 若尚无诊断对象，会显式记录
+`diagnostic_unavailable=true`，不得伪造失败原因。
+
+操作完成后，先归档 Campaign status、attempt/diagnostic 列表、abandonment、doctor、
+lease 和 budget action，再走正常 Admin update 部署控制面修复并完成 static、doctor 和
+完整主机回归。下一次 image-doctor 必须使用全新的 Campaign ID。Soak 只会在上述完整
+不可变证明存在时忽略旧 canary 保留下来的 reservation；证明缺失或被修改会使观测
+UNAVAILABLE。新 canary READY 后才能创建全新 Discovery Campaign，从零累计
+24/72/168 小时 soak。正式 `profile collect` 仍须等三阶段全部合格后执行；所有数值
+counter 可以是 `UNAVAILABLE/COUNTER_NOT_EXPOSED`，不得填零。
 
 ## Flash 384K/max canary
 

@@ -1234,6 +1234,66 @@ class CampaignControllerRunnerTests(unittest.TestCase):
         )
         self.assertEqual(resumed["status"], "RUNNING")
 
+    def test_trusted_doctor_accepts_only_explicit_current_image_canary_override(
+        self,
+    ) -> None:
+        canary_snapshot = {
+            "kind": "PROFILE_IMAGE_CANARY",
+            "namespace_id": CURRENT_RESEARCH_NAMESPACE.namespace_id,
+        }
+        self.campaign_store.create_campaign(
+            campaign_id="profile-canary",
+            namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+            mode="DISCOVERY",
+            snapshot=canary_snapshot,
+            budget_limit=BudgetAmount(gpu_ms=1),
+            initial_artifact_id=str(ArtifactId.source_sha256(SEED_HASH)),
+            initial_policy_snapshot={},
+            allow_staged_lineage=False,
+        )
+        self.campaign_store.start_campaign("profile-canary")
+        lease = self.campaign_store.acquire_resource(
+            "profile-canary", resource_id="gpu1", ttl_seconds=60, now_epoch=100
+        )
+        self.campaign_store.release_resource(
+            lease, quarantine=True, reason="unknown profiler outcome"
+        )
+        self.campaign_store.pause_campaign(
+            "profile-canary",
+            status="PAUSED_UNKNOWN_OUTCOME",
+            reason="unknown profiler outcome",
+        )
+        fixture = TrustedResumeDoctorFixture(self.config)
+        evidence = trusted_resume_doctor(
+            self.config,
+            campaign_store=self.campaign_store,
+            campaign=self.campaign_store.get_campaign("profile-canary"),
+            resource_id="gpu1",
+            trusted_namespace=CURRENT_RESEARCH_NAMESPACE,
+            controller_factory=lambda _config: fixture,
+            clock=lambda: time.time() + 1,
+        )
+        self.assertEqual(
+            evidence["namespace_id"], CURRENT_RESEARCH_NAMESPACE.namespace_id
+        )
+        self.assertEqual(
+            fixture.guard_calls[0]["quarantine_fencing_epoch"],
+            lease.fencing_epoch,
+        )
+
+        with self.assertRaisesRegex(ValueError, "limited to an exact image canary"):
+            trusted_resume_doctor(
+                self.config,
+                campaign_store=self.campaign_store,
+                campaign={
+                    **self.campaign_store.get_campaign("profile-canary"),
+                    "snapshot": {"namespace_id": CURRENT_RESEARCH_NAMESPACE.namespace_id},
+                },
+                resource_id="gpu1",
+                trusted_namespace=CURRENT_RESEARCH_NAMESPACE,
+                controller_factory=lambda _config: fixture,
+            )
+
     def test_failed_resume_doctor_and_arbitrary_digest_cannot_resume(self) -> None:
         self.campaign_store.create_campaign(
             campaign_id="campaign-1",

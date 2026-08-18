@@ -239,6 +239,101 @@ class CampaignStoreTests(unittest.TestCase):
         )
         self.assertGreater(cleared.fencing_epoch, lease_b.fencing_epoch)
 
+    def test_operator_abandons_legacy_canary_without_replay_or_budget_release(
+        self,
+    ) -> None:
+        campaign_id = "profile-image-canary-legacy-unknown"
+        self.store.create_campaign(
+            campaign_id=campaign_id,
+            namespace_id=NAMESPACE,
+            mode="DISCOVERY",
+            snapshot={"kind": "PROFILE_IMAGE_CANARY"},
+            budget_limit=BudgetAmount(wall_ms=1_800_000, gpu_ms=900_000),
+            initial_baseline_ref=seed_ref(campaign_id=campaign_id),
+            initial_policy_snapshot={"kind": "PROFILE_IMAGE_CANARY"},
+            allow_staged_lineage=False,
+        )
+        self.store.start_campaign(campaign_id)
+        self.store.reserve_budget(
+            campaign_id,
+            idempotency_key="profile-image-canary-v1",
+            action_kind="PROFILE_IMAGE_CANARY",
+            amount=BudgetAmount(wall_ms=1_800_000, gpu_ms=900_000),
+        )
+        lease = self.store.acquire_resource(
+            campaign_id,
+            resource_id="metax-c500:1",
+            ttl_seconds=1_830,
+        )
+        self.store.release_resource(
+            lease, quarantine=True, reason="unknown canary outcome"
+        )
+        self.store.pause_campaign(
+            campaign_id,
+            status="PAUSED_UNKNOWN_OUTCOME",
+            reason="unknown canary outcome",
+        )
+        with self.assertRaisesRegex(ValueError, "doctor evidence"):
+            self.store.abandon_profile_canary(
+                campaign_id,
+                doctor_evidence_digest=DOCTOR,
+                budget_action_key="profile-image-canary-v1",
+            )
+        evidence = self.store.record_doctor_evidence(
+            campaign_id,
+            evidence=doctor_evidence(
+                campaign_id=campaign_id,
+                resource_id="metax-c500:1",
+            ),
+        )
+        result = self.store.abandon_profile_canary(
+            campaign_id,
+            doctor_evidence_digest=evidence["digest"],
+            budget_action_key="profile-image-canary-v1",
+        )
+        self.assertTrue(result["diagnostic_unavailable"])
+        self.assertFalse(result["abandonment"]["replay_permitted"])
+        self.assertEqual(result["campaign"]["status"], "CANCELLED")
+        self.assertEqual(
+            self.store.get_budget_action(
+                campaign_id, idempotency_key="profile-image-canary-v1"
+            )["status"],
+            "RESERVED",
+        )
+        lease_row = self.store.connection.execute(
+            """
+            SELECT status, fencing_epoch FROM resource_leases
+            WHERE campaign_id = ?
+            """,
+            (campaign_id,),
+        ).fetchone()
+        self.assertEqual(lease_row["status"], "RELEASED")
+        self.assertEqual(lease_row["fencing_epoch"], lease.fencing_epoch)
+        replay = self.store.abandon_profile_canary(
+            campaign_id,
+            doctor_evidence_digest=evidence["digest"],
+            budget_action_key="profile-image-canary-v1",
+        )
+        self.assertEqual(replay["abandonment_digest"], result["abandonment_digest"])
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.connection.execute(
+                """
+                UPDATE profile_canary_abandonments
+                SET diagnostic_unavailable = 0 WHERE campaign_id = ?
+                """,
+                (campaign_id,),
+            )
+        self.store.connection.rollback()
+
+        create(self.store, campaign_id="fresh-profile-canary")
+        self.store.start_campaign("fresh-profile-canary")
+        replacement = self.store.acquire_resource(
+            "fresh-profile-canary",
+            resource_id="metax-c500:1",
+            ttl_seconds=60,
+        )
+        self.assertGreater(replacement.fencing_epoch, lease.fencing_epoch)
+
     def test_unknown_or_missing_seed_environment_cannot_stage(self) -> None:
         with self.assertRaisesRegex(ValueError, "resolved execution environment"):
             self.store.create_campaign(

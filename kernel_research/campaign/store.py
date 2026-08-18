@@ -351,6 +351,125 @@ class CampaignStore:
         # deliberately remains idempotent instead of bumping user_version.
         self._initialize_soak_schema()
         self._initialize_scientific_identity_schema()
+        self._initialize_profile_canary_schema()
+
+    def _initialize_profile_canary_schema(self) -> None:
+        """Add immutable profiler-canary intents, diagnostics and abandonment."""
+
+        self.connection.executescript(
+            """
+            BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS profile_canary_attempt_intents (
+                attempt_id TEXT PRIMARY KEY,
+                campaign_id TEXT NOT NULL
+                    REFERENCES campaigns(id) ON DELETE RESTRICT,
+                budget_action_key TEXT NOT NULL,
+                recipe_id TEXT NOT NULL,
+                requires_gpu INTEGER NOT NULL CHECK (requires_gpu IN (0, 1)),
+                resource_id TEXT,
+                fencing_epoch INTEGER,
+                intent_digest TEXT NOT NULL,
+                intent_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(campaign_id, budget_action_key, recipe_id),
+                UNIQUE(attempt_id, campaign_id),
+                FOREIGN KEY(campaign_id, budget_action_key)
+                    REFERENCES budget_actions(campaign_id, idempotency_key)
+                    ON DELETE RESTRICT,
+                CHECK (
+                    (requires_gpu = 0 AND resource_id IS NULL
+                        AND fencing_epoch IS NULL)
+                    OR
+                    (requires_gpu = 1 AND resource_id IS NOT NULL
+                        AND fencing_epoch > 0)
+                )
+            );
+            CREATE INDEX IF NOT EXISTS profile_canary_intents_campaign_idx
+                ON profile_canary_attempt_intents(campaign_id, created_at);
+            CREATE TRIGGER IF NOT EXISTS profile_canary_intents_immutable_update
+            BEFORE UPDATE ON profile_canary_attempt_intents
+            BEGIN
+                SELECT RAISE(ABORT, 'profile canary attempt intent is immutable');
+            END;
+            CREATE TRIGGER IF NOT EXISTS profile_canary_intents_immutable_delete
+            BEFORE DELETE ON profile_canary_attempt_intents
+            BEGIN
+                SELECT RAISE(ABORT, 'profile canary attempt intent is immutable');
+            END;
+
+            CREATE TABLE IF NOT EXISTS profile_canary_attempt_diagnostics (
+                attempt_id TEXT PRIMARY KEY
+                    REFERENCES profile_canary_attempt_intents(attempt_id)
+                    ON DELETE RESTRICT,
+                campaign_id TEXT NOT NULL
+                    REFERENCES campaigns(id) ON DELETE RESTRICT,
+                recipe_id TEXT NOT NULL,
+                diagnostic_object_id TEXT NOT NULL,
+                classification TEXT NOT NULL CHECK (classification IN (
+                    'SUCCESS', 'KNOWN_FAILURE', 'UNKNOWN', 'HARD_FAILURE'
+                )),
+                reason_code TEXT NOT NULL,
+                returncode INTEGER,
+                timed_out INTEGER NOT NULL CHECK (timed_out IN (0, 1)),
+                output_limited INTEGER NOT NULL CHECK (output_limited IN (0, 1)),
+                outcome_status TEXT,
+                diagnostic_digest TEXT NOT NULL,
+                diagnostic_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(attempt_id, campaign_id)
+                    REFERENCES profile_canary_attempt_intents(
+                        attempt_id, campaign_id
+                    ) ON DELETE RESTRICT
+            );
+            CREATE INDEX IF NOT EXISTS profile_canary_diagnostics_campaign_idx
+                ON profile_canary_attempt_diagnostics(campaign_id, created_at);
+            CREATE TRIGGER IF NOT EXISTS profile_canary_diagnostics_immutable_update
+            BEFORE UPDATE ON profile_canary_attempt_diagnostics
+            BEGIN
+                SELECT RAISE(ABORT, 'profile canary diagnostic is immutable');
+            END;
+            CREATE TRIGGER IF NOT EXISTS profile_canary_diagnostics_immutable_delete
+            BEFORE DELETE ON profile_canary_attempt_diagnostics
+            BEGIN
+                SELECT RAISE(ABORT, 'profile canary diagnostic is immutable');
+            END;
+
+            CREATE TABLE IF NOT EXISTS profile_canary_abandonments (
+                campaign_id TEXT PRIMARY KEY
+                    REFERENCES campaigns(id) ON DELETE RESTRICT,
+                budget_action_key TEXT NOT NULL,
+                doctor_evidence_digest TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                quarantine_fencing_epoch INTEGER NOT NULL
+                    CHECK (quarantine_fencing_epoch > 0),
+                diagnostic_unavailable INTEGER NOT NULL
+                    CHECK (diagnostic_unavailable IN (0, 1)),
+                abandonment_digest TEXT NOT NULL,
+                abandonment_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(campaign_id, budget_action_key)
+                    REFERENCES budget_actions(campaign_id, idempotency_key)
+                    ON DELETE RESTRICT,
+                FOREIGN KEY(doctor_evidence_digest)
+                    REFERENCES campaign_doctor_evidence(digest)
+                    ON DELETE RESTRICT,
+                FOREIGN KEY(resource_id, quarantine_fencing_epoch)
+                    REFERENCES resource_leases(resource_id, fencing_epoch)
+                    ON DELETE RESTRICT
+            );
+            CREATE TRIGGER IF NOT EXISTS profile_canary_abandonments_immutable_update
+            BEFORE UPDATE ON profile_canary_abandonments
+            BEGIN
+                SELECT RAISE(ABORT, 'profile canary abandonment is immutable');
+            END;
+            CREATE TRIGGER IF NOT EXISTS profile_canary_abandonments_immutable_delete
+            BEFORE DELETE ON profile_canary_abandonments
+            BEGIN
+                SELECT RAISE(ABORT, 'profile canary abandonment is immutable');
+            END;
+            COMMIT;
+            """
+        )
 
     def _initialize_scientific_identity_schema(self) -> None:
         """Add fail-closed V2 baseline and trusted-doctor evidence storage.
@@ -580,13 +699,23 @@ class CampaignStore:
             "invariant_snapshot_json",
             "evidence_json",
             "observation_json",
+            "intent_json",
+            "diagnostic_json",
+            "abandonment_json",
         ):
             if field in result:
                 encoded = result.pop(field)
                 result[field.removesuffix("_json")] = (
                     None if encoded is None else json.loads(encoded)
                 )
-        for field in ("allow_staged_lineage", "stop_after_promotion"):
+        for field in (
+            "allow_staged_lineage",
+            "stop_after_promotion",
+            "requires_gpu",
+            "timed_out",
+            "output_limited",
+            "diagnostic_unavailable",
+        ):
             if field in result:
                 result[field] = bool(result[field])
         return result
@@ -1833,6 +1962,449 @@ class CampaignStore:
         if row is None:
             raise KeyError(f"unknown Campaign doctor evidence: {digest}")
         return self._row(row)
+
+    def record_profile_canary_attempt_intent(
+        self, campaign_id: str, *, intent: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Persist one immutable recipe launch intent before Docker starts."""
+
+        _token(campaign_id, "campaign_id")
+        if not isinstance(intent, Mapping):
+            raise TypeError("profile canary intent must be a mapping")
+        value = json.loads(_json(dict(intent)))
+        expected_fields = {
+            "schema_version", "kind", "attempt_id", "campaign_id",
+            "budget_action_key", "recipe_id", "case_id", "requires_gpu",
+            "resource_id", "fencing_epoch", "profiler_image",
+            "profiler_build_profile_digest",
+            "profiler_activation_profile_digest", "container_name", "argv",
+            "argv_digest", "timeout_seconds", "expected_worker_echo",
+        }
+        if (
+            set(value) != expected_fields
+            or value.get("schema_version") != 1
+            or value.get("kind") != "PROFILE_IMAGE_CANARY_ATTEMPT"
+            or value.get("campaign_id") != campaign_id
+        ):
+            raise ValueError("profile canary intent fields do not match schema")
+        attempt_id = _token(value.get("attempt_id"), "attempt_id")
+        material = dict(value)
+        material.pop("attempt_id")
+        canonical_id = (
+            "profile-canary-attempt-" + _canonical_digest(material).split(":", 1)[1]
+        )
+        if attempt_id != canonical_id:
+            raise ValueError("profile canary attempt identifier is not canonical")
+        action_key = _token(value.get("budget_action_key"), "budget_action_key")
+        recipe_id = _token(value.get("recipe_id"), "recipe_id")
+        _token(value.get("case_id"), "case_id")
+        requires_gpu = value.get("requires_gpu")
+        if not isinstance(requires_gpu, bool):
+            raise ValueError("profile canary requires_gpu must be boolean")
+        resource_id = value.get("resource_id")
+        fencing_epoch = value.get("fencing_epoch")
+        if requires_gpu:
+            _token(resource_id, "resource_id")
+            if type(fencing_epoch) is not int or fencing_epoch <= 0:
+                raise ValueError("GPU profile canary intent requires a fencing epoch")
+        elif resource_id is not None or fencing_epoch is not None:
+            raise ValueError("CPU profile canary intent cannot claim a GPU lease")
+        _token(value.get("profiler_image"), "profiler_image", maximum=512)
+        _digest(
+            value.get("profiler_build_profile_digest"),
+            "profiler_build_profile_digest",
+        )
+        _digest(
+            value.get("profiler_activation_profile_digest"),
+            "profiler_activation_profile_digest",
+        )
+        _token(value.get("container_name"), "container_name")
+        argv = value.get("argv")
+        if not isinstance(argv, list) or not argv:
+            raise ValueError("profile canary intent argv must be a non-empty list")
+        for item in argv:
+            _token(item, "profile canary argv item", maximum=4096)
+        if value.get("argv_digest") != _canonical_digest(argv):
+            raise ValueError("profile canary intent argv digest is invalid")
+        timeout_seconds = value.get("timeout_seconds")
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(float(timeout_seconds))
+            or float(timeout_seconds) <= 0
+        ):
+            raise ValueError("profile canary intent timeout is invalid")
+        if not isinstance(value.get("expected_worker_echo"), dict):
+            raise ValueError("profile canary intent has no worker echo contract")
+        intent_digest = _canonical_digest(value)
+        with self._transaction():
+            campaign = self.connection.execute(
+                "SELECT status, snapshot_json FROM campaigns WHERE id = ?",
+                (campaign_id,),
+            ).fetchone()
+            if campaign is None:
+                raise KeyError(f"unknown campaign: {campaign_id}")
+            if campaign["status"] != CampaignStatus.RUNNING.value:
+                raise ValueError("profile canary intent requires a running Campaign")
+            snapshot = json.loads(campaign["snapshot_json"])
+            if (
+                snapshot.get("kind") != "PROFILE_IMAGE_CANARY"
+                or snapshot.get("profiler_image") != value["profiler_image"]
+                or snapshot.get("profiler_build_profile_digest")
+                != value["profiler_build_profile_digest"]
+                or snapshot.get("profiler_activation_profile_digest")
+                != value["profiler_activation_profile_digest"]
+                or recipe_id not in snapshot.get("recipes", [])
+            ):
+                raise ValueError("profile canary intent differs from Campaign identity")
+            action = self.connection.execute(
+                """
+                SELECT status, action_kind FROM budget_actions
+                WHERE campaign_id = ? AND idempotency_key = ?
+                """,
+                (campaign_id, action_key),
+            ).fetchone()
+            if (
+                action is None
+                or action["status"] != "RESERVED"
+                or action["action_kind"] != "PROFILE_IMAGE_CANARY"
+            ):
+                raise ValueError("profile canary intent has no reserved action")
+            existing = self.connection.execute(
+                "SELECT * FROM profile_canary_attempt_intents WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if existing is None:
+                self.connection.execute(
+                    """
+                    INSERT INTO profile_canary_attempt_intents(
+                        attempt_id, campaign_id, budget_action_key, recipe_id,
+                        requires_gpu, resource_id, fencing_epoch, intent_digest,
+                        intent_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        attempt_id, campaign_id, action_key, recipe_id,
+                        int(requires_gpu), resource_id, fencing_epoch,
+                        intent_digest, _json(value), _utc_now(),
+                    ),
+                )
+            else:
+                parsed = self._row(existing)
+                if (
+                    parsed.get("campaign_id") != campaign_id
+                    or parsed.get("intent_digest") != intent_digest
+                    or parsed.get("intent") != value
+                ):
+                    raise ValueError("profile canary attempt intent conflicts")
+        row = self.connection.execute(
+            "SELECT * FROM profile_canary_attempt_intents WHERE attempt_id = ?",
+            (attempt_id,),
+        ).fetchone()
+        assert row is not None
+        return self._row(row)
+
+    def record_profile_canary_attempt_diagnostic(
+        self, campaign_id: str, *, diagnostic: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Link one immutable private-CAS diagnostic to its launch intent."""
+
+        _token(campaign_id, "campaign_id")
+        if not isinstance(diagnostic, Mapping):
+            raise TypeError("profile canary diagnostic must be a mapping")
+        value = json.loads(_json(dict(diagnostic)))
+        expected_fields = {
+            "schema_version", "kind", "attempt_id", "campaign_id",
+            "budget_action_key", "recipe_id", "diagnostic_object_id",
+            "diagnostic_object_bytes", "classification", "reason_code",
+            "returncode", "timed_out", "output_limited", "outcome_status",
+            "inventory_entries",
+        }
+        if (
+            set(value) != expected_fields
+            or value.get("schema_version") != 1
+            or value.get("kind") != "PROFILE_IMAGE_CANARY_DIAGNOSTIC"
+            or value.get("campaign_id") != campaign_id
+        ):
+            raise ValueError("profile canary diagnostic fields do not match schema")
+        attempt_id = _token(value.get("attempt_id"), "attempt_id")
+        action_key = _token(value.get("budget_action_key"), "budget_action_key")
+        recipe_id = _token(value.get("recipe_id"), "recipe_id")
+        object_id = _digest(
+            value.get("diagnostic_object_id"), "diagnostic_object_id"
+        )
+        for field in ("diagnostic_object_bytes", "inventory_entries"):
+            _non_negative_count(value.get(field), field)
+        classification = value.get("classification")
+        if classification not in {
+            "SUCCESS", "KNOWN_FAILURE", "UNKNOWN", "HARD_FAILURE",
+        }:
+            raise ValueError("profile canary diagnostic classification is invalid")
+        reason_code = _token(value.get("reason_code"), "reason_code")
+        returncode = value.get("returncode")
+        if returncode is not None and type(returncode) is not int:
+            raise ValueError("profile canary diagnostic returncode is invalid")
+        for field in ("timed_out", "output_limited"):
+            if not isinstance(value.get(field), bool):
+                raise ValueError(f"profile canary diagnostic {field} must be boolean")
+        outcome_status = value.get("outcome_status")
+        if outcome_status is not None:
+            _token(outcome_status, "outcome_status")
+        diagnostic_digest = _canonical_digest(value)
+        with self._transaction():
+            intent = self.connection.execute(
+                """
+                SELECT * FROM profile_canary_attempt_intents
+                WHERE attempt_id = ? AND campaign_id = ?
+                """,
+                (attempt_id, campaign_id),
+            ).fetchone()
+            if intent is None:
+                raise ValueError("profile canary diagnostic has no launch intent")
+            if (
+                intent["budget_action_key"] != action_key
+                or intent["recipe_id"] != recipe_id
+            ):
+                raise ValueError("profile canary diagnostic identity is inconsistent")
+            existing = self.connection.execute(
+                """
+                SELECT * FROM profile_canary_attempt_diagnostics
+                WHERE attempt_id = ?
+                """,
+                (attempt_id,),
+            ).fetchone()
+            if existing is None:
+                self.connection.execute(
+                    """
+                    INSERT INTO profile_canary_attempt_diagnostics(
+                        attempt_id, campaign_id, recipe_id,
+                        diagnostic_object_id, classification, reason_code,
+                        returncode, timed_out, output_limited, outcome_status,
+                        diagnostic_digest, diagnostic_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        attempt_id, campaign_id, recipe_id, object_id,
+                        classification, reason_code, returncode,
+                        int(value["timed_out"]), int(value["output_limited"]),
+                        outcome_status, diagnostic_digest, _json(value), _utc_now(),
+                    ),
+                )
+            else:
+                parsed = self._row(existing)
+                if (
+                    parsed.get("diagnostic_digest") != diagnostic_digest
+                    or parsed.get("diagnostic") != value
+                ):
+                    raise ValueError("profile canary diagnostic conflicts")
+        row = self.connection.execute(
+            """
+            SELECT * FROM profile_canary_attempt_diagnostics
+            WHERE attempt_id = ?
+            """,
+            (attempt_id,),
+        ).fetchone()
+        assert row is not None
+        return self._row(row)
+
+    def list_profile_canary_attempts(
+        self, campaign_id: str
+    ) -> list[dict[str, Any]]:
+        _token(campaign_id, "campaign_id")
+        result: list[dict[str, Any]] = []
+        for row in self.connection.execute(
+            """
+            SELECT * FROM profile_canary_attempt_intents
+            WHERE campaign_id = ? ORDER BY created_at, recipe_id
+            """,
+            (campaign_id,),
+        ):
+            intent = self._row(row)
+            diagnostic = self.connection.execute(
+                """
+                SELECT * FROM profile_canary_attempt_diagnostics
+                WHERE attempt_id = ?
+                """,
+                (intent["attempt_id"],),
+            ).fetchone()
+            intent["diagnostic"] = (
+                None if diagnostic is None else self._row(diagnostic)
+            )
+            result.append(intent)
+        return result
+
+    def get_profile_canary_abandonment(
+        self, campaign_id: str
+    ) -> dict[str, Any] | None:
+        _token(campaign_id, "campaign_id")
+        row = self.connection.execute(
+            "SELECT * FROM profile_canary_abandonments WHERE campaign_id = ?",
+            (campaign_id,),
+        ).fetchone()
+        return None if row is None else self._row(row)
+
+    def abandon_profile_canary(
+        self,
+        campaign_id: str,
+        *,
+        doctor_evidence_digest: str,
+        budget_action_key: str,
+    ) -> dict[str, Any]:
+        """Terminalize one quarantined canary without replaying or settling it."""
+
+        _token(campaign_id, "campaign_id")
+        _digest(doctor_evidence_digest, "doctor_evidence_digest")
+        _token(budget_action_key, "budget_action_key")
+        existing = self.get_profile_canary_abandonment(campaign_id)
+        if existing is not None:
+            return existing
+        now = _utc_now()
+        with self._transaction():
+            campaign = self.connection.execute(
+                "SELECT * FROM campaigns WHERE id = ?", (campaign_id,)
+            ).fetchone()
+            if campaign is None:
+                raise KeyError(f"unknown campaign: {campaign_id}")
+            snapshot = json.loads(campaign["snapshot_json"])
+            if snapshot.get("kind") != "PROFILE_IMAGE_CANARY":
+                raise ValueError("operator abandonment is limited to image canaries")
+            if campaign["status"] not in {
+                CampaignStatus.PAUSED_UNKNOWN_OUTCOME.value,
+                CampaignStatus.PAUSED_HARD_FAILURE.value,
+            }:
+                raise ValueError("profile image canary is not GPU-quarantined")
+            children = self.connection.execute(
+                "SELECT COUNT(*) FROM child_runs WHERE campaign_id = ?",
+                (campaign_id,),
+            ).fetchone()[0]
+            if children:
+                raise ValueError("profile image canary abandonment forbids child runs")
+            action = self.connection.execute(
+                """
+                SELECT * FROM budget_actions
+                WHERE campaign_id = ? AND idempotency_key = ?
+                """,
+                (campaign_id, budget_action_key),
+            ).fetchone()
+            if (
+                action is None
+                or action["action_kind"] != "PROFILE_IMAGE_CANARY"
+                or action["status"] != "RESERVED"
+            ):
+                raise ValueError(
+                    "abandoned profile canary must preserve its RESERVED action"
+                )
+            quarantine = self.connection.execute(
+                """
+                SELECT * FROM resource_leases
+                WHERE campaign_id = ? AND status = 'QUARANTINED'
+                ORDER BY rowid DESC LIMIT 1
+                """,
+                (campaign_id,),
+            ).fetchone()
+            if quarantine is None:
+                raise ValueError("profile image canary has no quarantined resource")
+            doctor = self.connection.execute(
+                """
+                SELECT * FROM campaign_doctor_evidence
+                WHERE digest = ? AND campaign_id = ?
+                """,
+                (doctor_evidence_digest, campaign_id),
+            ).fetchone()
+            if (
+                doctor is None
+                or doctor["resource_id"] != quarantine["resource_id"]
+                or doctor["quarantine_fencing_epoch"] is None
+                or int(doctor["quarantine_fencing_epoch"])
+                != int(quarantine["fencing_epoch"])
+                or float(doctor["observed_epoch"])
+                < _utc_epoch(campaign["updated_at"], "campaign pause timestamp")
+            ):
+                raise ValueError(
+                    "profile canary abandonment requires fresh exact doctor evidence"
+                )
+            diagnostics = self.connection.execute(
+                """
+                SELECT attempt_id, classification, diagnostic_object_id
+                FROM profile_canary_attempt_diagnostics
+                WHERE campaign_id = ? ORDER BY created_at, attempt_id
+                """,
+                (campaign_id,),
+            ).fetchall()
+            terminal_diagnostics = [
+                dict(row)
+                for row in diagnostics
+                if row["classification"] in {"UNKNOWN", "HARD_FAILURE"}
+            ]
+            abandonment = {
+                "schema_version": 1,
+                "kind": "PROFILE_IMAGE_CANARY_OPERATOR_ABANDONMENT",
+                "campaign_id": campaign_id,
+                "budget_action_key": budget_action_key,
+                "doctor_evidence_digest": doctor_evidence_digest,
+                "resource_id": quarantine["resource_id"],
+                "quarantine_fencing_epoch": int(quarantine["fencing_epoch"]),
+                "prior_campaign_status": campaign["status"],
+                "preserved_budget_status": action["status"],
+                "diagnostic_unavailable": not terminal_diagnostics,
+                "terminal_diagnostics": terminal_diagnostics,
+                "replay_permitted": False,
+            }
+            abandonment_digest = _canonical_digest(abandonment)
+            self.connection.execute(
+                """
+                INSERT INTO profile_canary_abandonments(
+                    campaign_id, budget_action_key, doctor_evidence_digest,
+                    resource_id, quarantine_fencing_epoch,
+                    diagnostic_unavailable,
+                    abandonment_digest, abandonment_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    campaign_id, budget_action_key, doctor_evidence_digest,
+                    quarantine["resource_id"], quarantine["fencing_epoch"],
+                    int(not terminal_diagnostics),
+                    abandonment_digest, _json(abandonment), now,
+                ),
+            )
+            released = self.connection.execute(
+                """
+                UPDATE resource_leases
+                SET status = 'RELEASED', released_at = ?,
+                    reason = 'profile image canary abandoned after trusted doctor'
+                WHERE resource_id = ? AND fencing_epoch = ?
+                  AND campaign_id = ? AND status = 'QUARANTINED'
+                """,
+                (
+                    now, quarantine["resource_id"],
+                    quarantine["fencing_epoch"], campaign_id,
+                ),
+            )
+            if released.rowcount != 1:
+                raise RuntimeError("profile canary quarantine clearance lost its fence")
+            terminal = self.connection.execute(
+                """
+                UPDATE campaigns
+                SET status = 'CANCELLED', updated_at = ?,
+                    stop_reason = 'operator abandoned quarantined profile image canary',
+                    pause_evidence_digest = ?
+                WHERE id = ? AND status = ?
+                """,
+                (now, doctor_evidence_digest, campaign_id, campaign["status"]),
+            )
+            if terminal.rowcount != 1:
+                raise RuntimeError("profile canary abandonment compare-and-swap failed")
+            self._insert_outbox(
+                campaign_id,
+                f"profile-canary-abandoned:{campaign_id}",
+                "PROFILE_IMAGE_CANARY_ABANDONED",
+                abandonment,
+                now=now,
+            )
+        result = self.get_profile_canary_abandonment(campaign_id)
+        assert result is not None
+        result["campaign"] = self.get_campaign(campaign_id)
+        return result
 
     def finish_campaign(
         self, campaign_id: str, *, cancelled: bool = False, reason: str = ""

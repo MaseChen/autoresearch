@@ -43,6 +43,34 @@ from kernel_research.profiling import (
 
 
 class ProfilingDoctorTests(unittest.TestCase):
+    def test_canary_diagnostic_inventory_is_bounded_and_never_follows_symlinks(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            output = root / "output"
+            outside = root / "outside"
+            output.mkdir()
+            outside.mkdir()
+            (outside / "secret.txt").write_text("secret", encoding="utf-8")
+            (output / "a.txt").write_text("a", encoding="utf-8")
+            (output / "b.txt").write_text("b", encoding="utf-8")
+            (output / "c.txt").write_text("c", encoding="utf-8")
+            (output / "0escape").symlink_to(outside, target_is_directory=True)
+            with mock.patch.object(
+                profiling, "_CANARY_DIAGNOSTIC_FILE_LIMIT", 3
+            ):
+                inventory = profiling._diagnostic_file_inventory(output)
+            entries = {entry["path"]: entry for entry in inventory["entries"]}
+            self.assertEqual(entries["0escape"]["kind"], "SYMLINK")
+            self.assertNotIn("0escape/secret.txt", entries)
+            self.assertTrue(inventory["truncated"])
+            self.assertFalse(inventory["scan_errors"])
+            self.assertEqual(
+                profiling._diagnostic_file_payload(output / "0escape")["reason_code"],
+                "SYMLINK",
+            )
+
     def test_ready_report_is_advisory_only(self) -> None:
         commands: list[tuple[str, ...]] = []
 
@@ -448,6 +476,7 @@ class _FakeProfileRunner:
         raw_trace=b"trusted raw trace\x00\x01",
         stderr="ignored profiler stderr",
         on_run=None,
+        write_outputs=True,
     ):
         self.metrics = {} if metrics is None else metrics
         self.timed_out = timed_out
@@ -461,6 +490,7 @@ class _FakeProfileRunner:
         self.raw_trace = raw_trace
         self.stderr = stderr
         self.on_run = on_run
+        self.write_outputs = write_outputs
         self.calls = []
 
     def run(self, argv, **kwargs):
@@ -478,7 +508,7 @@ class _FakeProfileRunner:
         output_mount = next(item for item in mounts if "dst=/output" in item)
         source = output_mount.split("src=", 1)[1].split(",dst=", 1)[0]
         output = Path(source)
-        if not self.timed_out and not self.output_limited:
+        if self.write_outputs and not self.timed_out and not self.output_limited:
             recipe = argv[argv.index("--recipe") + 1]
             case_id = argv[argv.index("--case-id") + 1]
             uid = argv[argv.index("--experiment-uid") + 1]
@@ -1848,6 +1878,441 @@ class BoundedProfilingTests(unittest.TestCase):
         for field in ("image", "candidate", "case", "device", "timeout", "mctracer"):
             self.assertFalse(hasattr(args, field))
 
+        abandon = build_parser().parse_args(
+            [
+                "profile",
+                "image-doctor-abandon",
+                "--config",
+                "/runtime/config.json",
+                "--database",
+                "/runtime/campaign/campaign.sqlite3",
+                "--campaign-id",
+                "profiler-canary-1",
+            ]
+        )
+        self.assertEqual(abandon.profile_command, "image-doctor-abandon")
+        for field in (
+            "image", "candidate", "case", "device", "timeout", "mctracer",
+            "resource_id", "doctor_digest", "reason",
+        ):
+            self.assertFalse(hasattr(abandon, field))
+
+    def test_canary_failure_persists_intent_and_private_diagnostic(self):
+        identity = self._record(stage="quick", suite="quick")
+        recipe = BUILTIN_PROFILE_RECIPES["metax-hardware-counters-v1"]
+        original = profiling._read_only_history_subject(
+            state_dir=self.state,
+            experiment_uid=identity.experiment_uid,
+            namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+            execution_environment_digest=self.environment.digest,
+            recipe=recipe,
+        )
+        canary_id = "profile-image-canary-diagnostic"
+        subject = replace(
+            original,
+            campaign_id=canary_id,
+            run_id="profile-image-canary-diagnostic-run",
+        )
+        baseline = BaselineRef.create(
+            namespace=CURRENT_RESEARCH_NAMESPACE,
+            artifact_id=identity.candidate_artifact_id,
+            source="campaign",
+            revision="profile-image-canary-diagnostic-seed",
+            execution_environment=self.environment,
+        )
+        snapshot = {
+            "kind": "PROFILE_IMAGE_CANARY",
+            "namespace_id": CURRENT_RESEARCH_NAMESPACE.namespace_id,
+            "profiler_image": profiling.PROFILER_IMAGE,
+            "profiler_build_profile_digest": (
+                profiling.PROFILER_BUILD_PROFILE_DIGEST
+            ),
+            "profiler_activation_profile_digest": (
+                profiling.PROFILER_ACTIVATION_PROFILE_DIGEST
+            ),
+            "worker_revision": profiling.PROFILER_WORKER_REVISION,
+            "recipes": list(profiling.PROFILE_RECIPE_IDS),
+        }
+        action_key = "profile-image-canary-v1"
+        observed_intent: list[dict] = []
+
+        def observe_and_write_sentinel(argv):
+            with CampaignStore(self.campaign_database) as observer:
+                attempts = observer.list_profile_canary_attempts(canary_id)
+                self.assertEqual(len(attempts), 1)
+                self.assertIsNone(attempts[0]["diagnostic"])
+                observed_intent.append(attempts[0])
+            output_mount = next(
+                argv[index + 1]
+                for index, item in enumerate(argv[:-1])
+                if item == "--mount" and "dst=/output" in argv[index + 1]
+            )
+            output = Path(
+                output_mount.split("src=", 1)[1].split(",dst=", 1)[0]
+            )
+            (output / "warmup-sentinel.json").write_text(
+                '{"phase":"warmup","status":"FAILED"}',
+                encoding="utf-8",
+            )
+
+        runner = _FakeProfileRunner(
+            returncode=17,
+            stderr="bounded hardware failure details",
+            on_run=observe_and_write_sentinel,
+            write_outputs=False,
+        )
+        with CampaignStore(self.campaign_database) as store:
+            store.create_campaign(
+                campaign_id=canary_id,
+                namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                mode="DISCOVERY",
+                snapshot=snapshot,
+                budget_limit=BudgetAmount(wall_ms=1_800_000, gpu_ms=900_000),
+                initial_baseline_ref=baseline,
+                initial_policy_snapshot={"kind": "PROFILE_IMAGE_CANARY"},
+                allow_staged_lineage=False,
+            )
+            store.start_campaign(canary_id)
+            store.reserve_budget(
+                canary_id,
+                idempotency_key=action_key,
+                action_kind="PROFILE_IMAGE_CANARY",
+                amount=BudgetAmount(wall_ms=1_800_000, gpu_ms=900_000),
+            )
+            lease = store.acquire_resource(
+                canary_id,
+                resource_id="gpu1",
+                ttl_seconds=1_830,
+            )
+            with self.assertRaises(profiling._CanaryWorkerFailure) as raised:
+                profiling._execute_canary_recipe(
+                    self.config,
+                    store=store,
+                    runner=runner,
+                    recipe=recipe,
+                    subject=subject,
+                    invariant_digest=profiling.canonical_sha256(snapshot),
+                    budget_action_key=action_key,
+                    lease=lease,
+                    container_suffix="diagnostic-fixture",
+                    timeout_seconds=900,
+                )
+            self.assertIsInstance(raised.exception, profiling._CanaryWorkerFailure)
+            self.assertIn("non-zero", str(raised.exception))
+            attempts = store.list_profile_canary_attempts(canary_id)
+            with self.assertRaises(sqlite3.IntegrityError):
+                store.connection.execute(
+                    """
+                    UPDATE profile_canary_attempt_intents
+                    SET recipe_id = 'tampered' WHERE campaign_id = ?
+                    """,
+                    (canary_id,),
+                )
+            store.connection.rollback()
+            with self.assertRaises(sqlite3.IntegrityError):
+                store.connection.execute(
+                    """
+                    UPDATE profile_canary_attempt_diagnostics
+                    SET classification = 'SUCCESS' WHERE campaign_id = ?
+                    """,
+                    (canary_id,),
+                )
+            store.connection.rollback()
+
+        self.assertEqual(len(observed_intent), 1)
+        self.assertEqual(len(attempts), 1)
+        diagnostic = attempts[0]["diagnostic"]
+        self.assertEqual(diagnostic["classification"], "UNKNOWN")
+        self.assertEqual(diagnostic["reason_code"], "NONZERO_EXIT")
+        self.assertEqual(diagnostic["returncode"], 17)
+        self.assertFalse(diagnostic["timed_out"])
+        object_id = diagnostic["diagnostic_object_id"]
+        digest = object_id.removeprefix("sha256:")
+        private_object = (
+            self.controller / "objects" / "sha256" / digest[:2] / digest[2:]
+        )
+        payload = json.loads(private_object.read_text(encoding="utf-8"))
+        self.assertEqual(
+            payload["command"]["stderr"]["content"],
+            "bounded hardware failure details",
+        )
+        self.assertEqual(
+            payload["worker_files"]["outcome.json"]["status"], "ABSENT"
+        )
+        self.assertEqual(
+            payload["worker_files"]["warmup-sentinel.json"]["status"],
+            "PRESENT",
+        )
+        self.assertIn(
+            "warmup-sentinel.json",
+            {entry["path"] for entry in payload["file_inventory"]["entries"]},
+        )
+
+    def test_canary_start_failure_is_known_and_diagnostic_is_durable(self):
+        identity = self._record(stage="smoke", suite="smoke")
+        recipe = BUILTIN_PROFILE_RECIPES["metax-compile-metadata-v1"]
+        original = profiling._read_only_history_subject(
+            state_dir=self.state,
+            experiment_uid=identity.experiment_uid,
+            namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+            execution_environment_digest=self.environment.digest,
+            recipe=recipe,
+        )
+        campaign_id = "profile-image-canary-start-failure"
+        subject = replace(
+            original,
+            campaign_id=campaign_id,
+            run_id="profile-image-canary-start-failure-run",
+        )
+        baseline = BaselineRef.create(
+            namespace=CURRENT_RESEARCH_NAMESPACE,
+            artifact_id=identity.candidate_artifact_id,
+            source="campaign",
+            revision="profile-image-canary-start-failure-seed",
+            execution_environment=self.environment,
+        )
+        snapshot = {
+            "kind": "PROFILE_IMAGE_CANARY",
+            "profiler_image": profiling.PROFILER_IMAGE,
+            "profiler_build_profile_digest": (
+                profiling.PROFILER_BUILD_PROFILE_DIGEST
+            ),
+            "profiler_activation_profile_digest": (
+                profiling.PROFILER_ACTIVATION_PROFILE_DIGEST
+            ),
+            "recipes": list(profiling.PROFILE_RECIPE_IDS),
+        }
+        with CampaignStore(self.campaign_database) as store:
+            store.create_campaign(
+                campaign_id=campaign_id,
+                namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                mode="DISCOVERY",
+                snapshot=snapshot,
+                budget_limit=BudgetAmount(wall_ms=1_800_000, gpu_ms=900_000),
+                initial_baseline_ref=baseline,
+                initial_policy_snapshot={"kind": "PROFILE_IMAGE_CANARY"},
+                allow_staged_lineage=False,
+            )
+            store.start_campaign(campaign_id)
+            store.reserve_budget(
+                campaign_id,
+                idempotency_key="profile-image-canary-v1",
+                action_kind="PROFILE_IMAGE_CANARY",
+                amount=BudgetAmount(wall_ms=1_800_000, gpu_ms=900_000),
+            )
+            with self.assertRaises(profiling._CanaryWorkerFailure) as raised:
+                profiling._execute_canary_recipe(
+                    self.config,
+                    store=store,
+                    runner=_FakeProfileRunner(start_error=True),
+                    recipe=recipe,
+                    subject=subject,
+                    invariant_digest=profiling.canonical_sha256(snapshot),
+                    budget_action_key="profile-image-canary-v1",
+                    lease=None,
+                    container_suffix="start-failure",
+                    timeout_seconds=900,
+                )
+            attempts = store.list_profile_canary_attempts(campaign_id)
+
+        self.assertTrue(raised.exception.known)
+        self.assertFalse(raised.exception.hard)
+        self.assertEqual(raised.exception.reason_code, "RUNNER_START_FAILED")
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(
+            attempts[0]["diagnostic"]["classification"],
+            "KNOWN_FAILURE",
+        )
+        self.assertIsNone(attempts[0]["diagnostic"]["returncode"])
+        object_id = attempts[0]["diagnostic"]["diagnostic_object_id"]
+        digest = object_id.split(":", 1)[1]
+        payload = json.loads(
+            (
+                self.controller
+                / "objects"
+                / "sha256"
+                / digest[:2]
+                / digest[2:]
+            ).read_text(encoding="utf-8")
+        )
+        self.assertFalse(payload["command"]["available"])
+        self.assertEqual(payload["cause"]["type"], "ValueError")
+
+        interrupted_campaign = "profile-image-canary-interrupted-before-start"
+        interrupted_subject = replace(
+            original,
+            campaign_id=interrupted_campaign,
+            run_id="profile-image-canary-interrupted-run",
+        )
+
+        def interrupt(_argv):
+            raise KeyboardInterrupt("operator interruption fixture")
+
+        with CampaignStore(self.campaign_database) as store:
+            store.create_campaign(
+                campaign_id=interrupted_campaign,
+                namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                mode="DISCOVERY",
+                snapshot=snapshot,
+                budget_limit=BudgetAmount(wall_ms=1_800_000, gpu_ms=900_000),
+                initial_baseline_ref=baseline,
+                initial_policy_snapshot={"kind": "PROFILE_IMAGE_CANARY"},
+                allow_staged_lineage=False,
+            )
+            store.start_campaign(interrupted_campaign)
+            store.reserve_budget(
+                interrupted_campaign,
+                idempotency_key="profile-image-canary-v1",
+                action_kind="PROFILE_IMAGE_CANARY",
+                amount=BudgetAmount(wall_ms=1_800_000, gpu_ms=900_000),
+            )
+            with self.assertRaises(profiling._CanaryWorkerFailure) as interrupted:
+                profiling._execute_canary_recipe(
+                    self.config,
+                    store=store,
+                    runner=_FakeProfileRunner(on_run=interrupt),
+                    recipe=recipe,
+                    subject=interrupted_subject,
+                    invariant_digest=profiling.canonical_sha256(snapshot),
+                    budget_action_key="profile-image-canary-v1",
+                    lease=None,
+                    container_suffix="interrupted",
+                    timeout_seconds=900,
+                )
+            interrupted_attempts = store.list_profile_canary_attempts(
+                interrupted_campaign
+            )
+
+        self.assertTrue(interrupted.exception.known)
+        self.assertEqual(interrupted.exception.reason_code, "RUNNER_INTERRUPTED")
+        self.assertEqual(
+            interrupted_attempts[0]["diagnostic"]["reason_code"],
+            "RUNNER_INTERRUPTED",
+        )
+
+    def test_operator_abandon_runs_fresh_doctor_and_never_replays_old_action(self):
+        identity = self._record(stage="quick", suite="quick")
+        canary_id = "profile-image-canary-operator-abandon"
+        baseline = BaselineRef.create(
+            namespace=CURRENT_RESEARCH_NAMESPACE,
+            artifact_id=identity.candidate_artifact_id,
+            source="campaign",
+            revision="profile-image-canary-abandon-seed",
+            execution_environment=self.environment,
+        )
+        snapshot = {
+            "schema_version": 1,
+            "kind": "PROFILE_IMAGE_CANARY",
+            "namespace_id": CURRENT_RESEARCH_NAMESPACE.namespace_id,
+            "profiler_image": profiling.PROFILER_IMAGE,
+            "profiler_build_profile_digest": (
+                profiling.PROFILER_BUILD_PROFILE_DIGEST
+            ),
+            "profiler_activation_profile_digest": (
+                profiling.PROFILER_ACTIVATION_PROFILE_DIGEST
+            ),
+            "worker_revision": profiling.PROFILER_WORKER_REVISION,
+            "recipes": list(profiling.PROFILE_RECIPE_IDS),
+        }
+        with CampaignStore(self.campaign_database) as store:
+            store.create_campaign(
+                campaign_id=canary_id,
+                namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                mode="DISCOVERY",
+                snapshot=snapshot,
+                budget_limit=BudgetAmount(wall_ms=1_800_000, gpu_ms=900_000),
+                initial_baseline_ref=baseline,
+                initial_policy_snapshot={"kind": "PROFILE_IMAGE_CANARY"},
+                allow_staged_lineage=False,
+            )
+            store.start_campaign(canary_id)
+            store.reserve_budget(
+                canary_id,
+                idempotency_key="profile-image-canary-v1",
+                action_kind="PROFILE_IMAGE_CANARY",
+                amount=BudgetAmount(wall_ms=1_800_000, gpu_ms=900_000),
+            )
+            lease = store.acquire_resource(
+                canary_id, resource_id="gpu1", ttl_seconds=1_830
+            )
+            store.release_resource(
+                lease, quarantine=True, reason="unknown image canary outcome"
+            )
+            store.pause_campaign(
+                canary_id,
+                status="PAUSED_UNKNOWN_OUTCOME",
+                reason="unknown image canary outcome",
+            )
+        doctor = {
+            "schema_version": 1,
+            "kind": "CAMPAIGN_RESUME_DOCTOR",
+            "status": "SUCCESS",
+            "campaign_id": canary_id,
+            "resource_id": "gpu1",
+            "observed_epoch": profiling.time.time() + 1,
+            "namespace_id": CURRENT_RESEARCH_NAMESPACE.namespace_id,
+            "config_digest": profiling.canonical_sha256(
+                self.config.redacted_dict()
+            ),
+            "execution_environment": self.environment.to_dict(),
+            "doctor_result": {
+                "status": "SUCCESS",
+                "c500_probe": {
+                    "environment": {"compile_probe_status": "PASSED"}
+                },
+            },
+        }
+        history_before = hashlib.sha256(
+            (self.state / "history.sqlite3").read_bytes()
+        ).hexdigest()
+        with mock.patch.object(
+            profiling, "trusted_resume_doctor", return_value=doctor
+        ) as trusted_doctor:
+            report = profiling.abandon_profile_image_canary(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id=canary_id,
+            )
+        self.assertEqual(report["status"], "ABANDONED")
+        self.assertFalse(report["replay_permitted"])
+        self.assertEqual(report["attempts"], [])
+        trusted_doctor.assert_called_once()
+        self.assertEqual(
+            trusted_doctor.call_args.kwargs["trusted_namespace"],
+            CURRENT_RESEARCH_NAMESPACE,
+        )
+        self.assertEqual(
+            hashlib.sha256((self.state / "history.sqlite3").read_bytes()).hexdigest(),
+            history_before,
+        )
+        with CampaignStore(self.campaign_database) as store:
+            self.assertEqual(store.get_campaign(canary_id)["status"], "CANCELLED")
+            self.assertEqual(
+                store.get_budget_action(
+                    canary_id, idempotency_key="profile-image-canary-v1"
+                )["status"],
+                "RESERVED",
+            )
+            lease_row = store.connection.execute(
+                """
+                SELECT status, fencing_epoch FROM resource_leases
+                WHERE campaign_id = ?
+                """,
+                (canary_id,),
+            ).fetchone()
+            self.assertEqual(dict(lease_row), {
+                "status": "RELEASED",
+                "fencing_epoch": lease.fencing_epoch,
+            })
+        with mock.patch.object(profiling, "trusted_resume_doctor") as no_replay:
+            replay = profiling.abandon_profile_image_canary(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id=canary_id,
+            )
+        self.assertEqual(replay["status"], "ALREADY_ABANDONED")
+        no_replay.assert_not_called()
+
     def test_image_doctor_runs_two_recipes_without_history_or_baseline_writes(self):
         identity = self._record(stage="confirmation", suite="full")
         with sqlite3.connect(self.state / "history.sqlite3") as connection:
@@ -1940,6 +2405,17 @@ class BoundedProfilingTests(unittest.TestCase):
         with CampaignStore(self.campaign_database) as store:
             campaign = store.get_campaign(canary_id)
             self.assertEqual(campaign["status"], "COMPLETED")
+            attempts = store.list_profile_canary_attempts(canary_id)
+            self.assertEqual(
+                [attempt["recipe_id"] for attempt in attempts],
+                sorted(profiling.PROFILE_RECIPE_IDS),
+            )
+            self.assertTrue(
+                all(
+                    attempt["diagnostic"]["classification"] == "SUCCESS"
+                    for attempt in attempts
+                )
+            )
             action = store.get_budget_action(
                 canary_id, idempotency_key="profile-image-canary-v1"
             )

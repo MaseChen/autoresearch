@@ -10,6 +10,7 @@ lineage, or the deployment baseline.
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 import hashlib
 import json
@@ -37,6 +38,7 @@ from .campaign.models import (
     CampaignStatus,
     ResourceLease,
 )
+from .campaign.controller_runner import trusted_resume_doctor
 from .campaign.paths import (
     campaign_maintenance_fence,
     validate_production_campaign_database,
@@ -2135,11 +2137,290 @@ def run_bounded_profile(
 
 
 class _CanaryWorkerFailure(Exception):
-    def __init__(self, cause: BaseException, *, known: bool, hard: bool = False):
+    def __init__(
+        self,
+        cause: BaseException,
+        *,
+        known: bool,
+        hard: bool = False,
+        reason_code: str = "CANARY_FAILURE",
+    ):
         super().__init__(str(cause))
         self.cause = cause
         self.known = known
         self.hard = hard
+        self.reason_code = reason_code
+
+
+_CANARY_DIAGNOSTIC_FILE_LIMIT = 512
+_CANARY_DIAGNOSTIC_EMBED_LIMIT = 64 * 1024
+_CANARY_DIAGNOSTIC_MESSAGE_LIMIT = 16 * 1024
+_CANARY_DIAGNOSTIC_FILES = (
+    "outcome.json",
+    "result.json",
+    "warmup-sentinel.json",
+    "target-sentinel.json",
+)
+
+
+def _bounded_diagnostic_text(value: str) -> dict[str, Any]:
+    encoded = value.encode("utf-8", errors="replace")
+    truncated = len(encoded) > PROFILE_OUTPUT_LIMIT_BYTES
+    selected = encoded[:PROFILE_OUTPUT_LIMIT_BYTES]
+    return {
+        "encoding": "utf-8",
+        "byte_size": len(encoded),
+        "truncated": truncated,
+        "content": selected.decode("utf-8", errors="replace"),
+    }
+
+
+def _diagnostic_file_payload(path: Path) -> dict[str, Any]:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return {"status": "ABSENT"}
+    except OSError as exc:
+        return {
+            "status": "UNAVAILABLE",
+            "error_type": type(exc).__name__,
+        }
+    if stat.S_ISLNK(metadata.st_mode):
+        return {"status": "REJECTED", "reason_code": "SYMLINK"}
+    if not stat.S_ISREG(metadata.st_mode):
+        return {"status": "REJECTED", "reason_code": "NON_REGULAR"}
+    size = int(metadata.st_size)
+    if size > _CANARY_DIAGNOSTIC_EMBED_LIMIT:
+        return {
+            "status": "REJECTED",
+            "reason_code": "SIZE_LIMIT",
+            "byte_size": size,
+        }
+    try:
+        content = _read_regular_file(
+            path,
+            limit=_CANARY_DIAGNOSTIC_EMBED_LIMIT,
+            field="profile canary diagnostic file",
+        )
+    except (OSError, ValueError) as exc:
+        return {
+            "status": "UNAVAILABLE",
+            "error_type": type(exc).__name__,
+            "byte_size": size,
+        }
+    if len(content) != size:
+        return {
+            "status": "UNAVAILABLE",
+            "reason_code": "SIZE_CHANGED",
+            "byte_size": size,
+        }
+    return {
+        "status": "PRESENT",
+        "byte_size": size,
+        "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+        "content_base64": base64.b64encode(content).decode("ascii"),
+    }
+
+
+def _diagnostic_file_inventory(output_directory: Path) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+    truncated = False
+    scan_errors: list[dict[str, str]] = []
+    remaining_hash_bytes = PROFILE_RAW_TRACE_LIMIT_BYTES
+    pending = [output_directory]
+    while pending and not truncated:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as scanner:
+                children = sorted(scanner, key=lambda item: item.name)
+        except OSError as exc:
+            scan_errors.append(
+                {
+                    "path": directory.relative_to(output_directory).as_posix(),
+                    "error_type": type(exc).__name__,
+                }
+            )
+            continue
+        discovered_directories: list[Path] = []
+        for child in children:
+            if len(entries) >= _CANARY_DIAGNOSTIC_FILE_LIMIT:
+                truncated = True
+                break
+            path = Path(child.path)
+            relative = path.relative_to(output_directory).as_posix()
+            try:
+                metadata = child.stat(follow_symlinks=False)
+            except OSError as exc:
+                entries.append(
+                    {
+                        "path": relative,
+                        "kind": "UNAVAILABLE",
+                        "error_type": type(exc).__name__,
+                    }
+                )
+                continue
+            if stat.S_ISLNK(metadata.st_mode):
+                kind = "SYMLINK"
+            elif stat.S_ISREG(metadata.st_mode):
+                kind = "FILE"
+            elif stat.S_ISDIR(metadata.st_mode):
+                kind = "DIRECTORY"
+                discovered_directories.append(path)
+            else:
+                kind = "OTHER"
+            entry: dict[str, Any] = {
+                "path": relative,
+                "kind": kind,
+                "byte_size": int(metadata.st_size),
+                "mode": stat.S_IMODE(metadata.st_mode),
+            }
+            if (
+                kind == "FILE"
+                and int(metadata.st_size) <= PROFILE_RAW_TRACE_LIMIT_BYTES
+                and int(metadata.st_size) <= remaining_hash_bytes
+            ):
+                try:
+                    content = _read_regular_file(
+                        path,
+                        limit=max(PROFILE_RAW_TRACE_LIMIT_BYTES, 1),
+                        field="profile canary inventory file",
+                    )
+                    entry["sha256"] = (
+                        "sha256:" + hashlib.sha256(content).hexdigest()
+                    )
+                    remaining_hash_bytes -= len(content)
+                except (OSError, ValueError) as exc:
+                    entry["hash_error_type"] = type(exc).__name__
+            elif kind == "FILE":
+                entry["hash_unavailable_reason"] = "HASH_BUDGET_EXCEEDED"
+            entries.append(entry)
+        pending.extend(reversed(discovered_directories))
+    return {
+        "entries": entries,
+        "truncated": truncated,
+        "scan_errors": scan_errors,
+    }
+
+
+def _profile_canary_attempt_intent(
+    *,
+    campaign_id: str,
+    budget_action_key: str,
+    recipe: ProfileRecipe,
+    lease: ResourceLease | None,
+    profiler_argv: Sequence[str],
+    container_name: str,
+    timeout_seconds: float,
+    expected_worker_echo: Mapping[str, Any],
+) -> dict[str, Any]:
+    material = {
+        "schema_version": 1,
+        "kind": "PROFILE_IMAGE_CANARY_ATTEMPT",
+        "campaign_id": campaign_id,
+        "budget_action_key": budget_action_key,
+        "recipe_id": recipe.recipe_id,
+        "case_id": recipe.case_id,
+        "requires_gpu": recipe.requires_gpu,
+        "resource_id": lease.resource_id if recipe.requires_gpu and lease else None,
+        "fencing_epoch": (
+            lease.fencing_epoch if recipe.requires_gpu and lease else None
+        ),
+        "profiler_image": PROFILER_IMAGE,
+        "profiler_build_profile_digest": PROFILER_BUILD_PROFILE_DIGEST,
+        "profiler_activation_profile_digest": (
+            PROFILER_ACTIVATION_PROFILE_DIGEST
+        ),
+        "container_name": container_name,
+        "argv": list(profiler_argv),
+        "argv_digest": canonical_sha256(list(profiler_argv)),
+        "timeout_seconds": float(timeout_seconds),
+        "expected_worker_echo": dict(expected_worker_echo),
+    }
+    return {
+        **material,
+        "attempt_id": (
+            "profile-canary-attempt-"
+            + canonical_sha256(material).split(":", 1)[1]
+        ),
+    }
+
+
+def _persist_profile_canary_diagnostic(
+    config: ControllerConfig,
+    *,
+    store: CampaignStore,
+    intent: Mapping[str, Any],
+    output_directory: Path,
+    command: CommandResult | None,
+    outcome: Mapping[str, Any] | None,
+    classification: str,
+    reason_code: str,
+    cause: BaseException | None,
+) -> dict[str, Any]:
+    inventory = _diagnostic_file_inventory(output_directory)
+    cause_message = "" if cause is None else str(cause)
+    diagnostic_object = {
+        "schema_version": 1,
+        "kind": "PROFILE_IMAGE_CANARY_PRIVATE_DIAGNOSTIC",
+        "attempt_id": intent["attempt_id"],
+        "campaign_id": intent["campaign_id"],
+        "budget_action_key": intent["budget_action_key"],
+        "recipe_id": intent["recipe_id"],
+        "classification": classification,
+        "reason_code": reason_code,
+        "cause": {
+            "type": None if cause is None else type(cause).__name__,
+            "message": cause_message[:_CANARY_DIAGNOSTIC_MESSAGE_LIMIT],
+            "message_truncated": (
+                len(cause_message) > _CANARY_DIAGNOSTIC_MESSAGE_LIMIT
+            ),
+        },
+        "command": {
+            "available": command is not None,
+            "argv": None if command is None else list(command.argv),
+            "returncode": None if command is None else command.returncode,
+            "timed_out": False if command is None else command.timed_out,
+            "output_limited": False if command is None else command.output_limited,
+            "stdout": _bounded_diagnostic_text(
+                "" if command is None else command.stdout
+            ),
+            "stderr": _bounded_diagnostic_text(
+                "" if command is None else command.stderr
+            ),
+        },
+        "outcome": None if outcome is None else dict(outcome),
+        "worker_files": {
+            name: _diagnostic_file_payload(output_directory / name)
+            for name in _CANARY_DIAGNOSTIC_FILES
+        },
+        "file_inventory": inventory,
+    }
+    diagnostic_bytes = canonical_json_text(diagnostic_object).encode("utf-8")
+    object_id = _store_cas_object(
+        config.controller_dir / "objects" / "sha256",
+        diagnostic_bytes,
+        field="private profiler image canary diagnostic",
+    )
+    ledger = {
+        "schema_version": 1,
+        "kind": "PROFILE_IMAGE_CANARY_DIAGNOSTIC",
+        "attempt_id": intent["attempt_id"],
+        "campaign_id": intent["campaign_id"],
+        "budget_action_key": intent["budget_action_key"],
+        "recipe_id": intent["recipe_id"],
+        "diagnostic_object_id": object_id,
+        "diagnostic_object_bytes": len(diagnostic_bytes),
+        "classification": classification,
+        "reason_code": reason_code,
+        "returncode": None if command is None else command.returncode,
+        "timed_out": False if command is None else command.timed_out,
+        "output_limited": False if command is None else command.output_limited,
+        "outcome_status": None if outcome is None else outcome.get("status"),
+        "inventory_entries": len(inventory["entries"]),
+    }
+    return store.record_profile_canary_attempt_diagnostic(
+        str(intent["campaign_id"]), diagnostic=ledger
+    )
 
 
 def _current_deployment_profile_subject(
@@ -2413,6 +2694,7 @@ def _expected_worker_echo(
 def _execute_canary_recipe(
     config: ControllerConfig,
     *,
+    store: CampaignStore,
     runner: _ProfileRunner,
     recipe: ProfileRecipe,
     subject: _ProfileSubject,
@@ -2451,6 +2733,51 @@ def _execute_canary_recipe(
             budget_action_key=budget_action_key,
             lease=lease if recipe.requires_gpu else None,
         )
+        intent = _profile_canary_attempt_intent(
+            campaign_id=str(subject.campaign_id),
+            budget_action_key=budget_action_key,
+            recipe=recipe,
+            lease=lease if recipe.requires_gpu else None,
+            profiler_argv=argv,
+            container_name=container_name,
+            timeout_seconds=float(timeout_seconds),
+            expected_worker_echo=expected,
+        )
+        store.record_profile_canary_attempt_intent(
+            str(subject.campaign_id), intent=intent
+        )
+        command: CommandResult | None = None
+        outcome: dict[str, Any] | None = None
+
+        def failure(
+            cause: BaseException,
+            *,
+            known: bool,
+            reason_code: str,
+            hard: bool = False,
+        ) -> _CanaryWorkerFailure:
+            _persist_profile_canary_diagnostic(
+                config,
+                store=store,
+                intent=intent,
+                output_directory=output_directory,
+                command=command,
+                outcome=outcome,
+                classification=(
+                    "HARD_FAILURE"
+                    if hard
+                    else "KNOWN_FAILURE" if known else "UNKNOWN"
+                ),
+                reason_code=reason_code,
+                cause=cause,
+            )
+            return _CanaryWorkerFailure(
+                cause,
+                known=known,
+                hard=hard,
+                reason_code=reason_code,
+            )
+
         try:
             command = runner.run(
                 argv,
@@ -2461,83 +2788,113 @@ def _execute_canary_recipe(
                 docker_binary=config.docker_binary,
             )
         except OSError as exc:
-            raise _CanaryWorkerFailure(
-                ValueError("bounded profiler could not start"), known=True
+            raise failure(
+                ValueError("bounded profiler could not start"),
+                known=True,
+                reason_code="RUNNER_START_FAILED",
             ) from exc
         except BaseException as exc:
-            outcome = None
             try:
                 outcome = _read_worker_outcome(
                     output_directory, expected=expected
                 )
             except ValueError:
                 pass
-            raise _CanaryWorkerFailure(
+            raise failure(
                 exc,
                 known=_outcome_is_known(recipe, outcome),
                 hard=bool(outcome and outcome.get("status") == "HARD_FAILURE"),
+                reason_code="RUNNER_INTERRUPTED",
             ) from exc
-        outcome = _read_worker_outcome(output_directory, expected=expected)
+        try:
+            outcome = _read_worker_outcome(output_directory, expected=expected)
+        except BaseException as exc:
+            raise failure(
+                exc, known=False, reason_code="OUTCOME_INVALID"
+            ) from exc
         hard = _command_has_fatal_gpu_marker(command) or bool(
             outcome and outcome.get("status") == "HARD_FAILURE"
         )
         if hard:
-            raise _CanaryWorkerFailure(
+            raise failure(
                 ValueError("bounded profiler reported a fatal GPU marker"),
                 known=False,
                 hard=True,
+                reason_code="FATAL_GPU_MARKER",
             )
         known = _outcome_is_known(recipe, outcome)
         if tuple(command.argv) != argv:
-            raise _CanaryWorkerFailure(
-                ValueError("profile runner changed the fixed argv"), known=known
+            raise failure(
+                ValueError("profile runner changed the fixed argv"),
+                known=known,
+                reason_code="ARGV_DRIFT",
             )
         if command.timed_out:
-            raise _CanaryWorkerFailure(
-                ValueError("bounded profiler timed out"), known=known
+            raise failure(
+                ValueError("bounded profiler timed out"),
+                known=known,
+                reason_code="TIMEOUT",
             )
         if command.output_limited:
-            raise _CanaryWorkerFailure(
-                ValueError("bounded profiler exceeded its output cap"), known=known
+            raise failure(
+                ValueError("bounded profiler exceeded its output cap"),
+                known=known,
+                reason_code="OUTPUT_LIMIT",
             )
         if command.returncode != 0:
-            raise _CanaryWorkerFailure(
-                ValueError("bounded profiler returned a non-zero status"), known=known
+            raise failure(
+                ValueError("bounded profiler returned a non-zero status"),
+                known=known,
+                reason_code="NONZERO_EXIT",
             )
         if (
             outcome is None
             or outcome.get("status") != "SUCCESS"
             or outcome.get("completion_trusted") is not True
         ):
-            raise _CanaryWorkerFailure(
+            raise failure(
                 ValueError("bounded profiler has no trusted success outcome"),
                 known=known,
+                reason_code="UNTRUSTED_COMPLETION",
             )
-        result = _strict_json_object(
-            _read_regular_file(
-                output_directory / "result.json",
-                limit=PROFILE_RESULT_LIMIT_BYTES,
+        try:
+            result = _strict_json_object(
+                _read_regular_file(
+                    output_directory / "result.json",
+                    limit=PROFILE_RESULT_LIMIT_BYTES,
+                    field="profiler result",
+                ),
                 field="profiler result",
-            ),
-            field="profiler result",
-        )
+            )
+        except BaseException as exc:
+            raise failure(
+                exc, known=False, reason_code="RESULT_UNAVAILABLE"
+            ) from exc
         if set(result) != set(expected) | {
             "metrics",
             "toolchain",
             "trace_descriptor",
         } or any(result.get(field) != value for field, value in expected.items()):
-            raise _CanaryWorkerFailure(
+            raise failure(
                 ValueError("profiler result did not echo the trusted request"),
                 known=True,
+                reason_code="RESULT_IDENTITY_MISMATCH",
             )
-        raw_trace = _read_regular_file(
-            output_directory / "raw.trace",
-            limit=PROFILE_RAW_TRACE_LIMIT_BYTES,
-            field="profiler raw trace",
-        )
+        try:
+            raw_trace = _read_regular_file(
+                output_directory / "raw.trace",
+                limit=PROFILE_RAW_TRACE_LIMIT_BYTES,
+                field="profiler raw trace",
+            )
+        except BaseException as exc:
+            raise failure(
+                exc, known=False, reason_code="RAW_TRACE_UNAVAILABLE"
+            ) from exc
         if not raw_trace:
-            raise _CanaryWorkerFailure(
-                ValueError("profiler raw trace must not be empty"), known=True
+            raise failure(
+                ValueError("profiler raw trace must not be empty"),
+                known=True,
+                reason_code="RAW_TRACE_EMPTY",
             )
         try:
             toolchain = _toolchain_summary(result)
@@ -2546,13 +2903,20 @@ def _execute_canary_recipe(
             )
             metrics = _metric_summary(recipe, result)
         except ValueError as exc:
-            raise _CanaryWorkerFailure(exc, known=True) from exc
-        raw_object = _store_cas_object(
-            config.controller_dir / "objects" / "sha256",
-            raw_trace,
-            field="private profiler image canary trace",
-        )
-        return {
+            raise failure(
+                exc, known=True, reason_code="RESULT_SCHEMA_INVALID"
+            ) from exc
+        try:
+            raw_object = _store_cas_object(
+                config.controller_dir / "objects" / "sha256",
+                raw_trace,
+                field="private profiler image canary trace",
+            )
+        except BaseException as exc:
+            raise failure(
+                exc, known=False, reason_code="RAW_TRACE_CAS_FAILED"
+            ) from exc
+        report = {
             "recipe_id": recipe.recipe_id,
             "case_id": recipe.case_id,
             "metrics": metrics,
@@ -2564,6 +2928,18 @@ def _execute_canary_recipe(
                 "visibility": "controller-private-cas",
             },
         }
+        _persist_profile_canary_diagnostic(
+            config,
+            store=store,
+            intent=intent,
+            output_directory=output_directory,
+            command=command,
+            outcome=outcome,
+            classification="SUCCESS",
+            reason_code="RECIPE_SUCCEEDED",
+            cause=None,
+        )
+        return report
 
 
 def run_profile_image_doctor(
@@ -2742,6 +3118,7 @@ def run_profile_image_doctor(
                         _require_profile_lease(store, lease=lease)
                         report = _execute_canary_recipe(
                             config,
+                            store=store,
                             runner=profile_runner,
                             recipe=BUILTIN_PROFILE_RECIPES[recipe_id],
                             subject=subject,
@@ -2905,6 +3282,106 @@ def run_profile_image_doctor(
                     raise
 
 
+def abandon_profile_image_canary(
+    config: ControllerConfig,
+    *,
+    campaign_database: str | os.PathLike[str],
+    campaign_id: str,
+    controller_factory: Callable[[ControllerConfig], ResearchController] = (
+        ResearchController
+    ),
+    clock: Callable[[], float] = time.time,
+) -> dict[str, Any]:
+    """Clear one quarantine by doctor and abandon, never replay, its action."""
+
+    if not isinstance(config, ControllerConfig):
+        raise TypeError("config must be ControllerConfig")
+    _require_profile_runtime_user(config)
+    require_active_profiler()
+    if tuple(config.gpu_devices) != GPU1_DEVICES:
+        raise ValueError("profile canary abandonment requires the exact C500 devices")
+    if not isinstance(campaign_id, str) or _PROFILE_TOKEN.fullmatch(campaign_id) is None:
+        raise ValueError("campaign_id must be a stable bounded identifier")
+    runtime_root = _runtime_root(config)
+    database = validate_production_campaign_database(
+        campaign_database, runtime_root=runtime_root
+    )
+    action_key = "profile-image-canary-v1"
+    with campaign_maintenance_fence(runtime_root):
+        with gpu_lock(config.controller_dir / "gpu1.lock"):
+            with CampaignStore(database) as store:
+                existing = store.get_profile_canary_abandonment(campaign_id)
+                if existing is not None:
+                    return {
+                        "schema_version": PROFILE_COLLECTION_API_VERSION,
+                        "command": "profile image-doctor-abandon",
+                        "status": "ALREADY_ABANDONED",
+                        "campaign_id": campaign_id,
+                        "abandonment": existing,
+                        "advisory_only": True,
+                    }
+                campaign = store.get_campaign(campaign_id)
+                snapshot = campaign.get("snapshot")
+                if not isinstance(snapshot, Mapping):
+                    raise ValueError("profile image canary has no frozen snapshot")
+                if (
+                    campaign.get("namespace_id")
+                    != CURRENT_RESEARCH_NAMESPACE.namespace_id
+                    or snapshot.get("kind") != "PROFILE_IMAGE_CANARY"
+                    or snapshot.get("namespace_id")
+                    != CURRENT_RESEARCH_NAMESPACE.namespace_id
+                    or snapshot.get("profiler_image") != PROFILER_IMAGE
+                    or snapshot.get("profiler_build_profile_digest")
+                    != PROFILER_BUILD_PROFILE_DIGEST
+                    or snapshot.get("profiler_activation_profile_digest")
+                    != PROFILER_ACTIVATION_PROFILE_DIGEST
+                    or snapshot.get("worker_revision") != PROFILER_WORKER_REVISION
+                    or snapshot.get("recipes") != list(PROFILE_RECIPE_IDS)
+                ):
+                    raise ValueError(
+                        "profile image canary abandonment identity is inconsistent"
+                    )
+                if campaign.get("status") not in {
+                    CampaignStatus.PAUSED_UNKNOWN_OUTCOME.value,
+                    CampaignStatus.PAUSED_HARD_FAILURE.value,
+                }:
+                    raise ValueError(
+                        "profile image canary is not paused with a GPU quarantine"
+                    )
+                if store.list_child_runs(campaign_id):
+                    raise ValueError("profile image canary abandonment forbids child runs")
+                doctor = trusted_resume_doctor(
+                    config,
+                    campaign_store=store,
+                    campaign=campaign,
+                    resource_id=PROFILE_RESOURCE_ID,
+                    trusted_namespace=CURRENT_RESEARCH_NAMESPACE,
+                    controller_factory=controller_factory,
+                    clock=clock,
+                )
+                evidence = store.record_doctor_evidence(
+                    campaign_id, evidence=doctor
+                )
+                abandonment = store.abandon_profile_canary(
+                    campaign_id,
+                    doctor_evidence_digest=evidence["digest"],
+                    budget_action_key=action_key,
+                )
+                return {
+                    "schema_version": PROFILE_COLLECTION_API_VERSION,
+                    "command": "profile image-doctor-abandon",
+                    "status": "ABANDONED",
+                    "campaign_id": campaign_id,
+                    "doctor_evidence_digest": evidence["digest"],
+                    "abandonment": abandonment,
+                    "attempts": store.list_profile_canary_attempts(campaign_id),
+                    "advisory_only": True,
+                    "promotion_effect": "none",
+                    "baseline_effect": "none",
+                    "replay_permitted": False,
+                }
+
+
 __all__ = [
     "BUILTIN_PROFILE_RECIPES",
     "DEFAULT_DEVICE_PATHS",
@@ -2913,6 +3390,7 @@ __all__ = [
     "PROFILE_COLLECTION_API_VERSION",
     "PROFILE_DOCTOR_API_VERSION",
     "PROFILE_RECIPE_IDS",
+    "abandon_profile_image_canary",
     "PROFILER_ACTIVE",
     "PROFILER_ACTIVATION_PROFILE_DIGEST",
     "PROFILER_BUILD_PROFILE_DIGEST",
