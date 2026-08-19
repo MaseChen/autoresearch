@@ -646,18 +646,12 @@ _DEFAULT_SUBJECT_CAMPAIGN = object()
 
 class BoundedProfilingTests(unittest.TestCase):
     def setUp(self) -> None:
-        self._active_profiler = mock.patch.object(
-            profiling,
-            "require_active_profiler",
-            return_value=None,
-        )
         self._profile_euid = mock.patch.object(
             profiling, "_HOST_EFFECTIVE_UID", return_value=1000
         )
         self._profile_egid = mock.patch.object(
             profiling, "_HOST_EFFECTIVE_GID", return_value=1000
         )
-        self._active_profiler.start()
         self._profile_euid.start()
         self._profile_egid.start()
         self.temporary = tempfile.TemporaryDirectory()
@@ -731,7 +725,6 @@ class BoundedProfilingTests(unittest.TestCase):
         self.temporary.cleanup()
         self._profile_egid.stop()
         self._profile_euid.stop()
-        self._active_profiler.stop()
 
     def _record(
         self,

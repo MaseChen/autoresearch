@@ -26,15 +26,15 @@ PROFILER_BASE_IMAGE = (
 )
 PROFILER_IMAGE_REPOSITORY = "ghcr.io/masechen/autoresearch-metax-profiler"
 PROFILER_PLATFORM = "linux/amd64"
-# Submit A5 changes the worker/build identity and is deliberately inactive
-# until its rebuilt Linux/amd64 image is independently pushed and qualified.
-# Activation values remain excluded from the build profile echoed by workers.
+# The independently built A5 Linux/amd64 image passed RepoDigest pull and
+# runtime/toolchain qualification.  Activation values remain excluded from the
+# build profile echoed by workers.
 PROFILER_IMAGE = (
     PROFILER_IMAGE_REPOSITORY
-    + "@sha256:"
-    + "0" * 64
+    + "@sha256:d88465d8ce23fb3edd2af5e610ea46b0"
+    + "ca174045b9bf671e8fe1029571dfb684"
 )
-PROFILER_ACTIVE = False
+PROFILER_ACTIVE = True
 PROFILER_WORKER_REVISION = "metax-bounded-profiler-worker-v3"
 PROFILER_ENTRYPOINT = "/opt/kernel-research/bin/bounded-profiler"
 PROFILER_IMAGE_UID = 1000

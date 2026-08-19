@@ -2,10 +2,12 @@
 
 ## Status
 
-Accepted; A5 is an inactive build submission pending a new image build and
-qualification. The reviewed A4 image reached a second trusted server canary,
-which stopped safely during the untraced hardware warmup with no completion
-sentinel. The action remains quarantined and non-replayable.
+Accepted; the A5 image has been built, pushed, pulled by exact RepoDigest and
+independently runtime/toolchain-qualified. Its separate activation profile now
+pins that immutable image without changing the A5 build identity. No A5 canary
+has run yet. The reviewed A4 image reached a second trusted server canary,
+which stopped safely during untraced hardware warmup with no completion
+sentinel; that action remains quarantined and non-replayable.
 
 ## Context
 
@@ -171,6 +173,13 @@ deployment authority merely because it uses the same candidate and device.
   with an all-zero image digest. Its build profile digest is
   `sha256:13411bcfe57bcb74e1820e8ea60d30b6f5245dceabfb8785a2573ddaff43b49f`.
   A5 does not change the candidate, mcTracer contract, recipe launch counts,
-  History, or baseline. It requires a new clean image build, push, digest pull,
-  runtime qualification, and separate activation commit before another new
-  canary Campaign may run.
+  History, or baseline. The clean A5 source commit
+  `28d499a789c9ae7d4485a1d7116e499c399eb3a0` produced image ID
+  `sha256:f48545e69c4e41f98f942513508160554e4e28880fe272a6b8e0a227ab833d98`.
+  The image was pushed, pulled and runtime/toolchain-qualified as
+  `ghcr.io/masechen/autoresearch-metax-profiler@sha256:d88465d8ce23fb3edd2af5e610ea46b0ca174045b9bf671e8fe1029571dfb684`.
+  The independent activation commit pins only that RepoDigest and
+  `active=true`; the A5 build digest remains exactly
+  `sha256:13411bcfe57bcb74e1820e8ea60d30b6f5245dceabfb8785a2573ddaff43b49f`.
+  The next GPU action is a new, one-shot canary Campaign only after the old A4
+  quarantine is explicitly abandoned and this activation is deployed.

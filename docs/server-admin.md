@@ -268,9 +268,27 @@ A5 起，hardware worker 还会在 sentinel 解析前固定写入
 returncode/termination signal、timeout、持续时间、完整 stdout/stderr hash、限长内容以及
 当时的 sentinel 状态。宿主私有诊断会收集存在的两个文件。process 文件本身不具完成
 权：没有严格 sentinel 时仍为 UNKNOWN，不能根据 returncode、日志或 phase 文件手工改
-成 known。A5 改变 worker/build profile，提交保持 `active=false` 和零 image digest；
-必须重新构建、推送、按 digest 拉取复验，再由独立 activation 提交启用。mcTracer help
-契约、固定 launch 次数和 `kernel.py` 均不得随 A5 改动。
+成 known。A5 改变 worker/build profile，构建提交保持 `active=false` 和零 image digest；
+其独立激活提交只允许固定资格验证通过的 RepoDigest 并设为 `active=true`。mcTracer help
+契约、固定 launch 次数和 `kernel.py` 均不得随激活改动。
+
+A5 的资格验证与激活身份冻结为：
+
+- source commit：`28d499a789c9ae7d4485a1d7116e499c399eb3a0`
+- image ID：`sha256:f48545e69c4e41f98f942513508160554e4e28880fe272a6b8e0a227ab833d98`
+- RepoDigest：`ghcr.io/masechen/autoresearch-metax-profiler@sha256:d88465d8ce23fb3edd2af5e610ea46b0ca174045b9bf671e8fe1029571dfb684`
+- build profile digest：`sha256:13411bcfe57bcb74e1820e8ea60d30b6f5245dceabfb8785a2573ddaff43b49f`
+- activation profile digest：`sha256:e34d0838a473ffb0e97b86c5957ebe5c6e5e2ccb7100cee7ec98a1655edf2f2a`
+- 服务器证据：`/home/mx/autoresearch-evidence/profiler-image-a5-20260818T144550Z`
+- 最终证据清单 SHA-256：`d4e19cd7effa9d58001c36b70456f9205ffd9681c84cdb3e21353589eb256a4d`
+
+激活提交必须是上述 A5 source commit 的直接子提交，不得重建镜像，也不得修改
+worker、recipe、Dockerfile、toolchain、build profile 或 `kernel.py`。部署激活提交前，
+先只读归档旧 A4 canary 的 Campaign、diagnostic、RESERVED action 和 quarantined fencing
+epoch；随后必须从与旧 canary 身份匹配的可信 recovery worktree 运行一次
+`image-doctor-abandon`。只有 abandonment、fresh doctor、lease、budget 与 Campaign 终态
+全部归档后，才执行 Admin update、static/doctor 和完整主机回归，并以全新 Campaign ID
+运行唯一一次 A5 image-doctor。A5 canary READY 前不得开始 soak。
 
 对已经进入 `PAUSED_UNKNOWN_OUTCOME` 或 `PAUSED_HARD_FAILURE` 的 image-doctor，先部署
 包含恢复能力的代码会被活动 Campaign 管理锁拒绝。这种情况下只能从该修复提交的干净

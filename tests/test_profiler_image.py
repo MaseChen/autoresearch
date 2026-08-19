@@ -48,23 +48,25 @@ class ProfilerContractTests(unittest.TestCase):
         "f5245dceabfb8785a2573ddaff43b49f"
     )
     ACTIVATION_PROFILE_DIGEST = (
-        "sha256:7673a0fd774f573dd2815136f0130fdf"
-        "615c78dbc2a07ac9176f1e8c631da77b"
+        "sha256:e34d0838a473ffb0e97b86c5957ebe5c"
+        "6e5e2ccb7100cee7ec98a1655edf2f2a"
+    )
+    A5_IMAGE = (
+        "ghcr.io/masechen/autoresearch-metax-profiler@sha256:"
+        "d88465d8ce23fb3edd2af5e610ea46b0"
+        "ca174045b9bf671e8fe1029571dfb684"
     )
 
-    def test_submit_a5_profile_is_exact_and_inactive(self) -> None:
+    def test_a5_activation_is_exact_and_preserves_build_identity(self) -> None:
         build = profiler_build_profile_snapshot()
         activation = profiler_activation_profile_snapshot()
-        self.assertFalse(PROFILER_ACTIVE)
+        self.assertTrue(PROFILER_ACTIVE)
         self.assertEqual(build["base_image"], PROFILER_BASE_IMAGE)
         self.assertNotIn("active", build)
         self.assertNotIn("profiler_image", build)
-        self.assertEqual(
-            PROFILER_IMAGE,
-            PROFILER_IMAGE_REPOSITORY + "@sha256:" + "0" * 64,
-        )
+        self.assertEqual(PROFILER_IMAGE, self.A5_IMAGE)
         self.assertEqual(activation["profiler_image"], PROFILER_IMAGE)
-        self.assertFalse(activation["active"])
+        self.assertTrue(activation["active"])
         self.assertTrue(PROFILER_IMAGE.startswith(PROFILER_IMAGE_REPOSITORY))
         self.assertEqual(build["worker_revision"], PROFILER_WORKER_REVISION)
         self.assertEqual(
@@ -85,8 +87,7 @@ class ProfilerContractTests(unittest.TestCase):
             PROFILER_ACTIVATION_PROFILE_DIGEST,
             self.ACTIVATION_PROFILE_DIGEST,
         )
-        with self.assertRaisesRegex(ValueError, "inactive"):
-            require_active_profiler()
+        require_active_profiler()
 
     def test_a5_worker_echo_survives_future_activation_only_change(self) -> None:
         request = ProfilerWorkerTests._request()
@@ -97,12 +98,7 @@ class ProfilerContractTests(unittest.TestCase):
             profiler_image=PROFILER_IMAGE_REPOSITORY + "@sha256:" + "0" * 64,
         )
         commit_b_build = profiler_build_profile_snapshot()
-        commit_b_activation = profiler_activation_profile_snapshot(
-            active=True,
-            profiler_image=(
-                PROFILER_IMAGE_REPOSITORY + "@sha256:" + "f" * 64
-            ),
-        )
+        commit_b_activation = profiler_activation_profile_snapshot()
         self.assertEqual(commit_b_build, commit_a_build)
         self.assertEqual(
             canonical_sha256(commit_b_build),
@@ -116,6 +112,8 @@ class ProfilerContractTests(unittest.TestCase):
             commit_b_activation["build_profile_digest"],
             commit_a_echo["profiler_build_profile_digest"],
         )
+        self.assertTrue(commit_b_activation["active"])
+        self.assertEqual(commit_b_activation["profiler_image"], self.A5_IMAGE)
         self.assertNotIn("profiler_image", commit_a_echo)
         self.assertNotIn("active", commit_a_echo)
         self.assertNotIn("profiler_activation_profile_digest", commit_a_echo)
