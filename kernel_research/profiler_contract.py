@@ -26,16 +26,15 @@ PROFILER_BASE_IMAGE = (
 )
 PROFILER_IMAGE_REPOSITORY = "ghcr.io/masechen/autoresearch-metax-profiler"
 PROFILER_PLATFORM = "linux/amd64"
-# A6 changes only the frozen profiler memory/runtime resource contract after
-# the A5 canary proved that 4 GiB triggers a container memory-cgroup OOM.  The
-# rebuilt image must be qualified before a separate activation commit may pin
-# its RepoDigest.  Activation values remain excluded from the build profile.
+# The independently built A6 Linux/amd64 image passed RepoDigest pull and
+# non-root/read-only runtime/toolchain qualification. Activation values remain
+# excluded from the worker-visible build profile.
 PROFILER_IMAGE = (
     PROFILER_IMAGE_REPOSITORY
-    + "@sha256:"
-    + "0" * 64
+    + "@sha256:2c817daef35c634b398209fce2d3c40b"
+    + "16d1f37acc9dbf00349e2540477719bb"
 )
-PROFILER_ACTIVE = False
+PROFILER_ACTIVE = True
 PROFILER_WORKER_REVISION = "metax-bounded-profiler-worker-v3"
 PROFILER_ENTRYPOINT = "/opt/kernel-research/bin/bounded-profiler"
 PROFILER_IMAGE_UID = 1000

@@ -314,19 +314,32 @@ UNKNOWN/quarantine。CLI 不接受 memory、swap 或 threshold 参数；A6 也�
 `--memory-swap`、soft reservation、OOM disable 或 worker cgroup telemetry。
 
 A6 build submission 保持 `PROFILER_ACTIVE=false` 和全零 RepoDigest，且必须保持
-worker v3、recipe、case、mcTracer/toolchain、Dockerfile 和 `kernel.py` 不变。冻结身份为：
+worker v3、recipe、case、mcTracer/toolchain、Dockerfile 和 `kernel.py` 不变。构建与
+资格验证已经完成，冻结身份为：
 
 - build profile digest：
   `sha256:432756dac8d6a00b7221ea5d39f09d8f33ec4ef48fa42badb35bdc20f2e59ab7`
 - inactive activation digest：
   `sha256:0812342ab6a513319dd95a3d2b4e5a35751560a52a5c86b62584cd56695e9d05`
+- source commit：`35f065d787bbf3c77bfe55c4ec5a1bd5bc1c3162`
+- image ID：
+  `sha256:e955857c2c548e047149f786fc568f11bad2ad780380f2f30bac7f0e267983b4`
+- RepoDigest：
+  `ghcr.io/masechen/autoresearch-metax-profiler@sha256:2c817daef35c634b398209fce2d3c40b16d1f37acc9dbf00349e2540477719bb`
+- active activation digest：
+  `sha256:bd6dba397b68b7dde0f254ea12a916662c1bd10b1e0d6a99dd74545d3ad0c7ee`
+- 服务器证据：
+  `/home/mx/autoresearch-evidence/profiler-image-a6-20260820T064356Z`
+- 最终证据清单 SHA-256：
+  `4500eb4403dd3130e0b717d895dd7dc348c4ef1cba1f3b7167b84d357ef0f42a`
 - Docker memory：`24g`
 - host memory source：`/proc/meminfo`
 - minimum total/available：`25769803776` bytes each
 
-从干净 A6 build commit 构建、push、按 RepoDigest pull 并完成 runtime/toolchain 资格验证
-后，另建一个直接子 activation commit。Activation 只可设置 `active=true` 和最终精确
-RepoDigest；build digest 必须仍为上述值。部署顺序严格为：
+Activation commit 必须是上述 A6 build commit 的直接子提交。生产 contract 只可设置
+`active=true` 和上述精确 RepoDigest；build digest 必须仍为上述值，且不得重建镜像或
+修改 worker、recipe、Dockerfile、toolchain、resource contract 或 `kernel.py`。部署顺序
+严格为：
 
 1. 只读归档旧 A5 Campaign、diagnostic、RESERVED action 和 epoch 3 quarantine。
 2. 从干净的 A5 activation/recovery worktree 对旧 Campaign 执行一次

@@ -7,9 +7,11 @@ independently runtime/toolchain-qualified, then reached a trusted server
 canary. Its untraced hardware warmup was killed by the container memory cgroup
 at the frozen 4 GiB limit. The worker's `SIGKILL`, absent sentinel and phase
 duration agree with the kernel `CONSTRAINT_MEMCG` record. The action remains
-UNKNOWN, RESERVED, quarantined and non-replayable. A6 is an inactive build
-submission that raises only the profiler memory/resource contract and adds a
-pre-Docker host-memory gate; no A6 image or activation evidence exists yet.
+UNKNOWN, RESERVED, quarantined and non-replayable. A6 raises only the profiler
+memory/resource contract and adds a pre-Docker host-memory gate. Its image has
+now been built, pushed, pulled by exact RepoDigest and independently qualified;
+the separate activation profile pins that image without changing build
+identity. No A6 canary has run yet.
 
 ## Context
 
@@ -222,7 +224,17 @@ deployment authority merely because it uses the same candidate and device.
   `sha256:432756dac8d6a00b7221ea5d39f09d8f33ec4ef48fa42badb35bdc20f2e59ab7`;
   its inactive activation digest is
   `sha256:0812342ab6a513319dd95a3d2b4e5a35751560a52a5c86b62584cd56695e9d05`.
-  A6 must be built and qualified as a new image, followed by a separate
-  activation commit that changes only the activation bit and exact RepoDigest.
+  The clean A6 build commit
+  `35f065d787bbf3c77bfe55c4ec5a1bd5bc1c3162` produced image ID
+  `sha256:e955857c2c548e047149f786fc568f11bad2ad780380f2f30bac7f0e267983b4`.
+  It was pushed, pulled and requalified as
+  `ghcr.io/masechen/autoresearch-metax-profiler@sha256:2c817daef35c634b398209fce2d3c40b16d1f37acc9dbf00349e2540477719bb`.
+  The separate activation commit changes only the activation bit and exact
+  RepoDigest; the build digest remains unchanged. Its activation digest is
+  `sha256:bd6dba397b68b7dde0f254ea12a916662c1bd10b1e0d6a99dd74545d3ad0c7ee`.
+  The sealed build evidence is stored at
+  `/home/mx/autoresearch-evidence/profiler-image-a6-20260820T064356Z`
+  with manifest digest
+  `4500eb4403dd3130e0b717d895dd7dc348c4ef1cba1f3b7167b84d357ef0f42a`.
   Only after the old A5 canary is abandoned, the A6 activation is deployed and
   a wholly new canary reaches READY may the 24/72/168-hour soak clock start.
