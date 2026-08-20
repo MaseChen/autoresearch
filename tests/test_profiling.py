@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+from contextlib import closing
 import hashlib
+import io
 import json
 import math
 import os
@@ -956,7 +958,9 @@ class BoundedProfilingTests(unittest.TestCase):
         )
 
     def _campaign_rows(self, table, campaign_id=None):
-        with sqlite3.connect(self.campaign_database) as connection:
+        with closing(
+            sqlite3.connect(self.campaign_database)
+        ) as connection, connection:
             connection.row_factory = sqlite3.Row
             return [
                 dict(row)
@@ -968,7 +972,9 @@ class BoundedProfilingTests(unittest.TestCase):
 
     def _canary_subject_fixture(self, canary_id):
         identity = self._record(stage="confirmation", suite="full")
-        with sqlite3.connect(self.state / "history.sqlite3") as connection:
+        with closing(
+            sqlite3.connect(self.state / "history.sqlite3")
+        ) as connection, connection:
             row = connection.execute(
                 """
                 SELECT e.candidate_hash, a.object_path
@@ -1518,7 +1524,9 @@ class BoundedProfilingTests(unittest.TestCase):
         def cancel_after_reservation(status_call):
             if status_call != 3:
                 return
-            with sqlite3.connect(self.campaign_database) as connection:
+            with closing(
+                sqlite3.connect(self.campaign_database)
+            ) as connection, connection:
                 connection.execute(
                     """
                     UPDATE budget_actions SET status = 'CANCELLED', settled_at = 'fixture'
@@ -1974,7 +1982,9 @@ class BoundedProfilingTests(unittest.TestCase):
         self.assertFalse(hasattr(args, "memory"))
         self.assertFalse(hasattr(args, "memory_swap"))
 
-        with self.assertRaises(SystemExit):
+        with mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(
+            SystemExit
+        ):
             build_parser().parse_args(
                 [
                     "profile",
@@ -2698,7 +2708,9 @@ class BoundedProfilingTests(unittest.TestCase):
 
     def test_image_doctor_runs_two_recipes_without_history_or_baseline_writes(self):
         identity = self._record(stage="confirmation", suite="full")
-        with sqlite3.connect(self.state / "history.sqlite3") as connection:
+        with closing(
+            sqlite3.connect(self.state / "history.sqlite3")
+        ) as connection, connection:
             row = connection.execute(
                 """
                 SELECT e.candidate_hash, a.object_path
@@ -2826,7 +2838,9 @@ class BoundedProfilingTests(unittest.TestCase):
 
     def test_image_doctor_rejects_aggregate_raw_trace_over_64_mib(self):
         identity = self._record(stage="confirmation", suite="full")
-        with sqlite3.connect(self.state / "history.sqlite3") as connection:
+        with closing(
+            sqlite3.connect(self.state / "history.sqlite3")
+        ) as connection, connection:
             row = connection.execute(
                 """
                 SELECT e.candidate_hash, a.object_path
