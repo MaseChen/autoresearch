@@ -26,15 +26,16 @@ PROFILER_BASE_IMAGE = (
 )
 PROFILER_IMAGE_REPOSITORY = "ghcr.io/masechen/autoresearch-metax-profiler"
 PROFILER_PLATFORM = "linux/amd64"
-# The independently built A5 Linux/amd64 image passed RepoDigest pull and
-# runtime/toolchain qualification.  Activation values remain excluded from the
-# build profile echoed by workers.
+# A6 changes only the frozen profiler memory/runtime resource contract after
+# the A5 canary proved that 4 GiB triggers a container memory-cgroup OOM.  The
+# rebuilt image must be qualified before a separate activation commit may pin
+# its RepoDigest.  Activation values remain excluded from the build profile.
 PROFILER_IMAGE = (
     PROFILER_IMAGE_REPOSITORY
-    + "@sha256:d88465d8ce23fb3edd2af5e610ea46b0"
-    + "ca174045b9bf671e8fe1029571dfb684"
+    + "@sha256:"
+    + "0" * 64
 )
-PROFILER_ACTIVE = True
+PROFILER_ACTIVE = False
 PROFILER_WORKER_REVISION = "metax-bounded-profiler-worker-v3"
 PROFILER_ENTRYPOINT = "/opt/kernel-research/bin/bounded-profiler"
 PROFILER_IMAGE_UID = 1000
@@ -90,7 +91,10 @@ PROFILE_CANARY_RAW_TRACE_TOTAL_LIMIT_BYTES = 64 * 1024 * 1024
 PROFILE_CANDIDATE_LIMIT_BYTES = 2 * 1024 * 1024
 PROFILE_TRACE_FILE_LIMIT = 256
 PROFILE_TRACE_MEMBER_LIMIT_BYTES = 32 * 1024 * 1024
-PROFILE_MEMORY_LIMIT = "4g"
+PROFILE_MEMORY_LIMIT = "24g"
+PROFILE_HOST_MEMORY_SOURCE = "/proc/meminfo"
+PROFILE_HOST_MIN_TOTAL_MEMORY_BYTES = 24 * 1024**3
+PROFILE_HOST_MIN_AVAILABLE_MEMORY_BYTES = 24 * 1024**3
 PROFILE_CPU_LIMIT = 4.0
 PROFILE_PID_LIMIT = 128
 PROFILE_RESOURCE_ID = "gpu1"
@@ -243,6 +247,13 @@ def profiler_build_profile_snapshot() -> dict[str, Any]:
             "trace_files": PROFILE_TRACE_FILE_LIMIT,
             "trace_member_bytes": PROFILE_TRACE_MEMBER_LIMIT_BYTES,
             "memory": PROFILE_MEMORY_LIMIT,
+            "host_memory_source": PROFILE_HOST_MEMORY_SOURCE,
+            "host_min_total_memory_bytes": (
+                PROFILE_HOST_MIN_TOTAL_MEMORY_BYTES
+            ),
+            "host_min_available_memory_bytes": (
+                PROFILE_HOST_MIN_AVAILABLE_MEMORY_BYTES
+            ),
             "cpus": PROFILE_CPU_LIMIT,
             "pids": PROFILE_PID_LIMIT,
         },

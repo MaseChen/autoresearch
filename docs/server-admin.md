@@ -290,6 +290,55 @@ epoch；随后必须从与旧 canary 身份匹配的可信 recovery worktree 运
 全部归档后，才执行 Admin update、static/doctor 和完整主机回归，并以全新 Campaign ID
 运行唯一一次 A5 image-doctor。A5 canary READY 前不得开始 soak。
 
+### A6 memory-resource correction
+
+A5 的唯一 canary 已执行，不能重跑。hardware recipe 在 untraced warmup 中被 Docker
+memory cgroup OOM kill：worker 记录 `returncode=-9`、`SIGKILL`、8,191 ms、无 timeout、
+无 sentinel；内核在 `2026-08-19T03:21:40Z` 记录同一容器 cgroup 下 UID 1000 的
+`CONSTRAINT_MEMCG` kill，且 mcTracer 尚未启动。该根因不会把 action 改成 known：旧
+Campaign 保持 `PAUSED_UNKNOWN_OUTCOME`，预算保持 RESERVED，gpu1 fencing epoch 3
+保持 QUARANTINED。不得重跑、结算、释放或修改 SQLite。
+
+根因归档固定为：
+
+- 路径：`/home/mx/autoresearch-evidence/profiler-a5-canary-oom-root-cause-20260819T032140Z`
+- `SHA256SUMS` manifest digest：
+  `54adaa64afee67f69b2cb06ef5a603104f699874295c6047395fe291cf626198`
+
+A6 只修正资源契约：Docker `--memory` 精确固定为 `24g`，与已成功的 evaluator ceiling
+一致；宿主在创建任何状态前以及每次 Docker 前严格读取 `/proc/meminfo`，要求
+`MemTotal >= 24 GiB` 且 `MemAvailable >= 24 GiB`。解析失败、单位/重复字段异常或阈值
+不足均失败关闭。第一次检查失败不得创建 Campaign/budget/lease；reservation 后但 Docker
+前检查失败必须结算 wall、GPU=0、释放 lease 并进入 `PAUSED_OPERATOR`，不能升级为
+UNKNOWN/quarantine。CLI 不接受 memory、swap 或 threshold 参数；A6 也不增加
+`--memory-swap`、soft reservation、OOM disable 或 worker cgroup telemetry。
+
+A6 build submission 保持 `PROFILER_ACTIVE=false` 和全零 RepoDigest，且必须保持
+worker v3、recipe、case、mcTracer/toolchain、Dockerfile 和 `kernel.py` 不变。冻结身份为：
+
+- build profile digest：
+  `sha256:432756dac8d6a00b7221ea5d39f09d8f33ec4ef48fa42badb35bdc20f2e59ab7`
+- inactive activation digest：
+  `sha256:0812342ab6a513319dd95a3d2b4e5a35751560a52a5c86b62584cd56695e9d05`
+- Docker memory：`24g`
+- host memory source：`/proc/meminfo`
+- minimum total/available：`25769803776` bytes each
+
+从干净 A6 build commit 构建、push、按 RepoDigest pull 并完成 runtime/toolchain 资格验证
+后，另建一个直接子 activation commit。Activation 只可设置 `active=true` 和最终精确
+RepoDigest；build digest 必须仍为上述值。部署顺序严格为：
+
+1. 只读归档旧 A5 Campaign、diagnostic、RESERVED action 和 epoch 3 quarantine。
+2. 从干净的 A5 activation/recovery worktree 对旧 Campaign 执行一次
+   `image-doctor-abandon`；fresh doctor 只授权 abandonment，不授权重放。
+3. 归档 abandonment、doctor、lease、budget 与 Campaign 终态。
+4. Admin update 到 A6 activation commit，执行 static、doctor 和完整主机回归。
+5. 使用全新 Campaign ID 运行唯一一次 A6 `profile image-doctor`。
+6. A6 READY 后才创建全新 Discovery Campaign，并从零开始 24/72/168 小时 soak。
+
+如果 A6 canary 再次在 GPU start 后失去可信 completion，仍按 UNKNOWN/RESERVED/
+quarantine 处理，禁止原地重跑，并回到新的资源契约评审。
+
 对已经进入 `PAUSED_UNKNOWN_OUTCOME` 或 `PAUSED_HARD_FAILURE` 的 image-doctor，先部署
 包含恢复能力的代码会被活动 Campaign 管理锁拒绝。这种情况下只能从该修复提交的干净
 detached recovery worktree 运行以下唯一入口，仍然读取正式配置和 canonical Campaign

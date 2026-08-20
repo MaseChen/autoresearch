@@ -70,6 +70,9 @@ from .profiler_contract import (
     PROFILE_CPU_LIMIT,
     PROFILE_DOCKER_TMPFS,
     PROFILE_GPU_DEVICE_PATHS,
+    PROFILE_HOST_MEMORY_SOURCE,
+    PROFILE_HOST_MIN_AVAILABLE_MEMORY_BYTES,
+    PROFILE_HOST_MIN_TOTAL_MEMORY_BYTES,
     PROFILE_LEASE_TTL_SECONDS,
     PROFILE_MEMORY_LIMIT,
     PROFILE_OUTCOME_CONTAINER_PATH,
@@ -106,6 +109,8 @@ PROFILE_COLLECTION_API_VERSION = PROFILE_COLLECTION_SCHEMA_VERSION
 _PROFILE_BUDGET_CEILING_MS = int(PROFILE_TIMEOUT_SECONDS * 1000)
 _HOST_EFFECTIVE_UID = os.geteuid
 _HOST_EFFECTIVE_GID = os.getegid
+_HOST_MEMINFO_PATH = Path(PROFILE_HOST_MEMORY_SOURCE)
+_HOST_MEMINFO_LIMIT_BYTES = 64 * 1024
 if tuple(str(path) for path in GPU1_DEVICES) != PROFILE_GPU_DEVICE_PATHS:
     raise RuntimeError("profiler GPU device contract drifted")
 
@@ -125,6 +130,68 @@ _STAGE_SUITE_RANK = {
     ("full_primary", "full"): 3,
     ("confirmation", "full"): 3,
 }
+
+
+def _profile_host_memory_preflight(
+    *,
+    path: Path | None = None,
+    clock: Callable[[], float] = time.time,
+) -> dict[str, Any]:
+    """Fail before Docker unless the host can honor the frozen 24 GiB cap."""
+
+    selected = _HOST_MEMINFO_PATH if path is None else path
+    if not isinstance(selected, Path) or not selected.is_absolute():
+        raise ValueError("profile host memory source must be an absolute path")
+    try:
+        content = selected.read_bytes()
+    except OSError as exc:
+        raise ValueError("profile host memory information is unavailable") from exc
+    if not content or len(content) > _HOST_MEMINFO_LIMIT_BYTES:
+        raise ValueError("profile host memory information is empty or oversized")
+    try:
+        text = content.decode("ascii", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError("profile host memory information is not ASCII") from exc
+    observed: dict[str, int] = {}
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        name, raw = line.split(":", 1)
+        if name not in {"MemTotal", "MemAvailable"}:
+            continue
+        if name in observed:
+            raise ValueError(f"profile host memory information repeats {name}")
+        match = re.fullmatch(r"[ \t]*([0-9]+)[ \t]+kB[ \t]*", raw)
+        if match is None:
+            raise ValueError(f"profile host memory information has invalid {name}")
+        kibibytes = int(match.group(1))
+        if kibibytes > (2**63 - 1) // 1024:
+            raise ValueError(f"profile host memory information overflows {name}")
+        observed[name] = kibibytes * 1024
+    if set(observed) != {"MemTotal", "MemAvailable"}:
+        raise ValueError("profile host memory information is incomplete")
+    if observed["MemTotal"] < PROFILE_HOST_MIN_TOTAL_MEMORY_BYTES:
+        raise ValueError("profile host total memory is below the frozen minimum")
+    if observed["MemAvailable"] < PROFILE_HOST_MIN_AVAILABLE_MEMORY_BYTES:
+        raise ValueError("profile host available memory is below the frozen minimum")
+    now = clock()
+    if (
+        isinstance(now, bool)
+        or not isinstance(now, (int, float))
+        or not math.isfinite(float(now))
+        or float(now) < 0
+    ):
+        raise ValueError("profile host memory observation time is invalid")
+    return {
+        "schema_version": 1,
+        "kind": "HOST_MEMORY_PREFLIGHT_V1",
+        "source": str(selected),
+        "observed_epoch_ms": int(float(now) * 1000),
+        "mem_total_bytes": observed["MemTotal"],
+        "mem_available_bytes": observed["MemAvailable"],
+        "required_total_bytes": PROFILE_HOST_MIN_TOTAL_MEMORY_BYTES,
+        "required_available_bytes": PROFILE_HOST_MIN_AVAILABLE_MEMORY_BYTES,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -1318,13 +1385,13 @@ def _profile_budget(recipe: ProfileRecipe) -> BudgetAmount:
 
 
 def _actual_profile_budget(
-    recipe: ProfileRecipe, *, started_monotonic: float
+    recipe: ProfileRecipe, *, started_monotonic: float, gpu_started: bool = True
 ) -> BudgetAmount:
     elapsed_ms = max(0, math.ceil((time.monotonic() - started_monotonic) * 1000))
     bounded_ms = min(elapsed_ms, _PROFILE_BUDGET_CEILING_MS)
     return BudgetAmount(
         wall_ms=bounded_ms,
-        gpu_ms=bounded_ms if recipe.requires_gpu else 0,
+        gpu_ms=bounded_ms if recipe.requires_gpu and gpu_started else 0,
     )
 
 
@@ -1599,6 +1666,7 @@ def run_bounded_profile(
         # Submit A is intentionally inert.  Tests may inject a runner to prove
         # all pre-launch and evidence paths without weakening production.
         require_active_profiler()
+    _profile_host_memory_preflight()
 
     runtime_root = _runtime_root(config)
     database = validate_production_campaign_database(
@@ -1684,9 +1752,11 @@ def run_bounded_profile(
         outcome_kind = "known"
         failure_reason_code = "pre-execution-failure"
         hard_failure = False
+        gpu_started = False
 
         def execute_action() -> dict[str, Any]:
             nonlocal lease, outcome_kind, failure_reason_code, hard_failure
+            nonlocal gpu_started
             if recipe.requires_gpu:
                 lease = campaign_store.acquire_resource(
                     campaign_id,
@@ -1742,6 +1812,7 @@ def run_bounded_profile(
             ) as temporary:
                 output_directory = Path(temporary).resolve()
                 output_directory.chmod(0o700)
+                _profile_host_memory_preflight()
                 argv = _profile_argv(
                     config,
                     recipe=recipe,
@@ -1755,6 +1826,8 @@ def run_bounded_profile(
                 outcome_kind = "unknown"
                 failure_reason_code = "runner-outcome-unknown"
                 worker_outcome: dict[str, Any] | None = None
+                if recipe.requires_gpu:
+                    gpu_started = True
                 try:
                     command = profile_runner.run(
                         argv,
@@ -2024,7 +2097,9 @@ def run_bounded_profile(
                 campaign_id,
                 idempotency_key=budget_action_key,
                 actual=_actual_profile_budget(
-                    recipe, started_monotonic=started_monotonic
+                    recipe,
+                    started_monotonic=started_monotonic,
+                    gpu_started=gpu_started,
                 ),
             )
             if lease is not None:
@@ -2097,7 +2172,9 @@ def run_bounded_profile(
                         campaign_id,
                         idempotency_key=budget_action_key,
                         actual=_actual_profile_budget(
-                            recipe, started_monotonic=started_monotonic
+                            recipe,
+                            started_monotonic=started_monotonic,
+                            gpu_started=gpu_started,
                         ),
                     )
                     if lease is not None:
@@ -2314,9 +2391,10 @@ def _profile_canary_attempt_intent(
     container_name: str,
     timeout_seconds: float,
     expected_worker_echo: Mapping[str, Any],
+    host_memory_preflight: Mapping[str, Any],
 ) -> dict[str, Any]:
     material = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "PROFILE_IMAGE_CANARY_ATTEMPT",
         "campaign_id": campaign_id,
         "budget_action_key": budget_action_key,
@@ -2337,6 +2415,7 @@ def _profile_canary_attempt_intent(
         "argv_digest": canonical_sha256(list(profiler_argv)),
         "timeout_seconds": float(timeout_seconds),
         "expected_worker_echo": dict(expected_worker_echo),
+        "host_memory_preflight": dict(host_memory_preflight),
     }
     return {
         **material,
@@ -2705,6 +2784,7 @@ def _execute_canary_recipe(
     lease: ResourceLease | None,
     container_suffix: str,
     timeout_seconds: float,
+    host_memory_preflight: Mapping[str, Any],
 ) -> dict[str, Any]:
     if (
         not isinstance(timeout_seconds, (int, float))
@@ -2744,6 +2824,7 @@ def _execute_canary_recipe(
             container_name=container_name,
             timeout_seconds=float(timeout_seconds),
             expected_worker_echo=expected,
+            host_memory_preflight=host_memory_preflight,
         )
         store.record_profile_canary_attempt_intent(
             str(subject.campaign_id), intent=intent
@@ -2959,6 +3040,7 @@ def run_profile_image_doctor(
     require_active_profiler()
     if tuple(config.gpu_devices) != GPU1_DEVICES:
         raise ValueError("profiler image canary requires the exact C500 devices")
+    _profile_host_memory_preflight()
     _strict_token = _PROFILE_TOKEN.fullmatch(campaign_id) if isinstance(campaign_id, str) else None
     if _strict_token is None:
         raise ValueError("campaign_id must be a stable bounded identifier")
@@ -3082,6 +3164,7 @@ def run_profile_image_doctor(
                 )
                 try:
                     reports: list[dict[str, Any]] = []
+                    gpu_started = False
                     for recipe_id in PROFILE_RECIPE_IDS:
                         remaining_seconds = (
                             PROFILE_CANARY_WALL_SECONDS
@@ -3118,11 +3201,25 @@ def run_profile_image_doctor(
                             baseline_ref=baseline_ref,
                         )
                         _require_profile_lease(store, lease=lease)
+                        try:
+                            host_memory_preflight = (
+                                _profile_host_memory_preflight()
+                            )
+                        except ValueError as exc:
+                            raise _CanaryWorkerFailure(
+                                exc,
+                                known=True,
+                                hard=False,
+                                reason_code="HOST_MEMORY_PREFLIGHT_FAILED",
+                            ) from exc
+                        selected_recipe = BUILTIN_PROFILE_RECIPES[recipe_id]
+                        if selected_recipe.requires_gpu:
+                            gpu_started = True
                         report = _execute_canary_recipe(
                             config,
                             store=store,
                             runner=profile_runner,
-                            recipe=BUILTIN_PROFILE_RECIPES[recipe_id],
+                            recipe=selected_recipe,
                             subject=subject,
                             invariant_digest=snapshot_digest,
                             budget_action_key=action_key,
@@ -3133,6 +3230,7 @@ def run_profile_image_doctor(
                             timeout_seconds=min(
                                 PROFILE_TIMEOUT_SECONDS, remaining_seconds
                             ),
+                            host_memory_preflight=host_memory_preflight,
                         )
                         reports.append(report)
                     raw_trace_total_bytes = sum(
@@ -3245,9 +3343,13 @@ def run_profile_image_doctor(
                             idempotency_key=action_key,
                             actual=BudgetAmount(
                                 wall_ms=elapsed,
-                                gpu_ms=min(
-                                    elapsed,
-                                    int(PROFILE_CANARY_GPU_SECONDS * 1000),
+                                gpu_ms=(
+                                    min(
+                                        elapsed,
+                                        int(PROFILE_CANARY_GPU_SECONDS * 1000),
+                                    )
+                                    if gpu_started
+                                    else 0
                                 ),
                             ),
                         )

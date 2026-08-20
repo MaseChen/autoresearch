@@ -339,7 +339,7 @@ class CampaignSoakCollectorTests(unittest.TestCase):
             ttl_seconds=1_830,
         )
         intent_material = {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "PROFILE_IMAGE_CANARY_ATTEMPT",
             "campaign_id": campaign_id,
             "budget_action_key": action_key,
@@ -358,6 +358,16 @@ class CampaignSoakCollectorTests(unittest.TestCase):
             ),
             "timeout_seconds": 900.0,
             "expected_worker_echo": {"recipe_id": recipe_id},
+            "host_memory_preflight": {
+                "schema_version": 1,
+                "kind": "HOST_MEMORY_PREFLIGHT_V1",
+                "source": "/proc/meminfo",
+                "observed_epoch_ms": 1_787_114_880_000,
+                "mem_total_bytes": 64 * 1024**3,
+                "mem_available_bytes": 48 * 1024**3,
+                "required_total_bytes": 24 * 1024**3,
+                "required_available_bytes": 24 * 1024**3,
+            },
         }
         intent = {
             **intent_material,

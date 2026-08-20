@@ -15,6 +15,11 @@ from typing import Any, Iterator, Mapping, Sequence
 import uuid
 
 from ..platform.identity import BaselineRef, ExecutionEnvironmentDigest
+from ..profiler_contract import (
+    PROFILE_HOST_MEMORY_SOURCE,
+    PROFILE_HOST_MIN_AVAILABLE_MEMORY_BYTES,
+    PROFILE_HOST_MIN_TOTAL_MEMORY_BYTES,
+)
 from .models import (
     BudgetAmount,
     CampaignMode,
@@ -1979,10 +1984,11 @@ class CampaignStore:
             "profiler_build_profile_digest",
             "profiler_activation_profile_digest", "container_name", "argv",
             "argv_digest", "timeout_seconds", "expected_worker_echo",
+            "host_memory_preflight",
         }
         if (
             set(value) != expected_fields
-            or value.get("schema_version") != 1
+            or value.get("schema_version") != 2
             or value.get("kind") != "PROFILE_IMAGE_CANARY_ATTEMPT"
             or value.get("campaign_id") != campaign_id
         ):
@@ -2036,6 +2042,44 @@ class CampaignStore:
             raise ValueError("profile canary intent timeout is invalid")
         if not isinstance(value.get("expected_worker_echo"), dict):
             raise ValueError("profile canary intent has no worker echo contract")
+        host_memory = value.get("host_memory_preflight")
+        host_memory_fields = {
+            "schema_version", "kind", "source", "observed_epoch_ms",
+            "mem_total_bytes", "mem_available_bytes", "required_total_bytes",
+            "required_available_bytes",
+        }
+        if (
+            not isinstance(host_memory, dict)
+            or set(host_memory) != host_memory_fields
+            or host_memory.get("schema_version") != 1
+            or host_memory.get("kind") != "HOST_MEMORY_PREFLIGHT_V1"
+            or host_memory.get("source") != PROFILE_HOST_MEMORY_SOURCE
+        ):
+            raise ValueError("profile canary intent host memory proof is invalid")
+        _non_negative_count(
+            host_memory.get("observed_epoch_ms"), "observed_epoch_ms"
+        )
+        for field in (
+            "mem_total_bytes", "mem_available_bytes", "required_total_bytes",
+            "required_available_bytes",
+        ):
+            if _non_negative_count(host_memory.get(field), field) <= 0:
+                raise ValueError(f"{field} must be positive")
+        if (
+            host_memory["required_total_bytes"]
+            != PROFILE_HOST_MIN_TOTAL_MEMORY_BYTES
+            or host_memory["required_available_bytes"]
+            != PROFILE_HOST_MIN_AVAILABLE_MEMORY_BYTES
+        ):
+            raise ValueError("profile canary intent host memory contract drifted")
+        if (
+            host_memory["mem_available_bytes"] > host_memory["mem_total_bytes"]
+            or host_memory["mem_total_bytes"]
+            < host_memory["required_total_bytes"]
+            or host_memory["mem_available_bytes"]
+            < host_memory["required_available_bytes"]
+        ):
+            raise ValueError("profile canary intent host memory is insufficient")
         intent_digest = _canonical_digest(value)
         with self._transaction():
             campaign = self.connection.execute(

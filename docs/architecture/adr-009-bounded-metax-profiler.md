@@ -2,12 +2,14 @@
 
 ## Status
 
-Accepted; the A5 image has been built, pushed, pulled by exact RepoDigest and
-independently runtime/toolchain-qualified. Its separate activation profile now
-pins that immutable image without changing the A5 build identity. No A5 canary
-has run yet. The reviewed A4 image reached a second trusted server canary,
-which stopped safely during untraced hardware warmup with no completion
-sentinel; that action remains quarantined and non-replayable.
+Accepted; the A5 image was built, pushed, pulled by exact RepoDigest and
+independently runtime/toolchain-qualified, then reached a trusted server
+canary. Its untraced hardware warmup was killed by the container memory cgroup
+at the frozen 4 GiB limit. The worker's `SIGKILL`, absent sentinel and phase
+duration agree with the kernel `CONSTRAINT_MEMCG` record. The action remains
+UNKNOWN, RESERVED, quarantined and non-replayable. A6 is an inactive build
+submission that raises only the profiler memory/resource contract and adds a
+pre-Docker host-memory gate; no A6 image or activation evidence exists yet.
 
 ## Context
 
@@ -110,6 +112,18 @@ deployment authority merely because it uses the same candidate and device.
     evidence remains UNKNOWN; fatal GPU markers retain their independent hard
     failure authority. The host copies available phase files into the same
     private canary diagnostic CAS object before temporary output is removed.
+15. The profiler container memory limit is exactly 24 GiB, matching the
+    already-qualified evaluator ceiling. Before any profiling state is created,
+    and again immediately before every Docker launch, the trusted host reads
+    `/proc/meminfo` and requires both `MemTotal` and `MemAvailable` to be at
+    least 24 GiB. Parsing is strict, bounded, duplicate-free and unit-checked.
+    The immutable canary attempt intent records the exact host observation, but
+    that operational observation is private and never becomes scientific
+    evidence. Failure at the first gate has zero Campaign/Docker side effects;
+    failure after reservation but before a launch is a known pre-execution
+    operator pause, settles wall use with zero GPU use and releases the lease.
+    There is no caller-controlled memory value, swap extension, soft reserve,
+    OOM disable, or worker-side cgroup telemetry in A6.
 
 ## Rejected alternatives
 
@@ -130,6 +144,12 @@ deployment authority merely because it uses the same candidate and device.
 - Infer a known outcome from subprocess return code or phase diagnostic. A
   normal nonzero exit, signal, timeout, partial output, or apparently clean
   process still lacks completion authority without the exact sentinel.
+- Reclassify the A5 action after identifying its OOM root cause. Operational
+  diagnosis does not supply a target completion sentinel and therefore cannot
+  grant completion or replay authority.
+- Add cgroup-version-specific worker telemetry or weaken the container memory
+  boundary. A6 keeps one host-owned, fail-closed admission gate and one exact
+  hard limit instead of expanding the worker trust surface.
 
 ## Validation and rollout
 
@@ -183,3 +203,26 @@ deployment authority merely because it uses the same candidate and device.
   `sha256:13411bcfe57bcb74e1820e8ea60d30b6f5245dceabfb8785a2573ddaff43b49f`.
   The next GPU action is a new, one-shot canary Campaign only after the old A4
   quarantine is explicitly abandoned and this activation is deployed.
+- The A5 one-shot canary then reached the untraced hardware warmup. The kernel
+  killed its UID 1000 Python process in the Docker memory cgroup at
+  `2026-08-19T03:21:40Z`; the phase diagnostic recorded return code `-9`,
+  `SIGKILL`, 8,191 ms, no timeout and no sentinel. mcTracer never started. The
+  immutable root-cause archive is
+  `/home/mx/autoresearch-evidence/profiler-a5-canary-oom-root-cause-20260819T032140Z`
+  with manifest digest
+  `54adaa64afee67f69b2cb06ef5a603104f699874295c6047395fe291cf626198`.
+  The Campaign remains `PAUSED_UNKNOWN_OUTCOME`, its action remains RESERVED,
+  and fencing epoch 3 remains QUARANTINED until the existing trusted abandon
+  workflow is executed from the matching A5 recovery code.
+- A6 is a new, direct-child control-plane build submission. It does not modify
+  the worker, recipes, cases, toolchain, Dockerfile, candidate, History,
+  baseline or `kernel.py`. It changes the exact memory limit from 4 GiB to
+  24 GiB and freezes the `/proc/meminfo` admission thresholds into the build
+  profile. Its inactive build profile digest is
+  `sha256:432756dac8d6a00b7221ea5d39f09d8f33ec4ef48fa42badb35bdc20f2e59ab7`;
+  its inactive activation digest is
+  `sha256:0812342ab6a513319dd95a3d2b4e5a35751560a52a5c86b62584cd56695e9d05`.
+  A6 must be built and qualified as a new image, followed by a separate
+  activation commit that changes only the activation bit and exact RepoDigest.
+  Only after the old A5 canary is abandoned, the A6 activation is deployed and
+  a wholly new canary reaches READY may the 24/72/168-hour soak clock start.

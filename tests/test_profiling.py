@@ -44,6 +44,84 @@ from kernel_research.profiling import (
 
 
 class ProfilingDoctorTests(unittest.TestCase):
+    def test_host_memory_preflight_parses_exact_linux_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary).resolve() / "meminfo"
+            path.write_text(
+                "MemTotal:       67108864 kB\n"
+                "MemFree:         1048576 kB\n"
+                "MemAvailable:   50331648 kB\n",
+                encoding="ascii",
+            )
+            report = profiling._profile_host_memory_preflight(
+                path=path,
+                clock=lambda: 1_787_114_880.125,
+            )
+        self.assertEqual(report["kind"], "HOST_MEMORY_PREFLIGHT_V1")
+        self.assertEqual(report["source"], str(path))
+        self.assertEqual(report["observed_epoch_ms"], 1_787_114_880_125)
+        self.assertEqual(report["mem_total_bytes"], 64 * 1024**3)
+        self.assertEqual(report["mem_available_bytes"], 48 * 1024**3)
+        self.assertEqual(report["required_total_bytes"], 24 * 1024**3)
+        self.assertEqual(report["required_available_bytes"], 24 * 1024**3)
+
+    def test_host_memory_preflight_fails_closed_on_malformed_or_low_state(
+        self,
+    ) -> None:
+        fixtures = (
+            (b"", "empty or oversized"),
+            (b"\xff", "not ASCII"),
+            (b"MemTotal: 67108864 kB\n", "incomplete"),
+            (
+                b"MemTotal: 67108864 kB\nMemTotal: 67108864 kB\n"
+                b"MemAvailable: 50331648 kB\n",
+                "repeats MemTotal",
+            ),
+            (
+                b"MemTotal: 67108864 MB\nMemAvailable: 50331648 kB\n",
+                "invalid MemTotal",
+            ),
+            (
+                b"MemTotal: 16777216 kB\nMemAvailable: 16777216 kB\n",
+                "total memory",
+            ),
+            (
+                b"MemTotal: 67108864 kB\nMemAvailable: 16777216 kB\n",
+                "available memory",
+            ),
+            (
+                ("MemTotal: " + "9" * 30 + " kB\n"
+                 "MemAvailable: 50331648 kB\n").encode("ascii"),
+                "overflows MemTotal",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary).resolve() / "meminfo"
+            for content, message in fixtures:
+                with self.subTest(message=message):
+                    path.write_bytes(content)
+                    with self.assertRaisesRegex(ValueError, message):
+                        profiling._profile_host_memory_preflight(path=path)
+            path.write_bytes(b"x" * (64 * 1024 + 1))
+            with self.assertRaisesRegex(ValueError, "empty or oversized"):
+                profiling._profile_host_memory_preflight(path=path)
+            path.unlink()
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                profiling._profile_host_memory_preflight(path=path)
+        with self.assertRaisesRegex(ValueError, "absolute"):
+            profiling._profile_host_memory_preflight(path=Path("meminfo"))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary).resolve() / "meminfo"
+            path.write_text(
+                "MemTotal: 67108864 kB\nMemAvailable: 50331648 kB\n",
+                encoding="ascii",
+            )
+            for clock in (lambda: math.nan, lambda: True):
+                with self.assertRaisesRegex(ValueError, "time"):
+                    profiling._profile_host_memory_preflight(
+                        path=path, clock=clock
+                    )
+
     def test_canary_diagnostic_inventory_is_bounded_and_never_follows_symlinks(
         self,
     ) -> None:
@@ -644,16 +722,41 @@ class _FakeProfileRunner:
 _DEFAULT_SUBJECT_CAMPAIGN = object()
 
 
+def _host_memory_preflight_fixture(
+    *, total: int = 64 * 1024**3, available: int = 48 * 1024**3
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "kind": "HOST_MEMORY_PREFLIGHT_V1",
+        "source": "/proc/meminfo",
+        "observed_epoch_ms": 1_787_114_880_000,
+        "mem_total_bytes": total,
+        "mem_available_bytes": available,
+        "required_total_bytes": 24 * 1024**3,
+        "required_available_bytes": 24 * 1024**3,
+    }
+
+
 class BoundedProfilingTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._active_profiler = mock.patch.object(
+            profiling, "require_active_profiler", return_value=None
+        )
         self._profile_euid = mock.patch.object(
             profiling, "_HOST_EFFECTIVE_UID", return_value=1000
         )
         self._profile_egid = mock.patch.object(
             profiling, "_HOST_EFFECTIVE_GID", return_value=1000
         )
+        self._host_memory = mock.patch.object(
+            profiling,
+            "_profile_host_memory_preflight",
+            side_effect=lambda: _host_memory_preflight_fixture(),
+        )
+        self._active_profiler.start()
         self._profile_euid.start()
         self._profile_egid.start()
+        self.host_memory = self._host_memory.start()
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
         self.state = self.root / "state"
@@ -723,8 +826,10 @@ class BoundedProfilingTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+        self._host_memory.stop()
         self._profile_egid.stop()
         self._profile_euid.stop()
+        self._active_profiler.stop()
 
     def _record(
         self,
@@ -861,6 +966,55 @@ class BoundedProfilingTests(unittest.TestCase):
                 )
             ]
 
+    def _canary_subject_fixture(self, canary_id):
+        identity = self._record(stage="confirmation", suite="full")
+        with sqlite3.connect(self.state / "history.sqlite3") as connection:
+            row = connection.execute(
+                """
+                SELECT e.candidate_hash, a.object_path
+                FROM experiments e JOIN candidate_artifacts a
+                  ON a.artifact_id = e.artifact_id
+                WHERE e.experiment_uid = ?
+                """,
+                (identity.experiment_uid,),
+            ).fetchone()
+        assert row is not None
+        subject = profiling._ProfileSubject(
+            experiment_uid=identity.experiment_uid,
+            namespace_id=identity.namespace_id,
+            condition_digest=identity.condition_digest,
+            artifact_id=str(identity.candidate_artifact_id),
+            execution_environment_digest=identity.execution_environment.digest,
+            campaign_id=canary_id,
+            run_id=canary_id + "-run",
+            stage="confirmation",
+            suite="full",
+            replicate_kind="confirmation",
+            candidate_object_path=self.state / row[1],
+            candidate_content_sha256=row[0],
+        )
+        baseline_ref = BaselineRef.create(
+            namespace=CURRENT_RESEARCH_NAMESPACE,
+            artifact_id=identity.candidate_artifact_id,
+            source="campaign",
+            revision=canary_id + "-seed",
+            execution_environment=self.environment,
+        )
+        binding = {
+            "deployment_evidence_digest": "sha256:" + "d" * 64,
+            "deployment_git_commit": "e" * 40,
+            "deployment_candidate_hash": row[0],
+            "current_confirmation_experiment_uid": identity.experiment_uid,
+            "current_confirmation_identity": identity.to_dict(),
+            "execution_environment": self.environment.to_dict(),
+        }
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                Path(str(self.campaign_database) + suffix).unlink()
+            except FileNotFoundError:
+                pass
+        return subject, baseline_ref, binding
+
     def test_compile_recipe_is_fixed_advisory_and_stores_bounded_evidence(self):
         self._record()
         history_before = hashlib.sha256(
@@ -920,6 +1074,9 @@ class BoundedProfilingTests(unittest.TestCase):
         self.assertEqual(kwargs["timeout_sec"], PROFILE_TIMEOUT_SECONDS)
         self.assertEqual(kwargs["max_output_bytes"], PROFILE_OUTPUT_LIMIT_BYTES)
         self.assertIn("--max-raw-trace-bytes", argv)
+        self.assertEqual(argv[argv.index("--memory") + 1], "24g")
+        self.assertEqual(argv.count("--memory"), 1)
+        self.assertNotIn("--memory-swap", argv)
         image_index = argv.index(PROFILER_IMAGE)
         self.assertGreater(image_index, argv.index("--entrypoint"))
         candidate_mount = next(
@@ -1814,6 +1971,8 @@ class BoundedProfilingTests(unittest.TestCase):
         self.assertFalse(hasattr(args, "resource_id"))
         self.assertFalse(hasattr(args, "device"))
         self.assertFalse(hasattr(args, "timeout"))
+        self.assertFalse(hasattr(args, "memory"))
+        self.assertFalse(hasattr(args, "memory_swap"))
 
         with self.assertRaises(SystemExit):
             build_parser().parse_args(
@@ -1861,6 +2020,171 @@ class BoundedProfilingTests(unittest.TestCase):
         activation_gate.assert_called_once_with()
         self.assertEqual(runner.calls, [])
 
+    def test_host_memory_preflight_blocks_initial_and_prelaunch_actions(self):
+        self._record()
+        runner = _FakeProfileRunner()
+        self.host_memory.side_effect = ValueError(
+            "profile host available memory is below the frozen minimum"
+        )
+        with self.assertRaisesRegex(ValueError, "available memory"):
+            self._collect(runner, _FakeGate())
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self._campaign_rows("budget_actions"), [])
+
+        self.host_memory.reset_mock()
+        self.host_memory.side_effect = [
+            _host_memory_preflight_fixture(),
+            ValueError("profile host available memory is below the frozen minimum"),
+        ]
+        with self.assertRaisesRegex(ValueError, "available memory"):
+            self._collect(runner, _FakeGate())
+        self.assertEqual(runner.calls, [])
+        actions = self._campaign_rows("budget_actions")
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["status"], "SETTLED")
+        self.assertEqual(actions[0]["actual_gpu_ms"], 0)
+        self.assertEqual(self._campaign_rows("resource_leases"), [])
+        self.assertEqual(self.host_memory.call_count, 2)
+
+        canary_id = "profile-image-canary-low-host-memory"
+        self.host_memory.reset_mock()
+        self.host_memory.side_effect = ValueError(
+            "profile host available memory is below the frozen minimum"
+        )
+        with self.assertRaisesRegex(ValueError, "available memory"):
+            profiling.run_profile_image_doctor(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id=canary_id,
+                runner=runner,
+            )
+        with CampaignStore(self.campaign_database) as store:
+            with self.assertRaises(KeyError):
+                store.get_campaign(canary_id)
+        self.assertEqual(runner.calls, [])
+
+    def test_canary_memory_drop_before_hardware_is_known_and_released(self):
+        canary_id = "profile-image-canary-memory-drop"
+        subject, baseline_ref, binding = self._canary_subject_fixture(canary_id)
+        runner = _FakeProfileRunner()
+        self.host_memory.side_effect = [
+            _host_memory_preflight_fixture(),
+            _host_memory_preflight_fixture(),
+            ValueError("profile host available memory is below the frozen minimum"),
+        ]
+        with (
+            mock.patch.object(
+                profiling,
+                "_current_deployment_profile_subject",
+                return_value=(subject, baseline_ref, binding),
+            ),
+            self.assertRaisesRegex(ValueError, "available memory"),
+        ):
+            profiling.run_profile_image_doctor(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id=canary_id,
+                runner=runner,
+            )
+        self.assertEqual(len(runner.calls), 1)
+        with CampaignStore(self.campaign_database) as store:
+            self.assertEqual(
+                store.get_campaign(canary_id)["status"], "PAUSED_OPERATOR"
+            )
+            action = store.get_budget_action(
+                canary_id, idempotency_key="profile-image-canary-v1"
+            )
+            self.assertEqual(action["status"], "SETTLED")
+            self.assertEqual(action["actual"]["gpu_ms"], 0)
+            self.assertEqual(
+                store.connection.execute(
+                    "SELECT status FROM resource_leases WHERE campaign_id = ?",
+                    (canary_id,),
+                ).fetchone()[0],
+                "RELEASED",
+            )
+            attempts = store.list_profile_canary_attempts(canary_id)
+            self.assertEqual(len(attempts), 1)
+            self.assertEqual(
+                attempts[0]["recipe_id"], "metax-compile-metadata-v1"
+            )
+            self.assertEqual(attempts[0]["intent"]["schema_version"], 2)
+        self.assertEqual(self.host_memory.call_count, 3)
+
+    def test_a5_schema_one_canary_intent_remains_read_only(self):
+        campaign_id = "profile-image-canary-a5-readonly"
+        action_key = "profile-image-canary-v1"
+        intent_material = {
+            "schema_version": 1,
+            "kind": "PROFILE_IMAGE_CANARY_ATTEMPT",
+            "campaign_id": campaign_id,
+            "budget_action_key": action_key,
+            "recipe_id": "metax-compile-metadata-v1",
+            "case_id": "smoke_gate_up",
+            "requires_gpu": False,
+            "resource_id": None,
+            "fencing_epoch": None,
+            "profiler_image": (
+                "ghcr.io/masechen/autoresearch-metax-profiler@sha256:"
+                + "a" * 64
+            ),
+            "profiler_build_profile_digest": "sha256:" + "b" * 64,
+            "profiler_activation_profile_digest": "sha256:" + "c" * 64,
+            "container_name": "kar-profile-canary-a5-readonly",
+            "argv": ["docker", "run", "fixture"],
+            "argv_digest": profiling.canonical_sha256(
+                ["docker", "run", "fixture"]
+            ),
+            "timeout_seconds": 900.0,
+            "expected_worker_echo": {"fixture": True},
+        }
+        attempt_id = (
+            "profile-canary-attempt-"
+            + profiling.canonical_sha256(intent_material).split(":", 1)[1]
+        )
+        intent = {**intent_material, "attempt_id": attempt_id}
+        with CampaignStore(self.campaign_database) as store:
+            store.create_campaign(
+                campaign_id=campaign_id,
+                namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                mode="DISCOVERY",
+                snapshot={"kind": "PROFILE_IMAGE_CANARY"},
+                budget_limit=BudgetAmount(wall_ms=1_800_000, gpu_ms=900_000),
+                initial_artifact_id="source-sha256-v1:" + "f" * 64,
+                initial_policy_snapshot={"kind": "PROFILE_IMAGE_CANARY"},
+            )
+            store.start_campaign(campaign_id)
+            store.reserve_budget(
+                campaign_id,
+                idempotency_key=action_key,
+                action_kind="PROFILE_IMAGE_CANARY",
+                amount=BudgetAmount(wall_ms=1_800_000, gpu_ms=900_000),
+            )
+            store.connection.execute(
+                """
+                INSERT INTO profile_canary_attempt_intents(
+                    attempt_id, campaign_id, budget_action_key, recipe_id,
+                    requires_gpu, resource_id, fencing_epoch, intent_digest,
+                    intent_json, created_at
+                ) VALUES (?, ?, ?, ?, 0, NULL, NULL, ?, ?, ?)
+                """,
+                (
+                    attempt_id,
+                    campaign_id,
+                    action_key,
+                    "metax-compile-metadata-v1",
+                    profiling.canonical_sha256(intent),
+                    json.dumps(intent, sort_keys=True, separators=(",", ":")),
+                    "2026-08-19T03:21:30.000Z",
+                ),
+            )
+            attempts = store.list_profile_canary_attempts(campaign_id)
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["intent"]["schema_version"], 1)
+        self.assertNotIn(
+            "host_memory_preflight", attempts[0]["intent"]
+        )
+
     def test_image_doctor_cli_exposes_no_runtime_profiler_controls(self):
         args = build_parser().parse_args(
             [
@@ -1876,7 +2200,10 @@ class BoundedProfilingTests(unittest.TestCase):
         )
         self.assertEqual(args.profile_command, "image-doctor")
         self.assertEqual(args.campaign_id, "profiler-canary-1")
-        for field in ("image", "candidate", "case", "device", "timeout", "mctracer"):
+        for field in (
+            "image", "candidate", "case", "device", "timeout", "mctracer",
+            "memory", "memory_swap",
+        ):
             self.assertFalse(hasattr(args, field))
 
         abandon = build_parser().parse_args(
@@ -1894,7 +2221,7 @@ class BoundedProfilingTests(unittest.TestCase):
         self.assertEqual(abandon.profile_command, "image-doctor-abandon")
         for field in (
             "image", "candidate", "case", "device", "timeout", "mctracer",
-            "resource_id", "doctor_digest", "reason",
+            "resource_id", "doctor_digest", "reason", "memory", "memory_swap",
         ):
             self.assertFalse(hasattr(abandon, field))
 
@@ -2005,6 +2332,7 @@ class BoundedProfilingTests(unittest.TestCase):
                     lease=lease,
                     container_suffix="diagnostic-fixture",
                     timeout_seconds=900,
+                    host_memory_preflight=_host_memory_preflight_fixture(),
                 )
             self.assertIsInstance(raised.exception, profiling._CanaryWorkerFailure)
             self.assertIn("non-zero", str(raised.exception))
@@ -2029,6 +2357,37 @@ class BoundedProfilingTests(unittest.TestCase):
             store.connection.rollback()
 
         self.assertEqual(len(observed_intent), 1)
+        self.assertEqual(observed_intent[0]["intent"]["schema_version"], 2)
+        self.assertEqual(
+            observed_intent[0]["intent"]["host_memory_preflight"],
+            _host_memory_preflight_fixture(),
+        )
+        tampered = json.loads(json.dumps(observed_intent[0]["intent"]))
+        tampered["host_memory_preflight"]["mem_available_bytes"] = 1
+        material = dict(tampered)
+        material.pop("attempt_id")
+        tampered["attempt_id"] = (
+            "profile-canary-attempt-"
+            + profiling.canonical_sha256(material).split(":", 1)[1]
+        )
+        with CampaignStore(self.campaign_database) as store:
+            with self.assertRaisesRegex(ValueError, "memory is insufficient"):
+                store.record_profile_canary_attempt_intent(
+                    canary_id, intent=tampered
+                )
+        tampered = json.loads(json.dumps(observed_intent[0]["intent"]))
+        tampered["host_memory_preflight"]["required_available_bytes"] = 1
+        material = dict(tampered)
+        material.pop("attempt_id")
+        tampered["attempt_id"] = (
+            "profile-canary-attempt-"
+            + profiling.canonical_sha256(material).split(":", 1)[1]
+        )
+        with CampaignStore(self.campaign_database) as store:
+            with self.assertRaisesRegex(ValueError, "contract drifted"):
+                store.record_profile_canary_attempt_intent(
+                    canary_id, intent=tampered
+                )
         self.assertEqual(len(attempts), 1)
         diagnostic = attempts[0]["diagnostic"]
         self.assertEqual(diagnostic["classification"], "UNKNOWN")
@@ -2134,6 +2493,7 @@ class BoundedProfilingTests(unittest.TestCase):
                     lease=None,
                     container_suffix="start-failure",
                     timeout_seconds=900,
+                    host_memory_preflight=_host_memory_preflight_fixture(),
                 )
             attempts = store.list_profile_canary_attempts(campaign_id)
 
@@ -2200,6 +2560,7 @@ class BoundedProfilingTests(unittest.TestCase):
                     lease=None,
                     container_suffix="interrupted",
                     timeout_seconds=900,
+                    host_memory_preflight=_host_memory_preflight_fixture(),
                 )
             interrupted_attempts = store.list_profile_canary_attempts(
                 interrupted_campaign
@@ -2402,6 +2763,7 @@ class BoundedProfilingTests(unittest.TestCase):
                 runner=runner,
             )
         self.assertEqual(report["status"], "READY")
+        self.assertNotIn("host_memory_preflight", json.dumps(report))
         self.assertEqual(len(runner.calls), 2)
         self.assertTrue(
             all(
@@ -2438,6 +2800,16 @@ class BoundedProfilingTests(unittest.TestCase):
                     for attempt in attempts
                 )
             )
+            self.assertTrue(
+                all(attempt["intent"]["schema_version"] == 2 for attempt in attempts)
+            )
+            self.assertTrue(
+                all(
+                    attempt["intent"]["host_memory_preflight"]
+                    == _host_memory_preflight_fixture()
+                    for attempt in attempts
+                )
+            )
             action = store.get_budget_action(
                 canary_id, idempotency_key="profile-image-canary-v1"
             )
@@ -2450,6 +2822,7 @@ class BoundedProfilingTests(unittest.TestCase):
                 ).fetchone()[0],
                 "RELEASED",
             )
+        self.assertEqual(self.host_memory.call_count, 3)
 
     def test_image_doctor_rejects_aggregate_raw_trace_over_64_mib(self):
         identity = self._record(stage="confirmation", suite="full")

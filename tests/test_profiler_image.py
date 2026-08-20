@@ -47,9 +47,13 @@ class ProfilerContractTests(unittest.TestCase):
         "sha256:13411bcfe57bcb74e1820e8ea60d30b6"
         "f5245dceabfb8785a2573ddaff43b49f"
     )
+    A6_BUILD_PROFILE_DIGEST = (
+        "sha256:432756dac8d6a00b7221ea5d39f09d8f"
+        "33ec4ef48fa42badb35bdc20f2e59ab7"
+    )
     ACTIVATION_PROFILE_DIGEST = (
-        "sha256:e34d0838a473ffb0e97b86c5957ebe5c"
-        "6e5e2ccb7100cee7ec98a1655edf2f2a"
+        "sha256:0812342ab6a513319dd95a3d2b4e5a35"
+        "751560a52a5c86b62584cd56695e9d05"
     )
     A5_IMAGE = (
         "ghcr.io/masechen/autoresearch-metax-profiler@sha256:"
@@ -57,16 +61,19 @@ class ProfilerContractTests(unittest.TestCase):
         "ca174045b9bf671e8fe1029571dfb684"
     )
 
-    def test_a5_activation_is_exact_and_preserves_build_identity(self) -> None:
+    def test_submit_a6_profile_is_exact_and_inactive(self) -> None:
         build = profiler_build_profile_snapshot()
         activation = profiler_activation_profile_snapshot()
-        self.assertTrue(PROFILER_ACTIVE)
+        self.assertFalse(PROFILER_ACTIVE)
         self.assertEqual(build["base_image"], PROFILER_BASE_IMAGE)
         self.assertNotIn("active", build)
         self.assertNotIn("profiler_image", build)
-        self.assertEqual(PROFILER_IMAGE, self.A5_IMAGE)
+        self.assertEqual(
+            PROFILER_IMAGE,
+            PROFILER_IMAGE_REPOSITORY + "@sha256:" + "0" * 64,
+        )
         self.assertEqual(activation["profiler_image"], PROFILER_IMAGE)
-        self.assertTrue(activation["active"])
+        self.assertFalse(activation["active"])
         self.assertTrue(PROFILER_IMAGE.startswith(PROFILER_IMAGE_REPOSITORY))
         self.assertEqual(build["worker_revision"], PROFILER_WORKER_REVISION)
         self.assertEqual(
@@ -74,10 +81,10 @@ class ProfilerContractTests(unittest.TestCase):
             PROFILE_COLLECTION_SCHEMA_VERSION,
         )
         self.assertEqual(PROFILER_BUILD_PROFILE_DIGEST, canonical_sha256(build))
-        self.assertEqual(PROFILER_BUILD_PROFILE_DIGEST, self.A5_BUILD_PROFILE_DIGEST)
+        self.assertEqual(PROFILER_BUILD_PROFILE_DIGEST, self.A6_BUILD_PROFILE_DIGEST)
         self.assertNotEqual(
             PROFILER_BUILD_PROFILE_DIGEST,
-            self.A4_BUILD_PROFILE_DIGEST,
+            self.A5_BUILD_PROFILE_DIGEST,
         )
         self.assertEqual(
             PROFILER_ACTIVATION_PROFILE_DIGEST,
@@ -87,9 +94,10 @@ class ProfilerContractTests(unittest.TestCase):
             PROFILER_ACTIVATION_PROFILE_DIGEST,
             self.ACTIVATION_PROFILE_DIGEST,
         )
-        require_active_profiler()
+        with self.assertRaisesRegex(ValueError, "inactive"):
+            require_active_profiler()
 
-    def test_a5_worker_echo_survives_future_activation_only_change(self) -> None:
+    def test_a6_worker_echo_survives_future_activation_only_change(self) -> None:
         request = ProfilerWorkerTests._request()
         commit_a_echo = request.echo()
         commit_a_build = profiler_build_profile_snapshot()
@@ -98,7 +106,10 @@ class ProfilerContractTests(unittest.TestCase):
             profiler_image=PROFILER_IMAGE_REPOSITORY + "@sha256:" + "0" * 64,
         )
         commit_b_build = profiler_build_profile_snapshot()
-        commit_b_activation = profiler_activation_profile_snapshot()
+        commit_b_activation = profiler_activation_profile_snapshot(
+            active=True,
+            profiler_image=self.A5_IMAGE,
+        )
         self.assertEqual(commit_b_build, commit_a_build)
         self.assertEqual(
             canonical_sha256(commit_b_build),
@@ -187,7 +198,19 @@ class ProfilerContractTests(unittest.TestCase):
             build["limits"]["canary_raw_trace_total_bytes"],
             64 * 1024 * 1024,
         )
-        self.assertEqual(build["limits"]["memory"], "4g")
+        self.assertEqual(build["limits"]["memory"], "24g")
+        self.assertEqual(
+            build["limits"]["host_memory_source"],
+            "/proc/meminfo",
+        )
+        self.assertEqual(
+            build["limits"]["host_min_total_memory_bytes"],
+            24 * 1024**3,
+        )
+        self.assertEqual(
+            build["limits"]["host_min_available_memory_bytes"],
+            24 * 1024**3,
+        )
         self.assertEqual(build["limits"]["cpus"], 4.0)
         self.assertEqual(build["limits"]["pids"], 128)
         self.assertTrue(build["isolation"]["read_only_root"])
