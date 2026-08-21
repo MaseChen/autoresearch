@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import gc
 import sqlite3
 import tempfile
 import time
+import warnings
 from pathlib import Path
 import unittest
+from unittest import mock
 
 from kernel_research.history import (
     LEGACY_NAMESPACE_ID as HISTORY_LEGACY_NAMESPACE_ID,
@@ -22,6 +25,28 @@ from kernel_research.autorun.store import (
 
 
 SEED_HASH = "a" * 64
+
+
+class _TrackedConnection(sqlite3.Connection):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        super().close()
+
+    def __del__(self) -> None:
+        if getattr(self, "close_calls", 0) == 0:
+            warnings.warn(
+                "unclosed tracked ControllerStore database",
+                ResourceWarning,
+                stacklevel=2,
+            )
+            try:
+                super().close()
+            except BaseException:
+                pass
 
 
 def _create_v2_database(path: Path) -> None:
@@ -111,6 +136,88 @@ class ControllerStoreV3Tests(unittest.TestCase):
         )
         iteration = store.create_iteration(run_id, 1, SEED_HASH)
         return run, iteration
+
+    def test_constructor_closes_connection_and_reraises_base_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "controller.sqlite3"
+            real_connect = sqlite3.connect
+            connections: list[_TrackedConnection] = []
+
+            def tracked_connect(*args, **kwargs):
+                connection = real_connect(
+                    *args, factory=_TrackedConnection, **kwargs
+                )
+                connections.append(connection)
+                return connection
+
+            failure = KeyboardInterrupt("fixture initialization interruption")
+            with (
+                mock.patch(
+                    "kernel_research.autorun.store.sqlite3.connect",
+                    side_effect=tracked_connect,
+                ),
+                mock.patch.object(
+                    ControllerStore, "_initialize", side_effect=failure
+                ),
+                self.assertRaises(KeyboardInterrupt) as raised,
+            ):
+                ControllerStore(database)
+
+            self.assertIs(raised.exception, failure)
+            self.assertEqual(len(connections), 1)
+            self.assertEqual(connections[0].close_calls, 1)
+            with self.assertRaisesRegex(sqlite3.ProgrammingError, "closed"):
+                connections[0].execute("SELECT 1")
+
+    def test_migration_failure_emits_no_resource_warning_after_gc(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "controller.sqlite3"
+            _create_v2_database(database)
+            connection = sqlite3.connect(database)
+            connection.execute(
+                "UPDATE runs SET status = 'RUNNING' WHERE id = 'legacy-run'"
+            )
+            connection.commit()
+            connection.close()
+
+            real_connect = sqlite3.connect
+            connections: list[_TrackedConnection] = []
+
+            def tracked_connect(*args, **kwargs):
+                connection = real_connect(
+                    *args, factory=_TrackedConnection, **kwargs
+                )
+                connections.append(connection)
+                return connection
+
+            with warnings.catch_warnings(record=True) as observed:
+                warnings.simplefilter("always", ResourceWarning)
+                with (
+                    mock.patch(
+                        "kernel_research.autorun.store.sqlite3.connect",
+                        side_effect=tracked_connect,
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "must be terminal"),
+                ):
+                    ControllerStore(
+                        database,
+                        _v2_to_v3_migration_capability=(
+                            _V2_TO_V3_MIGRATION_CAPABILITY
+                        ),
+                    )
+                self.assertGreaterEqual(len(connections), 2)
+                self.assertTrue(
+                    all(connection.close_calls == 1 for connection in connections)
+                )
+                connections.clear()
+                gc.collect()
+
+            resource_warnings = [
+                warning
+                for warning in observed
+                if issubclass(warning.category, ResourceWarning)
+            ]
+            self.assertEqual(resource_warnings, [])
 
     def test_persisted_version_zero_with_user_objects_fails_before_wal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

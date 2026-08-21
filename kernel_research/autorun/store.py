@@ -98,12 +98,21 @@ class ControllerStore:
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(path, isolation_level=None)
-        self.connection.row_factory = sqlite3.Row
-        self.connection.execute("PRAGMA foreign_keys = ON")
-        self.connection.execute("PRAGMA busy_timeout = 5000")
-        self.connection.execute("PRAGMA synchronous = FULL")
-        self.connection.execute("PRAGMA journal_mode = WAL")
-        self._initialize()
+        try:
+            self.connection.row_factory = sqlite3.Row
+            self.connection.execute("PRAGMA foreign_keys = ON")
+            self.connection.execute("PRAGMA busy_timeout = 5000")
+            self.connection.execute("PRAGMA synchronous = FULL")
+            self.connection.execute("PRAGMA journal_mode = WAL")
+            self._initialize()
+        except BaseException:
+            try:
+                self.connection.close()
+            except BaseException:
+                # Initialization authority belongs to the original failure.
+                # A secondary close error must not relabel that root cause.
+                pass
+            raise
 
     def _authorize_persisted_legacy_schema(self, capability: object | None) -> None:
         """Reject implicit legacy migration before journal-affecting pragmas."""
