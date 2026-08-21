@@ -352,6 +352,56 @@ Activation commit 必须是上述 A6 build commit 的直接子提交。生产 co
 如果 A6 canary 再次在 GPU start 后失去可信 completion，仍按 UNKNOWN/RESERVED/
 quarantine 处理，禁止原地重跑，并回到新的资源契约评审。
 
+### A7 executable Triton-cache correction
+
+A6 canary `profile-image-canary-a6-20260821T030244Z` 已安全停止：compile recipe
+SUCCESS，hardware warmup 为可信 KNOWN_FAILURE。根因是 exact `/tmp` tmpfs 被实现为
+`rw,nosuid,nodev,noexec`；`/tmp` 可执行文件返回 126，`ctypes` 映射共享对象失败，而
+noexec 父 `/tmp` 加独立 executable `/tmp/triton-cache` 的无 GPU 探针通过。正式状态必须
+保持 `PAUSED_OPERATOR`、budget SETTLED、gpu1 epoch 4 RELEASED、replay forbidden。
+
+封存证据：
+
+- 路径：`/home/mx/autoresearch-evidence/profile-image-canary-a6-20260821T030244Z`
+- `SHA256SUMS` manifest digest：
+  `f51411f52e681d237deffec4ba1de0cb8d73c7904f8b3dff23fc4cd597f96bc7`
+
+A7 build contract 固定两个有序 tmpfs：
+
+1. `/tmp:rw,nosuid,nodev,noexec,size=64m,mode=700,uid=1000,gid=1000`
+2. `/tmp/triton-cache:rw,nosuid,nodev,exec,size=1g,mode=700,uid=1000,gid=1000`
+
+父 mount 必须先于子 mount。两者均不可由 CLI 覆盖，且继续受 Docker `--memory 24g`
+总上限约束。A7 不修改 worker v3、mcTracer、recipe、case、candidate、toolchain、
+Dockerfile 或 `kernel.py`。冻结的 inactive build identity 为：
+
+- build profile digest：
+  `sha256:cfc19d55524c5032d9b23200e6bc5b6a92c988a8cc01ec154867540a3101d734`
+- inactive activation digest：
+  `sha256:d5a3c6ef8f8e03276d6d75bec9517adf0fa79d3c8a48c218a5ec445f2fe57345`
+
+部署 A7 前，先从干净 A7 build worktree 对旧 A6 known failure 执行唯一 finalizer：
+
+```bash
+PYTHONPATH="$A7_BUILD_WORKTREE" "$HOST_PYTHON" -m kernel_research \
+  profile image-doctor-finalize-known \
+  --config "$AUTORESEARCH_PRO_CONFIG" \
+  --database "$AUTORESEARCH_RUNTIME/campaign/campaign.sqlite3" \
+  --campaign-id "profile-image-canary-a6-20260821T030244Z"
+```
+
+该入口不接受 image、device、case、timeout、doctor digest 或 reason；不运行 doctor、
+GPU lock、Docker 或 evaluator。它只接受 exact A6 snapshot、compile SUCCESS、hardware
+KNOWN_FAILURE、完整 immutable diagnostics、SETTLED action、RELEASED epoch 4 lease 和
+零 child，并把 Campaign 原子终态化为 `CANCELLED`。预算、lease 和 diagnostics 必须逐字
+节保持不变；任一身份或状态差异均失败关闭。归档 finalization/outbox/Campaign/budget/
+lease/attempts 后，才可 Admin update 到未来 A7 activation commit。
+
+A7 新镜像仍须从干净 build commit 构建、push、按 RepoDigest pull 并做 non-root、
+read-only、双 tmpfs、toolchain runtime 资格验证。随后创建只改 `active=true` 与最终
+RepoDigest 的直接子 activation commit。部署和完整主机回归通过后，必须使用全新
+Campaign ID 唯一运行一次 A7 canary；READY 前不得开始 soak。
+
 对已经进入 `PAUSED_UNKNOWN_OUTCOME` 或 `PAUSED_HARD_FAILURE` 的 image-doctor，先部署
 包含恢复能力的代码会被活动 Campaign 管理锁拒绝。这种情况下只能从该修复提交的干净
 detached recovery worktree 运行以下唯一入口，仍然读取正式配置和 canonical Campaign

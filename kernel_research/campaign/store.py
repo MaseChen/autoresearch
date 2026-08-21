@@ -359,7 +359,7 @@ class CampaignStore:
         self._initialize_profile_canary_schema()
 
     def _initialize_profile_canary_schema(self) -> None:
-        """Add immutable profiler-canary intents, diagnostics and abandonment."""
+        """Add immutable profiler-canary attempts and terminalization proofs."""
 
         self.connection.executescript(
             """
@@ -471,6 +471,33 @@ class CampaignStore:
             BEFORE DELETE ON profile_canary_abandonments
             BEGIN
                 SELECT RAISE(ABORT, 'profile canary abandonment is immutable');
+            END;
+
+            CREATE TABLE IF NOT EXISTS profile_canary_known_finalizations (
+                campaign_id TEXT PRIMARY KEY
+                    REFERENCES campaigns(id) ON DELETE RESTRICT,
+                budget_action_key TEXT NOT NULL,
+                prior_campaign_status TEXT NOT NULL,
+                profiler_image TEXT NOT NULL,
+                profiler_build_profile_digest TEXT NOT NULL,
+                profiler_activation_profile_digest TEXT NOT NULL,
+                attempts_digest TEXT NOT NULL,
+                finalization_digest TEXT NOT NULL,
+                finalization_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(campaign_id, budget_action_key)
+                    REFERENCES budget_actions(campaign_id, idempotency_key)
+                    ON DELETE RESTRICT
+            );
+            CREATE TRIGGER IF NOT EXISTS profile_canary_known_finalizations_immutable_update
+            BEFORE UPDATE ON profile_canary_known_finalizations
+            BEGIN
+                SELECT RAISE(ABORT, 'profile canary known finalization is immutable');
+            END;
+            CREATE TRIGGER IF NOT EXISTS profile_canary_known_finalizations_immutable_delete
+            BEFORE DELETE ON profile_canary_known_finalizations
+            BEGIN
+                SELECT RAISE(ABORT, 'profile canary known finalization is immutable');
             END;
             COMMIT;
             """
@@ -707,6 +734,7 @@ class CampaignStore:
             "intent_json",
             "diagnostic_json",
             "abandonment_json",
+            "finalization_json",
         ):
             if field in result:
                 encoded = result.pop(field)
@@ -2446,6 +2474,324 @@ class CampaignStore:
                 now=now,
             )
         result = self.get_profile_canary_abandonment(campaign_id)
+        assert result is not None
+        result["campaign"] = self.get_campaign(campaign_id)
+        return result
+
+    def get_profile_canary_known_finalization(
+        self, campaign_id: str
+    ) -> dict[str, Any] | None:
+        _token(campaign_id, "campaign_id")
+        row = self.connection.execute(
+            """
+            SELECT * FROM profile_canary_known_finalizations
+            WHERE campaign_id = ?
+            """,
+            (campaign_id,),
+        ).fetchone()
+        return None if row is None else self._row(row)
+
+    def finalize_known_profile_canary(
+        self,
+        campaign_id: str,
+        *,
+        budget_action_key: str,
+        expected_snapshot: Mapping[str, Any],
+        expected_classifications: Mapping[str, str],
+    ) -> dict[str, Any]:
+        """Terminalize one fully diagnosed known failure without GPU action."""
+
+        _token(campaign_id, "campaign_id")
+        _token(budget_action_key, "budget_action_key")
+        if not isinstance(expected_snapshot, Mapping):
+            raise TypeError("expected_snapshot must be a mapping")
+        snapshot_value = json.loads(_json(dict(expected_snapshot)))
+        if not isinstance(expected_classifications, Mapping):
+            raise TypeError("expected_classifications must be a mapping")
+        classifications = {
+            _token(recipe_id, "recipe_id"): _token(
+                classification, "classification"
+            )
+            for recipe_id, classification in expected_classifications.items()
+        }
+        if (
+            not classifications
+            or set(classifications.values()) - {"SUCCESS", "KNOWN_FAILURE"}
+            or list(classifications.values()).count("KNOWN_FAILURE") != 1
+        ):
+            raise ValueError(
+                "known finalization requires one known failure and reviewed successes"
+            )
+        existing = self.get_profile_canary_known_finalization(campaign_id)
+        if existing is not None:
+            if (
+                existing.get("profiler_image")
+                != snapshot_value.get("profiler_image")
+                or existing.get("profiler_build_profile_digest")
+                != snapshot_value.get("profiler_build_profile_digest")
+                or existing.get("profiler_activation_profile_digest")
+                != snapshot_value.get("profiler_activation_profile_digest")
+            ):
+                raise ValueError("known finalization replay identity differs")
+        now = _utc_now()
+        with self._transaction():
+            campaign = self.connection.execute(
+                "SELECT * FROM campaigns WHERE id = ?", (campaign_id,)
+            ).fetchone()
+            if campaign is None:
+                raise KeyError(f"unknown campaign: {campaign_id}")
+            stored_snapshot = json.loads(campaign["snapshot_json"])
+            if (
+                stored_snapshot != snapshot_value
+                or stored_snapshot.get("kind") != "PROFILE_IMAGE_CANARY"
+                or stored_snapshot.get("namespace_id") != campaign["namespace_id"]
+                or stored_snapshot.get("recipes") != list(classifications)
+            ):
+                raise ValueError("known canary finalization identity is inconsistent")
+            profiler_image = _token(
+                stored_snapshot.get("profiler_image"),
+                "profiler_image",
+                maximum=512,
+            )
+            build_digest = _digest(
+                stored_snapshot.get("profiler_build_profile_digest"),
+                "profiler_build_profile_digest",
+            )
+            activation_digest = _digest(
+                stored_snapshot.get("profiler_activation_profile_digest"),
+                "profiler_activation_profile_digest",
+            )
+            expected_campaign_status = (
+                CampaignStatus.CANCELLED.value
+                if existing is not None
+                else CampaignStatus.PAUSED_OPERATOR.value
+            )
+            if campaign["status"] != expected_campaign_status:
+                raise ValueError(
+                    "known canary finalization Campaign status is inconsistent"
+                )
+            if (
+                existing is not None
+                and campaign["stop_reason"]
+                != "finalized known profile image canary failure"
+            ):
+                raise ValueError(
+                    "known canary finalization terminal reason is inconsistent"
+                )
+            if self.connection.execute(
+                "SELECT COUNT(*) FROM child_runs WHERE campaign_id = ?",
+                (campaign_id,),
+            ).fetchone()[0]:
+                raise ValueError("known canary finalization forbids child runs")
+            if self.get_profile_canary_abandonment(campaign_id) is not None:
+                raise ValueError("known canary was already GPU-abandoned")
+            action_row = self.connection.execute(
+                """
+                SELECT * FROM budget_actions
+                WHERE campaign_id = ? AND idempotency_key = ?
+                """,
+                (campaign_id, budget_action_key),
+            ).fetchone()
+            if (
+                action_row is None
+                or action_row["action_kind"] != "PROFILE_IMAGE_CANARY"
+                or action_row["status"] != "SETTLED"
+                or action_row["settled_at"] is None
+            ):
+                raise ValueError(
+                    "known canary finalization must preserve a SETTLED action"
+                )
+            action = self._budget_action(action_row)
+            leases = self.connection.execute(
+                """
+                SELECT * FROM resource_leases
+                WHERE campaign_id = ? ORDER BY fencing_epoch
+                """,
+                (campaign_id,),
+            ).fetchall()
+            if (
+                len(leases) != 1
+                or leases[0]["status"] != "RELEASED"
+                or leases[0]["released_at"] is None
+            ):
+                raise ValueError(
+                    "known canary finalization requires one RELEASED lease"
+                )
+            lease = dict(leases[0])
+            attempts = self.list_profile_canary_attempts(campaign_id)
+            if (
+                len(attempts) != len(classifications)
+                or {attempt["recipe_id"] for attempt in attempts}
+                != set(classifications)
+            ):
+                raise ValueError(
+                    "known canary finalization requires every reviewed attempt"
+                )
+            attempt_proofs: list[dict[str, Any]] = []
+            gpu_attempts = 0
+            for attempt in attempts:
+                intent = attempt.get("intent")
+                diagnostic = attempt.get("diagnostic")
+                diagnostic_value = (
+                    None if diagnostic is None else diagnostic.get("diagnostic")
+                )
+                if (
+                    not isinstance(intent, dict)
+                    or attempt.get("intent_digest") != _canonical_digest(intent)
+                    or intent.get("attempt_id") != attempt.get("attempt_id")
+                    or intent.get("campaign_id") != campaign_id
+                    or intent.get("budget_action_key") != budget_action_key
+                    or intent.get("recipe_id") != attempt["recipe_id"]
+                    or intent.get("profiler_image") != profiler_image
+                    or intent.get("profiler_build_profile_digest") != build_digest
+                    or intent.get("profiler_activation_profile_digest")
+                    != activation_digest
+                    or not isinstance(intent.get("argv"), list)
+                    or intent.get("argv_digest")
+                    != _canonical_digest(intent.get("argv"))
+                    or diagnostic is None
+                    or not isinstance(diagnostic_value, dict)
+                    or diagnostic.get("diagnostic_digest")
+                    != _canonical_digest(diagnostic_value)
+                    or diagnostic.get("attempt_id") != attempt.get("attempt_id")
+                    or diagnostic.get("campaign_id") != campaign_id
+                    or diagnostic.get("recipe_id") != attempt["recipe_id"]
+                    or diagnostic.get("classification")
+                    != classifications[attempt["recipe_id"]]
+                    or diagnostic_value.get("attempt_id")
+                    != attempt.get("attempt_id")
+                    or diagnostic_value.get("campaign_id") != campaign_id
+                    or diagnostic_value.get("recipe_id") != attempt["recipe_id"]
+                    or diagnostic_value.get("classification")
+                    != classifications[attempt["recipe_id"]]
+                ):
+                    raise ValueError(
+                        "known canary finalization attempt proof is inconsistent"
+                    )
+                expected_gpu = (
+                    classifications[attempt["recipe_id"]] == "KNOWN_FAILURE"
+                )
+                if bool(attempt.get("requires_gpu")) != expected_gpu:
+                    raise ValueError(
+                        "known canary finalization recipe role is inconsistent"
+                    )
+                if expected_gpu:
+                    gpu_attempts += 1
+                    if (
+                        attempt.get("resource_id") != lease["resource_id"]
+                        or int(attempt.get("fencing_epoch"))
+                        != int(lease["fencing_epoch"])
+                    ):
+                        raise ValueError(
+                            "known canary finalization lease proof is inconsistent"
+                        )
+                elif (
+                    attempt.get("resource_id") is not None
+                    or attempt.get("fencing_epoch") is not None
+                ):
+                    raise ValueError(
+                        "known canary CPU attempt claims a resource lease"
+                    )
+                attempt_proofs.append(
+                    {
+                        "attempt_id": attempt["attempt_id"],
+                        "recipe_id": attempt["recipe_id"],
+                        "requires_gpu": bool(attempt["requires_gpu"]),
+                        "intent_digest": attempt["intent_digest"],
+                        "diagnostic_digest": diagnostic["diagnostic_digest"],
+                        "diagnostic_object_id": diagnostic[
+                            "diagnostic_object_id"
+                        ],
+                        "classification": diagnostic["classification"],
+                        "reason_code": diagnostic["reason_code"],
+                    }
+                )
+            if gpu_attempts != 1:
+                raise ValueError(
+                    "known canary finalization requires one GPU attempt"
+                )
+            attempt_proofs.sort(key=lambda value: value["recipe_id"])
+            attempts_digest = _canonical_digest(attempt_proofs)
+            finalization = {
+                "schema_version": 1,
+                "kind": "PROFILE_IMAGE_CANARY_KNOWN_FAILURE_FINALIZATION",
+                "campaign_id": campaign_id,
+                "budget_action_key": budget_action_key,
+                "prior_campaign_status": CampaignStatus.PAUSED_OPERATOR.value,
+                "snapshot_digest": _canonical_digest(stored_snapshot),
+                "profiler_image": profiler_image,
+                "profiler_build_profile_digest": build_digest,
+                "profiler_activation_profile_digest": activation_digest,
+                "preserved_budget": action,
+                "preserved_lease": {
+                    "resource_id": lease["resource_id"],
+                    "fencing_epoch": int(lease["fencing_epoch"]),
+                    "status": lease["status"],
+                    "reason": lease["reason"],
+                },
+                "attempts_digest": attempts_digest,
+                "attempts": attempt_proofs,
+                "doctor_invoked": False,
+                "gpu_action_invoked": False,
+                "replay_permitted": False,
+            }
+            finalization_digest = _canonical_digest(finalization)
+            if existing is not None:
+                if (
+                    existing.get("prior_campaign_status")
+                    != CampaignStatus.PAUSED_OPERATOR.value
+                    or existing.get("attempts_digest") != attempts_digest
+                    or existing.get("finalization_digest")
+                    != finalization_digest
+                    or existing.get("finalization") != finalization
+                ):
+                    raise ValueError(
+                        "known canary finalization replay proof differs"
+                    )
+            else:
+                self.connection.execute(
+                    """
+                    INSERT INTO profile_canary_known_finalizations(
+                        campaign_id, budget_action_key, prior_campaign_status,
+                        profiler_image, profiler_build_profile_digest,
+                        profiler_activation_profile_digest, attempts_digest,
+                        finalization_digest, finalization_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        campaign_id,
+                        budget_action_key,
+                        CampaignStatus.PAUSED_OPERATOR.value,
+                        profiler_image,
+                        build_digest,
+                        activation_digest,
+                        attempts_digest,
+                        finalization_digest,
+                        _json(finalization),
+                        now,
+                    ),
+                )
+                terminal = self.connection.execute(
+                    """
+                    UPDATE campaigns
+                    SET status = 'CANCELLED', updated_at = ?,
+                        stop_reason = 'finalized known profile image canary failure'
+                    WHERE id = ? AND status = 'PAUSED_OPERATOR'
+                    """,
+                    (now, campaign_id),
+                )
+                if terminal.rowcount != 1:
+                    raise RuntimeError(
+                        "known canary finalization compare-and-swap failed"
+                    )
+                self._insert_outbox(
+                    campaign_id,
+                    f"profile-canary-known-finalized:{campaign_id}",
+                    "PROFILE_IMAGE_CANARY_KNOWN_FAILURE_FINALIZED",
+                    finalization,
+                    now=now,
+                )
+        result = self.get_profile_canary_known_finalization(campaign_id)
         assert result is not None
         result["campaign"] = self.get_campaign(campaign_id)
         return result

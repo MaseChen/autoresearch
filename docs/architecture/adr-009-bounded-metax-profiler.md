@@ -11,7 +11,11 @@ UNKNOWN, RESERVED, quarantined and non-replayable. A6 raises only the profiler
 memory/resource contract and adds a pre-Docker host-memory gate. Its image has
 now been built, pushed, pulled by exact RepoDigest and independently qualified;
 the separate activation profile pins that image without changing build
-identity. No A6 canary has run yet.
+identity. Its one-shot canary then failed safely because Docker materialized
+the frozen `/tmp` tmpfs as `noexec`, preventing Triton JIT shared objects from
+being mapped. The failure is known, settled and released; A7 is an inactive
+build submission that retains a noexec parent and adds one bounded executable
+Triton-cache child mount. No A7 image or canary evidence exists yet.
 
 ## Context
 
@@ -126,6 +130,23 @@ deployment authority merely because it uses the same candidate and device.
     operator pause, settles wall use with zero GPU use and releases the lease.
     There is no caller-controlled memory value, swap extension, soft reserve,
     OOM disable, or worker-side cgroup telemetry in A6.
+16. The general private `/tmp` mount is explicitly `noexec`, remains 64 MiB,
+    and retains `nosuid`, `nodev`, mode `0700` and UID/GID 1000. Triton JIT
+    output receives a separate nested `/tmp/triton-cache` tmpfs that is
+    explicitly `exec`, bounded to 1 GiB, and retains the same ownership and
+    isolation flags. The parent mount must precede the child in the exact
+    Docker argv. Neither mount is caller-configurable, and both are frozen into
+    the worker-visible build profile and therefore the soak invariant.
+17. A canary that already reached `PAUSED_OPERATOR` through a trusted known
+    failure is never resumed or routed through GPU quarantine abandonment. A
+    dedicated host-only finalizer accepts only the exact historical A6 image,
+    build/activation identities and deployment snapshot; exactly one compile
+    SUCCESS and one hardware KNOWN_FAILURE attempt with immutable diagnostics;
+    one SETTLED action; one RELEASED lease; and zero child runs. It records an
+    immutable finalization and terminalizes only the Campaign to `CANCELLED`.
+    It invokes no doctor, GPU lock, Docker or evaluator and cannot mutate the
+    action, lease, diagnostics, History or baseline. Any identity or state
+    mismatch fails closed, and repeated calls only return the same proof.
 
 ## Rejected alternatives
 
@@ -152,6 +173,12 @@ deployment authority merely because it uses the same candidate and device.
 - Add cgroup-version-specific worker telemetry or weaken the container memory
   boundary. A6 keeps one host-owned, fail-closed admission gate and one exact
   hard limit instead of expanding the worker trust surface.
+- Make all of `/tmp` executable. Triton requires executable JIT storage, but
+  extending that authority to HOME, candidate staging and unrelated temporary
+  files unnecessarily broadens the container attack surface.
+- Reuse quarantine abandonment for a known failure. The A6 action has no
+  quarantine and already has settled budget plus a released fence; creating a
+  doctor or changing those rows would falsify its preserved outcome.
 
 ## Validation and rollout
 
@@ -238,3 +265,23 @@ deployment authority merely because it uses the same candidate and device.
   `4500eb4403dd3130e0b717d895dd7dc348c4ef1cba1f3b7167b84d357ef0f42a`.
   Only after the old A5 canary is abandoned, the A6 activation is deployed and
   a wholly new canary reaches READY may the 24/72/168-hour soak clock start.
+- The A6 canary `profile-image-canary-a6-20260821T030244Z` completed the compile
+  recipe, then returned a trusted hardware warmup KNOWN_FAILURE. The exact
+  `/tmp` mount was `rw,nosuid,nodev,noexec`: a test executable returned 126 and
+  `ctypes` could not map a shared object from that mount. An explicitly
+  executable tmpfs passed both probes, and a noexec parent with a nested
+  executable `/tmp/triton-cache` also passed without GPU or database action.
+  The Campaign is `PAUSED_OPERATOR`, its action is SETTLED, fencing epoch 4 is
+  RELEASED, and replay remains forbidden. The sealed archive is
+  `/home/mx/autoresearch-evidence/profile-image-canary-a6-20260821T030244Z`
+  with manifest digest
+  `f51411f52e681d237deffec4ba1de0cb8d73c7904f8b3dff23fc4cd597f96bc7`.
+- A7 leaves worker v3, mcTracer, recipes, candidate, memory cap, toolchain,
+  Dockerfile and `kernel.py` unchanged. It makes `/tmp` explicitly noexec,
+  adds the exact nested executable cache mount, records a new build profile
+  digest
+  `sha256:cfc19d55524c5032d9b23200e6bc5b6a92c988a8cc01ec154867540a3101d734`,
+  and returns activation to `active=false` with the inactive activation digest
+  `sha256:d5a3c6ef8f8e03276d6d75bec9517adf0fa79d3c8a48c218a5ec445f2fe57345`.
+  The exact A6 known failure must be finalized before deploying a separately
+  qualified A7 activation. A new Campaign ID is mandatory for the next canary.

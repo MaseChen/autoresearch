@@ -26,15 +26,16 @@ PROFILER_BASE_IMAGE = (
 )
 PROFILER_IMAGE_REPOSITORY = "ghcr.io/masechen/autoresearch-metax-profiler"
 PROFILER_PLATFORM = "linux/amd64"
-# The independently built A6 Linux/amd64 image passed RepoDigest pull and
-# non-root/read-only runtime/toolchain qualification. Activation values remain
-# excluded from the worker-visible build profile.
+# A7 splits the private noexec /tmp from a bounded executable Triton JIT cache
+# after the A6 canary proved that Docker materialized the only tmpfs as noexec.
+# The rebuilt image must be qualified before a separate activation commit may
+# pin its RepoDigest. Activation values remain excluded from the build profile.
 PROFILER_IMAGE = (
     PROFILER_IMAGE_REPOSITORY
-    + "@sha256:2c817daef35c634b398209fce2d3c40b"
-    + "16d1f37acc9dbf00349e2540477719bb"
+    + "@sha256:"
+    + "0" * 64
 )
-PROFILER_ACTIVE = True
+PROFILER_ACTIVE = False
 PROFILER_WORKER_REVISION = "metax-bounded-profiler-worker-v3"
 PROFILER_ENTRYPOINT = "/opt/kernel-research/bin/bounded-profiler"
 PROFILER_IMAGE_UID = 1000
@@ -102,7 +103,14 @@ PROFILE_CANARY_LEASE_TTL_SECONDS = PROFILE_CANARY_WALL_SECONDS + 30.0
 PROFILE_DOCKER_TMPFS_MODE = "0700"
 PROFILE_DOCKER_TMPFS_SIZE = "64m"
 PROFILE_DOCKER_TMPFS = (
-    f"/tmp:rw,nosuid,nodev,size={PROFILE_DOCKER_TMPFS_SIZE},mode=700,"
+    f"/tmp:rw,nosuid,nodev,noexec,size={PROFILE_DOCKER_TMPFS_SIZE},mode=700,"
+    f"uid={PROFILER_IMAGE_UID},gid={PROFILER_IMAGE_GID}"
+)
+PROFILE_TRITON_CACHE_TMPFS_MODE = "0700"
+PROFILE_TRITON_CACHE_TMPFS_SIZE = "1g"
+PROFILE_TRITON_CACHE_TMPFS = (
+    f"{PROFILE_TRITON_CACHE_DIR}:rw,nosuid,nodev,exec,"
+    f"size={PROFILE_TRITON_CACHE_TMPFS_SIZE},mode=700,"
     f"uid={PROFILER_IMAGE_UID},gid={PROFILER_IMAGE_GID}"
 )
 PROFILE_GPU_DEVICE_PATHS = (
@@ -263,11 +271,18 @@ def profiler_build_profile_snapshot() -> dict[str, Any]:
             "cap_drop": "ALL",
             "no_new_privileges": True,
             "tmpfs": PROFILE_DOCKER_TMPFS,
+            "triton_cache_tmpfs": PROFILE_TRITON_CACHE_TMPFS,
             "tmpfs_owner": {
                 "uid": PROFILER_IMAGE_UID,
                 "gid": PROFILER_IMAGE_GID,
                 "mode": PROFILE_DOCKER_TMPFS_MODE,
                 "size": PROFILE_DOCKER_TMPFS_SIZE,
+            },
+            "triton_cache_tmpfs_owner": {
+                "uid": PROFILER_IMAGE_UID,
+                "gid": PROFILER_IMAGE_GID,
+                "mode": PROFILE_TRITON_CACHE_TMPFS_MODE,
+                "size": PROFILE_TRITON_CACHE_TMPFS_SIZE,
             },
         },
         "resource": {

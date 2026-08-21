@@ -1021,6 +1021,195 @@ class BoundedProfilingTests(unittest.TestCase):
                 pass
         return subject, baseline_ref, binding
 
+    def _create_a6_known_failure_canary(
+        self,
+        canary_id: str,
+        *,
+        activation_digest: str | None = None,
+        omit_hardware_diagnostic: bool = False,
+        settle_action: bool = True,
+        release_lease: bool = True,
+    ):
+        with CampaignStore(self.campaign_database) as store:
+            try:
+                store.get_campaign(self.campaign_id)
+            except KeyError:
+                needs_subject_campaign = True
+            else:
+                needs_subject_campaign = False
+        if needs_subject_campaign:
+            self._create_campaign(self.campaign_id)
+        subject, baseline_ref, binding = self._canary_subject_fixture(canary_id)
+        snapshot = profiling._canary_snapshot(
+            subject=subject,
+            baseline_ref=baseline_ref,
+            binding=binding,
+            profiler_image=profiling._A6_KNOWN_FAILURE_IMAGE,
+            profiler_build_profile_digest=(
+                profiling._A6_KNOWN_FAILURE_BUILD_DIGEST
+            ),
+            profiler_activation_profile_digest=(
+                activation_digest
+                or profiling._A6_KNOWN_FAILURE_ACTIVATION_DIGEST
+            ),
+            worker_revision=profiling.PROFILER_WORKER_REVISION,
+            recipes=tuple(profiling._A6_KNOWN_FAILURE_CLASSIFICATIONS),
+        )
+        action_key = "profile-image-canary-v1"
+        with CampaignStore(self.campaign_database) as store:
+            store.create_campaign(
+                campaign_id=canary_id,
+                namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                mode="DISCOVERY",
+                snapshot=snapshot,
+                budget_limit=BudgetAmount(wall_ms=1_800_000, gpu_ms=900_000),
+                initial_baseline_ref=baseline_ref,
+                initial_policy_snapshot={"kind": "PROFILE_IMAGE_CANARY"},
+                allow_staged_lineage=False,
+            )
+            store.start_campaign(canary_id)
+            store.reserve_budget(
+                canary_id,
+                idempotency_key=action_key,
+                action_kind="PROFILE_IMAGE_CANARY",
+                amount=BudgetAmount(wall_ms=1_800_000, gpu_ms=900_000),
+            )
+            lease = store.acquire_resource(
+                canary_id,
+                resource_id="gpu1",
+                ttl_seconds=1_830,
+            )
+            for recipe_id, classification in (
+                profiling._A6_KNOWN_FAILURE_CLASSIFICATIONS.items()
+            ):
+                recipe = BUILTIN_PROFILE_RECIPES[recipe_id]
+                intent_material = {
+                    "schema_version": 2,
+                    "kind": "PROFILE_IMAGE_CANARY_ATTEMPT",
+                    "campaign_id": canary_id,
+                    "budget_action_key": action_key,
+                    "recipe_id": recipe_id,
+                    "case_id": recipe.case_id,
+                    "requires_gpu": recipe.requires_gpu,
+                    "resource_id": lease.resource_id if recipe.requires_gpu else None,
+                    "fencing_epoch": (
+                        lease.fencing_epoch if recipe.requires_gpu else None
+                    ),
+                    "profiler_image": profiling._A6_KNOWN_FAILURE_IMAGE,
+                    "profiler_build_profile_digest": (
+                        profiling._A6_KNOWN_FAILURE_BUILD_DIGEST
+                    ),
+                    "profiler_activation_profile_digest": snapshot[
+                        "profiler_activation_profile_digest"
+                    ],
+                    "container_name": "kar-profile-a6-known-" + recipe_id,
+                    "argv": [
+                        "docker",
+                        "run",
+                        profiling._A6_KNOWN_FAILURE_IMAGE,
+                        recipe_id,
+                    ],
+                    "argv_digest": profiling.canonical_sha256(
+                        [
+                            "docker",
+                            "run",
+                            profiling._A6_KNOWN_FAILURE_IMAGE,
+                            recipe_id,
+                        ]
+                    ),
+                    "timeout_seconds": 900.0,
+                    "expected_worker_echo": {"recipe_id": recipe_id},
+                    "host_memory_preflight": _host_memory_preflight_fixture(),
+                }
+                attempt_id = (
+                    "profile-canary-attempt-"
+                    + profiling.canonical_sha256(intent_material).split(":", 1)[1]
+                )
+                intent = {**intent_material, "attempt_id": attempt_id}
+                store.record_profile_canary_attempt_intent(
+                    canary_id,
+                    intent=intent,
+                )
+                if omit_hardware_diagnostic and recipe.requires_gpu:
+                    continue
+                outcome_status = (
+                    "SUCCESS" if classification == "SUCCESS" else "FAILED"
+                )
+                returncode = 0 if classification == "SUCCESS" else 1
+                reason_code = (
+                    "RECIPE_SUCCEEDED"
+                    if classification == "SUCCESS"
+                    else "RUNNER_KNOWN_NONZERO"
+                )
+                private = {
+                    "schema_version": 1,
+                    "kind": "PROFILE_IMAGE_CANARY_PRIVATE_DIAGNOSTIC",
+                    "attempt_id": attempt_id,
+                    "campaign_id": canary_id,
+                    "budget_action_key": action_key,
+                    "recipe_id": recipe_id,
+                    "classification": classification,
+                    "reason_code": reason_code,
+                    "command": {
+                        "returncode": returncode,
+                        "timed_out": False,
+                        "output_limited": False,
+                    },
+                    "outcome": {"status": outcome_status},
+                    "file_inventory": {
+                        "entries": [
+                            {"path": f"fixture-{index}"}
+                            for index in range(6)
+                        ]
+                    },
+                }
+                private_bytes = profiling.canonical_json_text(private).encode(
+                    "utf-8"
+                )
+                diagnostic_object_id = profiling._store_cas_object(
+                    self.controller / "objects" / "sha256",
+                    private_bytes,
+                    field="fixture private canary diagnostic",
+                )
+                diagnostic = {
+                    "schema_version": 1,
+                    "kind": "PROFILE_IMAGE_CANARY_DIAGNOSTIC",
+                    "attempt_id": attempt_id,
+                    "campaign_id": canary_id,
+                    "budget_action_key": action_key,
+                    "recipe_id": recipe_id,
+                    "diagnostic_object_id": diagnostic_object_id,
+                    "diagnostic_object_bytes": len(private_bytes),
+                    "classification": classification,
+                    "reason_code": reason_code,
+                    "returncode": returncode,
+                    "timed_out": False,
+                    "output_limited": False,
+                    "outcome_status": outcome_status,
+                    "inventory_entries": 6,
+                }
+                store.record_profile_canary_attempt_diagnostic(
+                    canary_id,
+                    diagnostic=diagnostic,
+                )
+            if settle_action:
+                store.settle_budget(
+                    canary_id,
+                    idempotency_key=action_key,
+                    actual=BudgetAmount(wall_ms=20_000, gpu_ms=8_000),
+                )
+            if release_lease:
+                store.release_resource(
+                    lease,
+                    reason="known profile image canary failure",
+                )
+            store.pause_campaign(
+                canary_id,
+                status="PAUSED_OPERATOR",
+                reason="known profile image canary failure",
+            )
+        return subject, baseline_ref, binding, snapshot
+
     def test_compile_recipe_is_fixed_advisory_and_stores_bounded_evidence(self):
         self._record()
         history_before = hashlib.sha256(
@@ -1069,9 +1258,24 @@ class BoundedProfilingTests(unittest.TestCase):
             argv[argv.index("--user") + 1],
             f"{profiling.PROFILER_IMAGE_UID}:{profiling.PROFILER_IMAGE_GID}",
         )
+        tmpfs_mounts = [
+            argv[index + 1]
+            for index, item in enumerate(argv[:-1])
+            if item == "--tmpfs"
+        ]
         self.assertEqual(
-            argv[argv.index("--tmpfs") + 1],
-            profiling.PROFILE_DOCKER_TMPFS,
+            tmpfs_mounts,
+            [
+                profiling.PROFILE_DOCKER_TMPFS,
+                profiling.PROFILE_TRITON_CACHE_TMPFS,
+            ],
+        )
+        self.assertIn(",noexec,", profiling.PROFILE_DOCKER_TMPFS)
+        self.assertIn(",exec,", profiling.PROFILE_TRITON_CACHE_TMPFS)
+        self.assertTrue(
+            profiling.PROFILE_TRITON_CACHE_TMPFS.startswith(
+                "/tmp/triton-cache:"
+            )
         )
         self.assertIn("mode=700", profiling.PROFILE_DOCKER_TMPFS)
         self.assertIn("uid=1000", profiling.PROFILE_DOCKER_TMPFS)
@@ -1211,6 +1415,17 @@ class BoundedProfilingTests(unittest.TestCase):
         self.assertEqual(
             mounted,
             [f"{device}:{device}:rwm" for device in GPU1_DEVICES],
+        )
+        self.assertEqual(
+            [
+                argv[index + 1]
+                for index, item in enumerate(argv[:-1])
+                if item == "--tmpfs"
+            ],
+            [
+                profiling.PROFILE_DOCKER_TMPFS,
+                profiling.PROFILE_TRITON_CACHE_TMPFS,
+            ],
         )
         self.assertEqual(argv[argv.index("--resource-id") + 1], "gpu1")
         self.assertEqual(
@@ -2235,6 +2450,28 @@ class BoundedProfilingTests(unittest.TestCase):
         ):
             self.assertFalse(hasattr(abandon, field))
 
+        finalize_known = build_parser().parse_args(
+            [
+                "profile",
+                "image-doctor-finalize-known",
+                "--config",
+                "/runtime/config.json",
+                "--database",
+                "/runtime/campaign/campaign.sqlite3",
+                "--campaign-id",
+                "profiler-canary-1",
+            ]
+        )
+        self.assertEqual(
+            finalize_known.profile_command,
+            "image-doctor-finalize-known",
+        )
+        for field in (
+            "image", "candidate", "case", "device", "timeout", "mctracer",
+            "resource_id", "doctor_digest", "reason", "memory", "memory_swap",
+        ):
+            self.assertFalse(hasattr(finalize_known, field))
+
     def test_canary_failure_persists_intent_and_private_diagnostic(self):
         identity = self._record(stage="quick", suite="quick")
         recipe = BUILTIN_PROFILE_RECIPES["metax-hardware-counters-v1"]
@@ -2705,6 +2942,275 @@ class BoundedProfilingTests(unittest.TestCase):
             )
         self.assertEqual(replay["status"], "ALREADY_ABANDONED")
         no_replay.assert_not_called()
+
+    def test_known_failure_finalizer_preserves_evidence_without_gpu_or_doctor(self):
+        canary_id = "profile-image-canary-a6-known-finalization"
+        subject, baseline_ref, binding, _snapshot = (
+            self._create_a6_known_failure_canary(canary_id)
+        )
+        with CampaignStore(self.campaign_database) as store:
+            action_before = store.get_budget_action(
+                canary_id,
+                idempotency_key="profile-image-canary-v1",
+            )
+            lease_before = dict(
+                store.connection.execute(
+                    "SELECT * FROM resource_leases WHERE campaign_id = ?",
+                    (canary_id,),
+                ).fetchone()
+            )
+            attempts_before = store.list_profile_canary_attempts(canary_id)
+        history_before = hashlib.sha256(
+            (self.state / "history.sqlite3").read_bytes()
+        ).hexdigest()
+        with (
+            mock.patch.object(
+                profiling,
+                "_current_deployment_profile_subject",
+                return_value=(subject, baseline_ref, binding),
+            ),
+            mock.patch.object(
+                profiling,
+                "trusted_resume_doctor",
+                side_effect=AssertionError("known finalizer must not run doctor"),
+            ) as no_doctor,
+            mock.patch.object(
+                profiling,
+                "gpu_lock",
+                side_effect=AssertionError("known finalizer must not take GPU lock"),
+            ) as no_gpu_lock,
+        ):
+            report = profiling.finalize_known_profile_image_canary(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id=canary_id,
+            )
+            replay = profiling.finalize_known_profile_image_canary(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id=canary_id,
+            )
+        self.assertEqual(report["status"], "FINALIZED")
+        self.assertEqual(replay["status"], "ALREADY_FINALIZED")
+        self.assertFalse(report["doctor_invoked"])
+        self.assertFalse(report["gpu_action_invoked"])
+        self.assertFalse(report["replay_permitted"])
+        no_doctor.assert_not_called()
+        no_gpu_lock.assert_not_called()
+        finalization = report["finalization"]["finalization"]
+        self.assertEqual(
+            [proof["classification"] for proof in finalization["attempts"]],
+            ["SUCCESS", "KNOWN_FAILURE"],
+        )
+        self.assertEqual(finalization["preserved_budget"]["status"], "SETTLED")
+        self.assertEqual(finalization["preserved_lease"]["status"], "RELEASED")
+        with CampaignStore(self.campaign_database) as store:
+            self.assertEqual(store.get_campaign(canary_id)["status"], "CANCELLED")
+            self.assertEqual(
+                store.get_budget_action(
+                    canary_id,
+                    idempotency_key="profile-image-canary-v1",
+                ),
+                action_before,
+            )
+            self.assertEqual(
+                dict(
+                    store.connection.execute(
+                        "SELECT * FROM resource_leases WHERE campaign_id = ?",
+                        (canary_id,),
+                    ).fetchone()
+                ),
+                lease_before,
+            )
+            self.assertEqual(
+                store.list_profile_canary_attempts(canary_id),
+                attempts_before,
+            )
+            self.assertEqual(
+                store.connection.execute(
+                    """
+                    SELECT event_type FROM outbox
+                    WHERE campaign_id = ?
+                      AND event_type = 'PROFILE_IMAGE_CANARY_KNOWN_FAILURE_FINALIZED'
+                    """,
+                    (canary_id,),
+                ).fetchone()[0],
+                "PROFILE_IMAGE_CANARY_KNOWN_FAILURE_FINALIZED",
+            )
+            for statement in (
+                """
+                UPDATE profile_canary_known_finalizations
+                SET prior_campaign_status = 'RUNNING'
+                WHERE campaign_id = ?
+                """,
+                """
+                DELETE FROM profile_canary_known_finalizations
+                WHERE campaign_id = ?
+                """,
+            ):
+                with self.assertRaisesRegex(
+                    sqlite3.IntegrityError,
+                    "known finalization is immutable",
+                ):
+                    store.connection.execute(statement, (canary_id,))
+        self.assertEqual(
+            hashlib.sha256((self.state / "history.sqlite3").read_bytes()).hexdigest(),
+            history_before,
+        )
+
+    def test_known_failure_finalizer_rejects_identity_and_state_drift(self):
+        with (
+            mock.patch.object(profiling, "PROFILER_ACTIVE", True),
+            mock.patch.object(
+                profiling, "_current_deployment_profile_subject"
+            ) as no_subject,
+            self.assertRaisesRegex(ValueError, "exact inactive A7 build"),
+        ):
+            profiling.finalize_known_profile_image_canary(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id="profile-image-canary-a6-active-code",
+            )
+        no_subject.assert_not_called()
+
+        with (
+            mock.patch.object(
+                profiling, "_current_deployment_profile_subject"
+            ) as no_subject,
+            self.assertRaisesRegex(ValueError, "conventional absolute path"),
+        ):
+            profiling.finalize_known_profile_image_canary(
+                self.config,
+                campaign_database=self.root / "custom-campaign.sqlite3",
+                campaign_id="profile-image-canary-a6-custom-database",
+            )
+        no_subject.assert_not_called()
+
+        fixtures = (
+            {
+                "suffix": "identity",
+                "create": {"activation_digest": "sha256:" + "f" * 64},
+                "message": "identity",
+            },
+            {
+                "suffix": "diagnostic",
+                "create": {"omit_hardware_diagnostic": True},
+                "message": "diagnostic is unavailable",
+            },
+            {
+                "suffix": "budget",
+                "create": {"settle_action": False},
+                "message": "SETTLED action",
+            },
+            {
+                "suffix": "lease",
+                "create": {"release_lease": False},
+                "message": "RELEASED lease",
+            },
+        )
+        for fixture in fixtures:
+            with self.subTest(fixture=fixture["suffix"]):
+                canary_id = "profile-image-canary-a6-drift-" + fixture["suffix"]
+                subject, baseline_ref, binding, _snapshot = (
+                    self._create_a6_known_failure_canary(
+                        canary_id,
+                        **fixture["create"],
+                    )
+                )
+                with (
+                    mock.patch.object(
+                        profiling,
+                        "_current_deployment_profile_subject",
+                        return_value=(subject, baseline_ref, binding),
+                    ),
+                    self.assertRaisesRegex(ValueError, fixture["message"]),
+                ):
+                    profiling.finalize_known_profile_image_canary(
+                        self.config,
+                        campaign_database=self.campaign_database,
+                        campaign_id=canary_id,
+                    )
+                with CampaignStore(self.campaign_database) as store:
+                    self.assertEqual(
+                        store.get_campaign(canary_id)["status"],
+                        "PAUSED_OPERATOR",
+                    )
+                    self.assertIsNone(
+                        store.get_profile_canary_known_finalization(canary_id)
+                    )
+
+        canary_id = "profile-image-canary-a6-drift-private-cas"
+        subject, baseline_ref, binding, _snapshot = (
+            self._create_a6_known_failure_canary(canary_id)
+        )
+        with CampaignStore(self.campaign_database) as store:
+            object_id = store.list_profile_canary_attempts(canary_id)[0][
+                "diagnostic"
+            ]["diagnostic_object_id"]
+        digest = object_id.split(":", 1)[1]
+        private_path = (
+            self.controller / "objects" / "sha256" / digest[:2] / digest[2:]
+        )
+        private_path.write_bytes(b"{}")
+        with (
+            mock.patch.object(
+                profiling,
+                "_current_deployment_profile_subject",
+                return_value=(subject, baseline_ref, binding),
+            ),
+            self.assertRaisesRegex(ValueError, "digest is inconsistent"),
+        ):
+            profiling.finalize_known_profile_image_canary(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id=canary_id,
+            )
+        with CampaignStore(self.campaign_database) as store:
+            self.assertEqual(
+                store.get_campaign(canary_id)["status"],
+                "PAUSED_OPERATOR",
+            )
+            self.assertIsNone(
+                store.get_profile_canary_known_finalization(canary_id)
+            )
+
+        canary_id = "profile-image-canary-a6-drift-after-finalization"
+        subject, baseline_ref, binding, _snapshot = (
+            self._create_a6_known_failure_canary(canary_id)
+        )
+        subject_patch = mock.patch.object(
+            profiling,
+            "_current_deployment_profile_subject",
+            return_value=(subject, baseline_ref, binding),
+        )
+        with subject_patch:
+            profiling.finalize_known_profile_image_canary(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id=canary_id,
+            )
+        with CampaignStore(self.campaign_database) as store:
+            store.connection.execute(
+                """
+                UPDATE budget_actions SET actual_wall_ms = actual_wall_ms + 1
+                WHERE campaign_id = ? AND idempotency_key = ?
+                """,
+                (canary_id, "profile-image-canary-v1"),
+            )
+            store.connection.commit()
+        with (
+            mock.patch.object(
+                profiling,
+                "_current_deployment_profile_subject",
+                return_value=(subject, baseline_ref, binding),
+            ),
+            self.assertRaisesRegex(ValueError, "replay proof differs"),
+        ):
+            profiling.finalize_known_profile_image_canary(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id=canary_id,
+            )
 
     def test_image_doctor_runs_two_recipes_without_history_or_baseline_writes(self):
         identity = self._record(stage="confirmation", suite="full")

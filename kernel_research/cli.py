@@ -42,6 +42,7 @@ from .autorun.models import ControllerConfig
 from .profiling import (
     PROFILE_RECIPE_IDS,
     abandon_profile_image_canary,
+    finalize_known_profile_image_canary,
     run_bounded_profile,
     run_profile_image_doctor,
     run_profiling_doctor,
@@ -411,6 +412,16 @@ def _profile_image_doctor_abandon(args: argparse.Namespace) -> int:
     return 0
 
 
+def _profile_image_doctor_finalize_known(args: argparse.Namespace) -> int:
+    report = finalize_known_profile_image_canary(
+        ControllerConfig.load(args.config),
+        campaign_database=args.database,
+        campaign_id=args.campaign_id,
+    )
+    _print_json(report)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kernel-research",
@@ -549,6 +560,25 @@ def build_parser() -> argparse.ArgumentParser:
     profile_image_doctor_abandon.add_argument("--campaign-id", required=True)
     profile_image_doctor_abandon.set_defaults(
         handler=_profile_image_doctor_abandon
+    )
+    profile_image_doctor_finalize_known = profile_commands.add_parser(
+        "image-doctor-finalize-known",
+        help=(
+            "terminalize the exact settled A6 known failure without doctor "
+            "or replay"
+        ),
+    )
+    profile_image_doctor_finalize_known.add_argument("--config", required=True)
+    profile_image_doctor_finalize_known.add_argument(
+        "--database",
+        required=True,
+        help="canonical <runtime_root>/campaign/campaign.sqlite3",
+    )
+    profile_image_doctor_finalize_known.add_argument(
+        "--campaign-id", required=True
+    )
+    profile_image_doctor_finalize_known.set_defaults(
+        handler=_profile_image_doctor_finalize_known
     )
     profile_collect = profile_commands.add_parser(
         "collect",

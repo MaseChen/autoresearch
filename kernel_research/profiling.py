@@ -44,7 +44,11 @@ from .campaign.paths import (
     validate_production_campaign_database,
 )
 from .campaign.soak import SoakGate
-from .campaign.soak_collector import COUNT_FIELDS, SoakObservationCollector
+from .campaign.soak_collector import (
+    COUNT_FIELDS,
+    SoakObservationCollector,
+    _read_private_canary_diagnostic,
+)
 from .campaign.store import CampaignStore
 from .constants import CURRENT_C500_EVALUATION_PROTOCOL_ID
 from .platform.canonical import canonical_json_text, canonical_sha256, require_sha256_digest
@@ -86,6 +90,7 @@ from .profiler_contract import (
     PROFILE_RESULT_LIMIT_BYTES,
     PROFILE_TIMEOUT_SECONDS,
     PROFILE_TRACE_CONTAINER_PATH,
+    PROFILE_TRITON_CACHE_TMPFS,
     PROFILE_UNAVAILABLE_REASON_CODES,
     PROFILER_ACTIVE,
     PROFILER_ACTIVATION_PROFILE_DIGEST,
@@ -250,6 +255,25 @@ BUILTIN_PROFILE_RECIPES: Mapping[str, ProfileRecipe] = MappingProxyType(
     }
 )
 PROFILE_RECIPE_IDS = tuple(BUILTIN_PROFILE_RECIPES)
+_A6_KNOWN_FAILURE_IMAGE = (
+    "ghcr.io/masechen/autoresearch-metax-profiler@sha256:"
+    "2c817daef35c634b398209fce2d3c40b16d1f37acc9dbf00349e2540477719bb"
+)
+_A6_KNOWN_FAILURE_BUILD_DIGEST = (
+    "sha256:432756dac8d6a00b7221ea5d39f09d8f33ec4ef48fa42badb35bdc20f2e59ab7"
+)
+_A6_KNOWN_FAILURE_ACTIVATION_DIGEST = (
+    "sha256:bd6dba397b68b7dde0f254ea12a916662c1bd10b1e0d6a99dd74545d3ad0c7ee"
+)
+_A7_KNOWN_FINALIZER_BUILD_DIGEST = (
+    "sha256:cfc19d55524c5032d9b23200e6bc5b6a92c988a8cc01ec154867540a3101d734"
+)
+_A6_KNOWN_FAILURE_CLASSIFICATIONS = MappingProxyType(
+    {
+        "metax-compile-metadata-v1": "SUCCESS",
+        "metax-hardware-counters-v1": "KNOWN_FAILURE",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1022,6 +1046,8 @@ def _profile_argv(
         str(PROFILE_CPU_LIMIT),
         "--tmpfs",
         PROFILE_DOCKER_TMPFS,
+        "--tmpfs",
+        PROFILE_TRITON_CACHE_TMPFS,
         "--mount",
         _docker_mount(
             subject.candidate_object_path,
@@ -2673,6 +2699,13 @@ def _canary_snapshot(
     subject: _ProfileSubject,
     baseline_ref: BaselineRef,
     binding: Mapping[str, Any],
+    profiler_image: str = PROFILER_IMAGE,
+    profiler_build_profile_digest: str = PROFILER_BUILD_PROFILE_DIGEST,
+    profiler_activation_profile_digest: str = (
+        PROFILER_ACTIVATION_PROFILE_DIGEST
+    ),
+    worker_revision: str = PROFILER_WORKER_REVISION,
+    recipes: Sequence[str] = PROFILE_RECIPE_IDS,
 ) -> dict[str, Any]:
     value = {
         "schema_version": 1,
@@ -2681,13 +2714,13 @@ def _canary_snapshot(
         "artifact_id": subject.artifact_id,
         "candidate_sha256": subject.candidate_content_sha256,
         "baseline_ref": baseline_ref.to_dict(),
-        "profiler_image": PROFILER_IMAGE,
-        "profiler_build_profile_digest": PROFILER_BUILD_PROFILE_DIGEST,
+        "profiler_image": profiler_image,
+        "profiler_build_profile_digest": profiler_build_profile_digest,
         "profiler_activation_profile_digest": (
-            PROFILER_ACTIVATION_PROFILE_DIGEST
+            profiler_activation_profile_digest
         ),
-        "worker_revision": PROFILER_WORKER_REVISION,
-        "recipes": list(PROFILE_RECIPE_IDS),
+        "worker_revision": worker_revision,
+        "recipes": list(recipes),
         "binding": dict(binding),
     }
     return json.loads(canonical_json_text(value))
@@ -3386,6 +3419,159 @@ def run_profile_image_doctor(
                     raise
 
 
+def finalize_known_profile_image_canary(
+    config: ControllerConfig,
+    *,
+    campaign_database: str | os.PathLike[str],
+    campaign_id: str,
+) -> dict[str, Any]:
+    """Terminalize the exact settled A6 known failure without GPU or doctor."""
+
+    if not isinstance(config, ControllerConfig):
+        raise TypeError("config must be ControllerConfig")
+    if (
+        PROFILER_ACTIVE
+        or PROFILER_BUILD_PROFILE_DIGEST != _A7_KNOWN_FINALIZER_BUILD_DIGEST
+        or PROFILER_IMAGE
+        != "ghcr.io/masechen/autoresearch-metax-profiler@sha256:" + "0" * 64
+    ):
+        raise ValueError(
+            "known profile finalization requires the exact inactive A7 build"
+        )
+    _require_profile_runtime_user(config)
+    if tuple(config.gpu_devices) != GPU1_DEVICES:
+        raise ValueError(
+            "known profile finalization requires the exact C500 configuration"
+        )
+    if not isinstance(campaign_id, str) or _PROFILE_TOKEN.fullmatch(campaign_id) is None:
+        raise ValueError("campaign_id must be a stable bounded identifier")
+    runtime_root = _runtime_root(config)
+    database = validate_production_campaign_database(
+        campaign_database, runtime_root=runtime_root
+    )
+    action_key = "profile-image-canary-v1"
+    with campaign_maintenance_fence(runtime_root):
+        subject, baseline_ref, binding = _current_deployment_profile_subject(
+            config, campaign_id=campaign_id
+        )
+        expected_snapshot = _canary_snapshot(
+            subject=subject,
+            baseline_ref=baseline_ref,
+            binding=binding,
+            profiler_image=_A6_KNOWN_FAILURE_IMAGE,
+            profiler_build_profile_digest=(
+                _A6_KNOWN_FAILURE_BUILD_DIGEST
+            ),
+            profiler_activation_profile_digest=(
+                _A6_KNOWN_FAILURE_ACTIVATION_DIGEST
+            ),
+            worker_revision=PROFILER_WORKER_REVISION,
+            recipes=tuple(_A6_KNOWN_FAILURE_CLASSIFICATIONS),
+        )
+        with CampaignStore(database) as store:
+            other = store.connection.execute(
+                """
+                SELECT id FROM campaigns
+                WHERE id != ? AND status NOT IN ('COMPLETED', 'CANCELLED')
+                ORDER BY id LIMIT 1
+                """,
+                (campaign_id,),
+            ).fetchone()
+            if other is not None:
+                raise ValueError(
+                    "known profile finalization is forbidden while another "
+                    "Campaign is active"
+                )
+            _require_canary_campaign(
+                store,
+                campaign_id=campaign_id,
+                snapshot=expected_snapshot,
+                baseline_ref=baseline_ref,
+            )
+            attempts = store.list_profile_canary_attempts(campaign_id)
+            for attempt in attempts:
+                diagnostic = attempt.get("diagnostic")
+                ledger = (
+                    None if diagnostic is None else diagnostic.get("diagnostic")
+                )
+                if diagnostic is None or not isinstance(ledger, dict):
+                    raise ValueError(
+                        "known profile finalization diagnostic is unavailable"
+                    )
+                private, byte_size = _read_private_canary_diagnostic(
+                    config,
+                    diagnostic.get("diagnostic_object_id"),
+                )
+                command = private.get("command")
+                outcome = private.get("outcome")
+                inventory = private.get("file_inventory")
+                outcome_status = (
+                    outcome.get("status")
+                    if isinstance(outcome, dict)
+                    else None
+                )
+                if (
+                    ledger.get("diagnostic_object_bytes") != byte_size
+                    or private.get("schema_version") != 1
+                    or private.get("kind")
+                    != "PROFILE_IMAGE_CANARY_PRIVATE_DIAGNOSTIC"
+                    or private.get("attempt_id") != attempt.get("attempt_id")
+                    or private.get("campaign_id") != campaign_id
+                    or private.get("budget_action_key")
+                    != attempt.get("budget_action_key")
+                    or private.get("recipe_id") != attempt.get("recipe_id")
+                    or private.get("classification")
+                    != diagnostic.get("classification")
+                    or private.get("reason_code")
+                    != diagnostic.get("reason_code")
+                    or not isinstance(command, dict)
+                    or command.get("returncode")
+                    != diagnostic.get("returncode")
+                    or command.get("timed_out")
+                    is not diagnostic.get("timed_out")
+                    or command.get("output_limited")
+                    is not diagnostic.get("output_limited")
+                    or outcome_status != diagnostic.get("outcome_status")
+                    or not isinstance(inventory, dict)
+                    or not isinstance(inventory.get("entries"), list)
+                    or len(inventory["entries"])
+                    != ledger.get("inventory_entries")
+                ):
+                    raise ValueError(
+                        "known profile finalization private diagnostic is inconsistent"
+                    )
+            already_finalized = (
+                store.get_profile_canary_known_finalization(campaign_id)
+                is not None
+            )
+            finalization = store.finalize_known_profile_canary(
+                campaign_id,
+                budget_action_key=action_key,
+                expected_snapshot=expected_snapshot,
+                expected_classifications=(
+                    _A6_KNOWN_FAILURE_CLASSIFICATIONS
+                ),
+            )
+            return {
+                "schema_version": PROFILE_COLLECTION_API_VERSION,
+                "command": "profile image-doctor-finalize-known",
+                "status": (
+                    "ALREADY_FINALIZED"
+                    if already_finalized
+                    else "FINALIZED"
+                ),
+                "campaign_id": campaign_id,
+                "finalization": finalization,
+                "attempts": attempts,
+                "doctor_invoked": False,
+                "gpu_action_invoked": False,
+                "replay_permitted": False,
+                "advisory_only": True,
+                "promotion_effect": "none",
+                "baseline_effect": "none",
+            }
+
+
 def abandon_profile_image_canary(
     config: ControllerConfig,
     *,
@@ -3495,6 +3681,7 @@ __all__ = [
     "PROFILE_DOCTOR_API_VERSION",
     "PROFILE_RECIPE_IDS",
     "abandon_profile_image_canary",
+    "finalize_known_profile_image_canary",
     "PROFILER_ACTIVE",
     "PROFILER_ACTIVATION_PROFILE_DIGEST",
     "PROFILER_BUILD_PROFILE_DIGEST",
