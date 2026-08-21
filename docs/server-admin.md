@@ -428,8 +428,8 @@ candidate、24 GiB memory、双 tmpfs 及 `kernel.py` 不变。Dockerfile 在切
 - 完整重扫并复核后删除 build-only normalizer；
 - UID 1000 随后显式 import package，再运行 `verify-toolchain`。
 
-normalizer SHA、路径、对象白名单、ownership 和 mode 均进入 build profile。冻结的 A8
-inactive identity 为：
+normalizer SHA、路径、对象白名单、ownership 和 mode 均进入 build profile。A8 build
+identity 与资格验证结果为：
 
 - build profile digest：
   `sha256:bea1abedea118afbaa6206f4826b042a5ce57773fcf73c1a8f2a99ead1c9e549`
@@ -437,14 +437,29 @@ inactive identity 为：
   `sha256:d4b3c5923c3aac6f933580fe687e72413b17cd51650cc9a71cc315fb03c9d34c`
 - normalizer SHA-256：
   `a64c60dc263489144af2a288b14c03d393b2eb5eb082e73bf54deb82de3e366f`
+- source commit：`6387fea2b1d72d04ae5a2b45870b31688c4b2259`
+- Image ID：
+  `sha256:eba06d9807fcdbc0c3cdde61be6cf0b9f109779ab13f723ccff06fea94062bba`
+- RepoDigest：
+  `ghcr.io/masechen/autoresearch-metax-profiler@sha256:4a118982bc868b9e0acd50ae0d3af8b8db1768802a7b096e220f801b131a9c35`
+- toolchain digest：
+  `sha256:bd9d5e20698fc00c0a56bca122f4fe7be5e9a0528fbf98952ddfc6233c434293`
+- active activation digest：
+  `sha256:073f667748fc7d867e7333988c5daed7f574a0072e11e8bf731ded0e6b0138da`
+- control evidence：
+  `/home/mx/autoresearch-evidence/profiler-a8-control-preflight-6387fea2b1d7-v1`
+- control manifest digest：
+  `81d193f605aed55d0f0a6efb4676039673eef8b326d2bae0eee7607fa9c4f784`
+- image evidence：
+  `/home/mx/autoresearch-evidence/profiler-image-a8-6387fea2b1d7-build-v1`
+- image manifest digest：
+  `cfd0d9ed9021a09cedd0a08330dfbaeac6ba0ec9f1d3edecc43098c9ef674cce`
 
-服务器必须从全新干净 A8 worktree 原样构建，保留 checkout 的实际 umask 物化结果；
-不得在 build 前 chmod/chown source tree。classic builder 成功后，先检查 Image ID、
-label、platform、entrypoint 和 USER，再以 UID 1000 执行 package import 和
-`verify-toolchain`。只有本地资格通过后才可临时登录 GHCR、push、解析唯一 RepoDigest、
-按 digest pull 并重复资格验证。随后创建只改 `active=true` 与最终 RepoDigest 的直接子
-activation commit。部署和完整主机回归通过后，必须使用全新 Campaign ID 唯一运行一次
-A8 canary；READY 前不得开始 soak。
+原生 hostile-context build、local qualification、GHCR push、RepoDigest pull、Image ID
+对账和远端 non-root/read-only/toolchain 资格验证均已完成，临时 GHCR 凭证已删除。独立
+activation commit 只设置 `active=true` 和上述 RepoDigest，build digest 必须保持不变。
+部署该 activation commit 后执行 static、doctor 和完整主机回归；全部通过后，必须使用
+全新 Campaign ID 唯一运行一次 A8 canary。READY 前不得开始 soak。
 
 对已经进入 `PAUSED_UNKNOWN_OUTCOME` 或 `PAUSED_HARD_FAILURE` 的 image-doctor，先部署
 包含恢复能力的代码会被活动 Campaign 管理锁拒绝。这种情况下只能从该修复提交的干净

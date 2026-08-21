@@ -17,8 +17,10 @@ being mapped. The failure is known, settled and released, and its Campaign was
 terminalized by the trusted A7 finalizer without GPU or replay. The A7 native
 build then failed before its non-root toolchain probe because a checkout made
 under umask `0077` reached legacy Docker `COPY` as mode 0600/0700. A8 adds a
-build-only, fail-closed library filesystem normalization contract. No A8 image,
-activation or canary evidence exists yet.
+build-only, fail-closed library filesystem normalization contract. Its native
+image has now been built, pushed, pulled by exact RepoDigest and independently
+qualified; the separate activation profile pins that image without changing
+build identity. No A8 canary evidence exists yet.
 
 ## Context
 
@@ -317,14 +319,29 @@ deployment authority merely because it uses the same candidate and device.
   with manifest digest
   `2c0fd536e4f3076b57e492b2561ec89b18e5cbad044865d0e5cd31afa5b9ff39`.
   The failed intermediate image remains audit evidence and must not be reused.
-- A8 is a direct-child inactive build submission. It keeps the A7 dual-tmpfs,
+- A8 is a direct-child build submission. It keeps the A7 dual-tmpfs,
   worker v3, recipes, toolchain, candidate, 24 GiB memory cap and `kernel.py`
   unchanged. It adds only deterministic build-time Python-tree normalization
   plus the non-root import proof. Its build profile digest is
   `sha256:bea1abedea118afbaa6206f4826b042a5ce57773fcf73c1a8f2a99ead1c9e549`;
-  its inactive activation digest is
+  its inactive activation digest was
   `sha256:d4b3c5923c3aac6f933580fe687e72413b17cd51650cc9a71cc315fb03c9d34c`.
-  A new clean checkout with its original hostile umask must be built without
-  operator-side chmod. Only a successful native build, RepoDigest pull and
-  non-root runtime/toolchain qualification may authorize a separate activation
-  commit and a wholly new canary Campaign.
+  A new clean checkout with its original hostile umask was built without
+  operator-side chmod. The resulting image ID is
+  `sha256:eba06d9807fcdbc0c3cdde61be6cf0b9f109779ab13f723ccff06fea94062bba`
+  and the qualified RepoDigest is
+  `ghcr.io/masechen/autoresearch-metax-profiler@sha256:4a118982bc868b9e0acd50ae0d3af8b8db1768802a7b096e220f801b131a9c35`.
+  Local-tag and RepoDigest toolchain snapshots agree at
+  `sha256:bd9d5e20698fc00c0a56bca122f4fe7be5e9a0528fbf98952ddfc6233c434293`.
+  The control archive is
+  `/home/mx/autoresearch-evidence/profiler-a8-control-preflight-6387fea2b1d7-v1`
+  with manifest digest
+  `81d193f605aed55d0f0a6efb4676039673eef8b326d2bae0eee7607fa9c4f784`;
+  the image archive is
+  `/home/mx/autoresearch-evidence/profiler-image-a8-6387fea2b1d7-build-v1`
+  with manifest digest
+  `cfd0d9ed9021a09cedd0a08330dfbaeac6ba0ec9f1d3edecc43098c9ef674cce`.
+  The separate activation profile changes only the active bit and exact
+  RepoDigest, preserves the build digest, and has activation digest
+  `sha256:073f667748fc7d867e7333988c5daed7f574a0072e11e8bf731ded0e6b0138da`.
+  Deployment verification and a wholly new canary Campaign are still required.

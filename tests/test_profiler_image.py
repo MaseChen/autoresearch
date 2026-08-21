@@ -54,26 +54,25 @@ class ProfilerContractTests(unittest.TestCase):
         "ce57773fcf73c1a8f2a99ead1c9e549"
     )
     ACTIVATION_PROFILE_DIGEST = (
-        "sha256:d4b3c5923c3aac6f933580fe687e7241"
-        "3b17cd51650cc9a71cc315fb03c9d34c"
+        "sha256:073f667748fc7d867e7333988c5daed7f"
+        "574a0072e11e8bf731ded0e6b0138da"
     )
-    FUTURE_A8_IMAGE = (
-        "ghcr.io/masechen/autoresearch-metax-profiler@sha256:" + "a" * 64
+    A8_IMAGE = (
+        "ghcr.io/masechen/autoresearch-metax-profiler@sha256:"
+        "4a118982bc868b9e0acd50ae0d3af8b8"
+        "db1768802a7b096e220f801b131a9c35"
     )
 
-    def test_submit_a8_profile_is_exact_and_inactive(self) -> None:
+    def test_a8_activation_is_exact_and_preserves_build_identity(self) -> None:
         build = profiler_build_profile_snapshot()
         activation = profiler_activation_profile_snapshot()
-        self.assertFalse(PROFILER_ACTIVE)
+        self.assertTrue(PROFILER_ACTIVE)
         self.assertEqual(build["base_image"], PROFILER_BASE_IMAGE)
         self.assertNotIn("active", build)
         self.assertNotIn("profiler_image", build)
-        self.assertEqual(
-            PROFILER_IMAGE,
-            PROFILER_IMAGE_REPOSITORY + "@sha256:" + "0" * 64,
-        )
+        self.assertEqual(PROFILER_IMAGE, self.A8_IMAGE)
         self.assertEqual(activation["profiler_image"], PROFILER_IMAGE)
-        self.assertFalse(activation["active"])
+        self.assertTrue(activation["active"])
         self.assertTrue(PROFILER_IMAGE.startswith(PROFILER_IMAGE_REPOSITORY))
         self.assertEqual(build["worker_revision"], PROFILER_WORKER_REVISION)
         self.assertEqual(
@@ -100,10 +99,9 @@ class ProfilerContractTests(unittest.TestCase):
             PROFILER_ACTIVATION_PROFILE_DIGEST,
             self.ACTIVATION_PROFILE_DIGEST,
         )
-        with self.assertRaisesRegex(ValueError, "inactive"):
-            require_active_profiler()
+        self.assertIsNone(require_active_profiler())
 
-    def test_a8_worker_echo_survives_future_activation_only_change(self) -> None:
+    def test_a8_worker_echo_survives_activation_only_change(self) -> None:
         request = ProfilerWorkerTests._request()
         commit_a_echo = request.echo()
         commit_a_build = profiler_build_profile_snapshot()
@@ -114,7 +112,7 @@ class ProfilerContractTests(unittest.TestCase):
         commit_b_build = profiler_build_profile_snapshot()
         commit_b_activation = profiler_activation_profile_snapshot(
             active=True,
-            profiler_image=self.FUTURE_A8_IMAGE,
+            profiler_image=self.A8_IMAGE,
         )
         self.assertEqual(commit_b_build, commit_a_build)
         self.assertEqual(
@@ -131,7 +129,7 @@ class ProfilerContractTests(unittest.TestCase):
         )
         self.assertTrue(commit_b_activation["active"])
         self.assertEqual(
-            commit_b_activation["profiler_image"], self.FUTURE_A8_IMAGE
+            commit_b_activation["profiler_image"], self.A8_IMAGE
         )
         self.assertNotIn("profiler_image", commit_a_echo)
         self.assertNotIn("active", commit_a_echo)

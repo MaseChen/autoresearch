@@ -2962,6 +2962,12 @@ class BoundedProfilingTests(unittest.TestCase):
         "PROFILER_BUILD_PROFILE_DIGEST",
         profiling._A7_KNOWN_FINALIZER_BUILD_DIGEST,
     )
+    @mock.patch.object(profiling, "PROFILER_ACTIVE", False)
+    @mock.patch.object(
+        profiling,
+        "PROFILER_IMAGE",
+        "ghcr.io/masechen/autoresearch-metax-profiler@sha256:" + "0" * 64,
+    )
     def test_known_failure_finalizer_preserves_evidence_without_gpu_or_doctor(self):
         canary_id = "profile-image-canary-a6-known-finalization"
         subject, baseline_ref, binding, _snapshot = (
@@ -3081,6 +3087,12 @@ class BoundedProfilingTests(unittest.TestCase):
         profiling,
         "PROFILER_BUILD_PROFILE_DIGEST",
         profiling._A7_KNOWN_FINALIZER_BUILD_DIGEST,
+    )
+    @mock.patch.object(profiling, "PROFILER_ACTIVE", False)
+    @mock.patch.object(
+        profiling,
+        "PROFILER_IMAGE",
+        "ghcr.io/masechen/autoresearch-metax-profiler@sha256:" + "0" * 64,
     )
     def test_known_failure_finalizer_rejects_identity_and_state_drift(self):
         with (

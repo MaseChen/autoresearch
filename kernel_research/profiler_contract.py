@@ -26,16 +26,16 @@ PROFILER_BASE_IMAGE = (
 )
 PROFILER_IMAGE_REPOSITORY = "ghcr.io/masechen/autoresearch-metax-profiler"
 PROFILER_PLATFORM = "linux/amd64"
-# A8 normalizes the copied Python library tree after an umask-0077 checkout
-# proved that the legacy Docker builder preserves hostile context modes. The
-# rebuilt image must be qualified before a separate activation commit may pin
-# its RepoDigest. Activation values remain excluded from the build profile.
+# The independently built A8 Linux/amd64 image passed hostile-context
+# normalization, RepoDigest pull, Image ID comparison, and non-root/read-only
+# runtime/toolchain qualification. Activation values remain excluded from the
+# worker-visible build profile.
 PROFILER_IMAGE = (
     PROFILER_IMAGE_REPOSITORY
-    + "@sha256:"
-    + "0" * 64
+    + "@sha256:4a118982bc868b9e0acd50ae0d3af8b8"
+    + "db1768802a7b096e220f801b131a9c35"
 )
-PROFILER_ACTIVE = False
+PROFILER_ACTIVE = True
 PROFILER_WORKER_REVISION = "metax-bounded-profiler-worker-v3"
 PROFILER_ENTRYPOINT = "/opt/kernel-research/bin/bounded-profiler"
 PROFILER_IMAGE_UID = 1000
