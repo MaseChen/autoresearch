@@ -2943,6 +2943,25 @@ class BoundedProfilingTests(unittest.TestCase):
         self.assertEqual(replay["status"], "ALREADY_ABANDONED")
         no_replay.assert_not_called()
 
+    def test_a8_cannot_reopen_the_completed_a6_known_failure_finalizer(self):
+        with (
+            mock.patch.object(
+                profiling, "_current_deployment_profile_subject"
+            ) as no_subject,
+            self.assertRaisesRegex(ValueError, "exact inactive A7 build"),
+        ):
+            profiling.finalize_known_profile_image_canary(
+                self.config,
+                campaign_database=self.campaign_database,
+                campaign_id="profile-image-canary-a6-retired-finalizer",
+            )
+        no_subject.assert_not_called()
+
+    @mock.patch.object(
+        profiling,
+        "PROFILER_BUILD_PROFILE_DIGEST",
+        profiling._A7_KNOWN_FINALIZER_BUILD_DIGEST,
+    )
     def test_known_failure_finalizer_preserves_evidence_without_gpu_or_doctor(self):
         canary_id = "profile-image-canary-a6-known-finalization"
         subject, baseline_ref, binding, _snapshot = (
@@ -3058,6 +3077,11 @@ class BoundedProfilingTests(unittest.TestCase):
             history_before,
         )
 
+    @mock.patch.object(
+        profiling,
+        "PROFILER_BUILD_PROFILE_DIGEST",
+        profiling._A7_KNOWN_FINALIZER_BUILD_DIGEST,
+    )
     def test_known_failure_finalizer_rejects_identity_and_state_drift(self):
         with (
             mock.patch.object(profiling, "PROFILER_ACTIVE", True),

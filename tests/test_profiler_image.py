@@ -5,8 +5,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import runpy
 import stat
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -47,15 +49,19 @@ class ProfilerContractTests(unittest.TestCase):
         "sha256:cfc19d55524c5032d9b23200e6bc5b6a"
         "92c988a8cc01ec154867540a3101d734"
     )
-    ACTIVATION_PROFILE_DIGEST = (
-        "sha256:d5a3c6ef8f8e03276d6d75bec9517adf"
-        "0fa79d3c8a48c218a5ec445f2fe57345"
+    A8_BUILD_PROFILE_DIGEST = (
+        "sha256:bea1abedea118afbaa6206f4826b042a5"
+        "ce57773fcf73c1a8f2a99ead1c9e549"
     )
-    FUTURE_A7_IMAGE = (
+    ACTIVATION_PROFILE_DIGEST = (
+        "sha256:d4b3c5923c3aac6f933580fe687e7241"
+        "3b17cd51650cc9a71cc315fb03c9d34c"
+    )
+    FUTURE_A8_IMAGE = (
         "ghcr.io/masechen/autoresearch-metax-profiler@sha256:" + "a" * 64
     )
 
-    def test_submit_a7_profile_is_exact_and_inactive(self) -> None:
+    def test_submit_a8_profile_is_exact_and_inactive(self) -> None:
         build = profiler_build_profile_snapshot()
         activation = profiler_activation_profile_snapshot()
         self.assertFalse(PROFILER_ACTIVE)
@@ -75,10 +81,16 @@ class ProfilerContractTests(unittest.TestCase):
             PROFILE_COLLECTION_SCHEMA_VERSION,
         )
         self.assertEqual(PROFILER_BUILD_PROFILE_DIGEST, canonical_sha256(build))
-        self.assertEqual(PROFILER_BUILD_PROFILE_DIGEST, self.A7_BUILD_PROFILE_DIGEST)
+        self.assertEqual(PROFILER_BUILD_PROFILE_DIGEST, self.A8_BUILD_PROFILE_DIGEST)
         self.assertNotEqual(
             PROFILER_BUILD_PROFILE_DIGEST,
-            self.A6_BUILD_PROFILE_DIGEST,
+            self.A7_BUILD_PROFILE_DIGEST,
+        )
+        a7_projection = dict(build)
+        self.assertIsNotNone(a7_projection.pop("library_filesystem"))
+        self.assertEqual(
+            canonical_sha256(a7_projection),
+            self.A7_BUILD_PROFILE_DIGEST,
         )
         self.assertEqual(
             PROFILER_ACTIVATION_PROFILE_DIGEST,
@@ -91,7 +103,7 @@ class ProfilerContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "inactive"):
             require_active_profiler()
 
-    def test_a7_worker_echo_survives_future_activation_only_change(self) -> None:
+    def test_a8_worker_echo_survives_future_activation_only_change(self) -> None:
         request = ProfilerWorkerTests._request()
         commit_a_echo = request.echo()
         commit_a_build = profiler_build_profile_snapshot()
@@ -102,7 +114,7 @@ class ProfilerContractTests(unittest.TestCase):
         commit_b_build = profiler_build_profile_snapshot()
         commit_b_activation = profiler_activation_profile_snapshot(
             active=True,
-            profiler_image=self.FUTURE_A7_IMAGE,
+            profiler_image=self.FUTURE_A8_IMAGE,
         )
         self.assertEqual(commit_b_build, commit_a_build)
         self.assertEqual(
@@ -119,7 +131,7 @@ class ProfilerContractTests(unittest.TestCase):
         )
         self.assertTrue(commit_b_activation["active"])
         self.assertEqual(
-            commit_b_activation["profiler_image"], self.FUTURE_A7_IMAGE
+            commit_b_activation["profiler_image"], self.FUTURE_A8_IMAGE
         )
         self.assertNotIn("profiler_image", commit_a_echo)
         self.assertNotIn("active", commit_a_echo)
@@ -162,6 +174,7 @@ class ProfilerContractTests(unittest.TestCase):
                 "worker_revision",
                 "entrypoint",
                 "image_user",
+                "library_filesystem",
                 "toolchain",
                 "recipes",
                 "paths",
@@ -178,6 +191,31 @@ class ProfilerContractTests(unittest.TestCase):
         self.assertEqual(build["image_user"]["gid"], 1000)
         self.assertEqual(build["image_user"]["runtime_binding"], "exact")
         self.assertEqual(build["image_user"]["host_process_binding"], "exact")
+        self.assertEqual(
+            build["library_filesystem"],
+            {
+                "root": "/opt/kernel-research/lib/kernel_research",
+                "normalizer": {
+                    "container_path": (
+                        "/opt/kernel-research/bin/normalize-library-tree"
+                    ),
+                    "interpreter": "python",
+                    "sha256": (
+                        "a64c60dc263489144af2a288b14c03d3"
+                        "93b2eb5eb082e73bf54deb82de3e366f"
+                    ),
+                    "removed_after_use": True,
+                },
+                "owner": {"uid": 0, "gid": 0},
+                "directory_mode": "0555",
+                "python_file_mode": "0444",
+                "allowed_object_types": ["directory", "regular_file"],
+                "allowed_file_suffixes": [".py"],
+                "symlinks_allowed": False,
+                "normalization_phase": "before-runtime-user",
+                "non_root_import_probe": True,
+            },
+        )
         self.assertEqual(build["platform"], "linux/amd64")
         self.assertEqual(build["limits"]["action_timeout_seconds"], 900.0)
         self.assertEqual(build["limits"]["toolchain_help_timeout_seconds"], 10.0)
@@ -266,6 +304,114 @@ class ProfilerContractTests(unittest.TestCase):
         ):
             require_active_profiler()
 
+    @staticmethod
+    def _library_normalizer() -> tuple[Path, dict[str, object]]:
+        root = Path(__file__).resolve().parents[1]
+        path = root / "containers/profiler/normalize-library-tree"
+        return path, runpy.run_path(
+            str(path), run_name="profiler_library_normalizer_test"
+        )
+
+    def test_library_normalizer_repairs_hostile_checkout_for_non_root_import(
+        self,
+    ) -> None:
+        _path, module = self._library_normalizer()
+        with tempfile.TemporaryDirectory() as directory:
+            context = Path(directory).resolve()
+            package = context / "kernel_research"
+            nested = package / "nested"
+            package.mkdir(mode=0o700)
+            nested.mkdir(mode=0o700)
+            (package / "__init__.py").write_text(
+                "VALUE = 'normalized'\n", encoding="utf-8"
+            )
+            (nested / "module.py").write_text("VALUE = 7\n", encoding="utf-8")
+            for path in (package / "__init__.py", nested / "module.py"):
+                path.chmod(0o600)
+            package.chmod(0o700)
+            nested.chmod(0o700)
+
+            result = module["normalize_library_tree"](
+                package,
+                owner_uid=os.getuid(),
+                owner_gid=os.getgid(),
+            )
+            replay = module["normalize_library_tree"](
+                package,
+                owner_uid=os.getuid(),
+                owner_gid=os.getgid(),
+            )
+            self.assertEqual(replay, result)
+            self.assertEqual(result["directory_count"], 2)
+            self.assertEqual(result["python_file_count"], 2)
+            for path in (package, nested):
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o555)
+            for path in (package / "__init__.py", nested / "module.py"):
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o444)
+            imported = subprocess.run(
+                [
+                    sys.executable,
+                    "-B",
+                    "-c",
+                    (
+                        "import kernel_research; "
+                        "from kernel_research.nested import module; "
+                        "assert kernel_research.VALUE == 'normalized'; "
+                        "assert module.VALUE == 7"
+                    ),
+                ],
+                cwd="/",
+                env={**os.environ, "PYTHONPATH": str(context)},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            self.assertFalse(any(package.rglob("__pycache__")))
+
+    def test_library_normalizer_rejects_symlink_and_non_regular_entries(
+        self,
+    ) -> None:
+        _path, module = self._library_normalizer()
+        fixtures = ("symlink", "fifo", "non-python")
+        for fixture in fixtures:
+            with (
+                self.subTest(fixture=fixture),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                package = Path(directory).resolve() / "kernel_research"
+                package.mkdir(mode=0o700)
+                (package / "__init__.py").write_text("", encoding="utf-8")
+                if fixture == "symlink":
+                    (package / "alias.py").symlink_to(package / "__init__.py")
+                    message = "symlink"
+                elif fixture == "fifo":
+                    if not hasattr(os, "mkfifo"):
+                        self.skipTest("FIFO creation is unavailable")
+                    os.mkfifo(package / "pipe.py", 0o600)
+                    message = "non-regular"
+                else:
+                    (package / "metadata.json").write_text("{}", encoding="utf-8")
+                    message = "non-Python"
+                with self.assertRaisesRegex(ValueError, message):
+                    module["normalize_library_tree"](
+                        package,
+                        owner_uid=os.getuid(),
+                        owner_gid=os.getgid(),
+                    )
+
+    def test_library_normalizer_hash_is_frozen_in_build_profile(self) -> None:
+        path, _module = self._library_normalizer()
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.assertEqual(
+            digest,
+            profiler_build_profile_snapshot()["library_filesystem"][
+                "normalizer"
+            ]["sha256"],
+        )
+
     def test_dockerfile_has_exact_offline_build_contract(self) -> None:
         root = Path(__file__).resolve().parents[1]
         dockerfile = (root / "containers/profiler/Dockerfile").read_text(
@@ -277,6 +423,11 @@ class ProfilerContractTests(unittest.TestCase):
             "/opt/kernel-research/bin/bounded-profiler",
             dockerfile,
         )
+        self.assertIn(
+            "COPY containers/profiler/normalize-library-tree "
+            "/opt/kernel-research/bin/normalize-library-tree",
+            dockerfile,
+        )
         self.assertNotIn("COPY --chmod", dockerfile)
         self.assertIn(
             "chmod 0555 /opt/kernel-research/bin/bounded-profiler",
@@ -284,6 +435,18 @@ class ProfilerContractTests(unittest.TestCase):
         )
         self.assertIn(
             "stat -c '%a %u:%g' /opt/kernel-research/bin/bounded-profiler",
+            dockerfile,
+        )
+        self.assertIn(
+            "stat -c '%a %u:%g' /opt/kernel-research/bin/normalize-library-tree",
+            dockerfile,
+        )
+        self.assertIn(
+            contract.PROFILER_LIBRARY_NORMALIZER_SHA256,
+            dockerfile,
+        )
+        self.assertIn(
+            "rm -f /opt/kernel-research/bin/normalize-library-tree",
             dockerfile,
         )
         self.assertIn('= "555 0:0"', dockerfile)
@@ -296,11 +459,30 @@ class ProfilerContractTests(unittest.TestCase):
         )
         self.assertLess(
             dockerfile.index(
+                "&& python /opt/kernel-research/bin/normalize-library-tree"
+            ),
+            dockerfile.index(
+                f"USER {contract.PROFILER_IMAGE_UID}:{contract.PROFILER_IMAGE_GID}"
+            ),
+        )
+        self.assertLess(
+            dockerfile.index(
                 f"USER {contract.PROFILER_IMAGE_UID}:{contract.PROFILER_IMAGE_GID}"
             ),
             dockerfile.index("verify-toolchain"),
         )
+        self.assertNotIn(
+            "verify-toolchain",
+            dockerfile[: dockerfile.index(
+                f"USER {contract.PROFILER_IMAGE_UID}:{contract.PROFILER_IMAGE_GID}"
+            )],
+        )
         self.assertIn('test "$(id -u):$(id -g)" = "1000:1000"', dockerfile)
+        self.assertIn(
+            "python -c 'import kernel_research; "
+            "import kernel_research.profiler_contract'",
+            dockerfile,
+        )
         self.assertIn('cd "${HOME}"', dockerfile)
         self.assertIn("HOME=/tmp/profile-home", dockerfile)
         self.assertIn("TRITON_CACHE_DIR=/tmp/triton-cache", dockerfile)
@@ -317,6 +499,7 @@ class ProfilerContractTests(unittest.TestCase):
             self.assertNotIn(forbidden, lowered)
         dockerignore = (root / ".dockerignore").read_text(encoding="utf-8")
         self.assertTrue(dockerignore.startswith("**\n"))
+        self.assertIn("!containers/profiler/normalize-library-tree", dockerignore)
         self.assertNotIn("README.md", dockerignore)
 
 

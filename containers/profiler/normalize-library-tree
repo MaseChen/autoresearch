@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""Normalize the copied profiler Python library tree at image build time."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+from typing import Sequence
+
+
+LIBRARY_ROOT = Path("/opt/kernel-research/lib/kernel_research")
+DIRECTORY_MODE = 0o555
+PYTHON_FILE_MODE = 0o444
+
+
+def _require_identity(value: int, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{label} must be a non-negative integer")
+    return value
+
+
+def _inspect_tree(root: Path) -> tuple[list[Path], list[Path]]:
+    if not root.is_absolute():
+        raise ValueError("library root must be absolute")
+    try:
+        root_stat = root.lstat()
+    except OSError as error:
+        raise ValueError("library root is unavailable") from error
+    if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+        raise ValueError("library root must be a real directory")
+    try:
+        if root.resolve(strict=True) != root:
+            raise ValueError("library root must not traverse a symlink alias")
+    except OSError as error:
+        raise ValueError("library root cannot be resolved") from error
+
+    directories = [root]
+    files: list[Path] = []
+
+    def raise_walk_error(error: OSError) -> None:
+        raise ValueError("library tree cannot be enumerated") from error
+
+    for directory, names, filenames in os.walk(
+        root,
+        topdown=True,
+        onerror=raise_walk_error,
+        followlinks=False,
+    ):
+        names.sort()
+        filenames.sort()
+        parent = Path(directory)
+        for name in names:
+            path = parent / name
+            value = path.lstat()
+            if stat.S_ISLNK(value.st_mode):
+                raise ValueError(f"library tree contains a symlink: {path}")
+            if not stat.S_ISDIR(value.st_mode):
+                raise ValueError(
+                    f"library tree contains a non-directory entry: {path}"
+                )
+            directories.append(path)
+        for name in filenames:
+            path = parent / name
+            value = path.lstat()
+            if stat.S_ISLNK(value.st_mode):
+                raise ValueError(f"library tree contains a symlink: {path}")
+            if not stat.S_ISREG(value.st_mode):
+                raise ValueError(
+                    f"library tree contains a non-regular entry: {path}"
+                )
+            if path.suffix != ".py":
+                raise ValueError(
+                    f"library tree contains a non-Python file: {path}"
+                )
+            files.append(path)
+    if not files or root / "__init__.py" not in files:
+        raise ValueError("library tree must contain package __init__.py")
+    return directories, files
+
+
+def _require_metadata(
+    paths: Sequence[Path],
+    *,
+    mode: int,
+    owner_uid: int,
+    owner_gid: int,
+    label: str,
+) -> None:
+    for path in paths:
+        value = path.lstat()
+        if (
+            stat.S_IMODE(value.st_mode) != mode
+            or value.st_uid != owner_uid
+            or value.st_gid != owner_gid
+        ):
+            raise ValueError(f"{label} metadata normalization failed: {path}")
+
+
+def _normalize_metadata(
+    path: Path,
+    *,
+    expected_directory: bool,
+    mode: int,
+    owner_uid: int,
+    owner_gid: int,
+) -> None:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    if expected_directory:
+        flags |= os.O_DIRECTORY
+    descriptor = os.open(path, flags)
+    try:
+        value = os.fstat(descriptor)
+        expected_type = (
+            stat.S_ISDIR(value.st_mode)
+            if expected_directory
+            else stat.S_ISREG(value.st_mode)
+        )
+        if not expected_type:
+            raise ValueError(f"library entry type changed before normalization: {path}")
+        os.fchown(descriptor, owner_uid, owner_gid)
+        os.fchmod(descriptor, mode)
+    finally:
+        os.close(descriptor)
+
+
+def normalize_library_tree(
+    root: Path,
+    *,
+    owner_uid: int,
+    owner_gid: int,
+) -> dict[str, object]:
+    """Validate, normalize and revalidate one copied Python package tree."""
+
+    selected_root = Path(root)
+    selected_uid = _require_identity(owner_uid, "owner_uid")
+    selected_gid = _require_identity(owner_gid, "owner_gid")
+    directories, files = _inspect_tree(selected_root)
+    for path in files:
+        _normalize_metadata(
+            path,
+            expected_directory=False,
+            mode=PYTHON_FILE_MODE,
+            owner_uid=selected_uid,
+            owner_gid=selected_gid,
+        )
+    for path in reversed(directories):
+        _normalize_metadata(
+            path,
+            expected_directory=True,
+            mode=DIRECTORY_MODE,
+            owner_uid=selected_uid,
+            owner_gid=selected_gid,
+        )
+    checked_directories, checked_files = _inspect_tree(selected_root)
+    if checked_directories != directories or checked_files != files:
+        raise ValueError("library tree changed during metadata normalization")
+    _require_metadata(
+        checked_directories,
+        mode=DIRECTORY_MODE,
+        owner_uid=selected_uid,
+        owner_gid=selected_gid,
+        label="directory",
+    )
+    _require_metadata(
+        checked_files,
+        mode=PYTHON_FILE_MODE,
+        owner_uid=selected_uid,
+        owner_gid=selected_gid,
+        label="Python file",
+    )
+    return {
+        "schema_version": 1,
+        "root": str(selected_root),
+        "owner": {"uid": selected_uid, "gid": selected_gid},
+        "directory_mode": "0555",
+        "python_file_mode": "0444",
+        "directory_count": len(checked_directories),
+        "python_file_count": len(checked_files),
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments:
+        raise ValueError("normalize-library-tree does not accept arguments")
+    if os.geteuid() != 0 or os.getegid() != 0:
+        raise ValueError("normalize-library-tree requires build-time root")
+    result = normalize_library_tree(
+        LIBRARY_ROOT,
+        owner_uid=0,
+        owner_gid=0,
+    )
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError) as error:
+        print(f"library filesystem contract violation: {error}", file=sys.stderr)
+        raise SystemExit(1) from error

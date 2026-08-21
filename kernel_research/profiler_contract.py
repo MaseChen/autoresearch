@@ -26,10 +26,10 @@ PROFILER_BASE_IMAGE = (
 )
 PROFILER_IMAGE_REPOSITORY = "ghcr.io/masechen/autoresearch-metax-profiler"
 PROFILER_PLATFORM = "linux/amd64"
-# A7 splits the private noexec /tmp from a bounded executable Triton JIT cache
-# after the A6 canary proved that Docker materialized the only tmpfs as noexec.
-# The rebuilt image must be qualified before a separate activation commit may
-# pin its RepoDigest. Activation values remain excluded from the build profile.
+# A8 normalizes the copied Python library tree after an umask-0077 checkout
+# proved that the legacy Docker builder preserves hostile context modes. The
+# rebuilt image must be qualified before a separate activation commit may pin
+# its RepoDigest. Activation values remain excluded from the build profile.
 PROFILER_IMAGE = (
     PROFILER_IMAGE_REPOSITORY
     + "@sha256:"
@@ -40,6 +40,18 @@ PROFILER_WORKER_REVISION = "metax-bounded-profiler-worker-v3"
 PROFILER_ENTRYPOINT = "/opt/kernel-research/bin/bounded-profiler"
 PROFILER_IMAGE_UID = 1000
 PROFILER_IMAGE_GID = 1000
+PROFILER_LIBRARY_ROOT = "/opt/kernel-research/lib/kernel_research"
+PROFILER_LIBRARY_NORMALIZER_CONTAINER_PATH = (
+    "/opt/kernel-research/bin/normalize-library-tree"
+)
+PROFILER_LIBRARY_NORMALIZER_INTERPRETER = "python"
+PROFILER_LIBRARY_NORMALIZER_SHA256 = (
+    "a64c60dc263489144af2a288b14c03d393b2eb5eb082e73bf54deb82de3e366f"
+)
+PROFILER_LIBRARY_OWNER_UID = 0
+PROFILER_LIBRARY_OWNER_GID = 0
+PROFILER_LIBRARY_DIRECTORY_MODE = "0555"
+PROFILER_LIBRARY_PYTHON_FILE_MODE = "0444"
 
 MCTRACER_VERSION = "3.5.3.20-ef9e10e"
 METAX_TOOLCHAIN_VERSION = "3.5.3"
@@ -180,6 +192,26 @@ def profiler_build_profile_snapshot() -> dict[str, Any]:
             "gid": PROFILER_IMAGE_GID,
             "runtime_binding": "exact",
             "host_process_binding": "exact",
+        },
+        "library_filesystem": {
+            "root": PROFILER_LIBRARY_ROOT,
+            "normalizer": {
+                "container_path": PROFILER_LIBRARY_NORMALIZER_CONTAINER_PATH,
+                "interpreter": PROFILER_LIBRARY_NORMALIZER_INTERPRETER,
+                "sha256": PROFILER_LIBRARY_NORMALIZER_SHA256,
+                "removed_after_use": True,
+            },
+            "owner": {
+                "uid": PROFILER_LIBRARY_OWNER_UID,
+                "gid": PROFILER_LIBRARY_OWNER_GID,
+            },
+            "directory_mode": PROFILER_LIBRARY_DIRECTORY_MODE,
+            "python_file_mode": PROFILER_LIBRARY_PYTHON_FILE_MODE,
+            "allowed_object_types": ["directory", "regular_file"],
+            "allowed_file_suffixes": [".py"],
+            "symlinks_allowed": False,
+            "normalization_phase": "before-runtime-user",
+            "non_root_import_probe": True,
         },
         "toolchain": {
             "mctracer": {

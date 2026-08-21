@@ -397,10 +397,54 @@ KNOWN_FAILURE、完整 immutable diagnostics、SETTLED action、RELEASED epoch 4
 节保持不变；任一身份或状态差异均失败关闭。归档 finalization/outbox/Campaign/budget/
 lease/attempts 后，才可 Admin update 到未来 A7 activation commit。
 
-A7 新镜像仍须从干净 build commit 构建、push、按 RepoDigest pull 并做 non-root、
-read-only、双 tmpfs、toolchain runtime 资格验证。随后创建只改 `active=true` 与最终
-RepoDigest 的直接子 activation commit。部署和完整主机回归通过后，必须使用全新
-Campaign ID 唯一运行一次 A7 canary；READY 前不得开始 soak。
+A7 known-failure finalizer 已完成并封存于：
+
+- 路径：
+  `/home/mx/autoresearch-evidence/profile-image-canary-a6-known-finalization-9362d96f-v1`
+- manifest digest：
+  `4880b3611d46ab6d59614b544d51fa130f279b3981094838d4e53ce8b9843686`
+
+A7 native build 随后在非 root toolchain probe 前失败。umask `0077` checkout 将 Git
+100644/100755 物化为 0600/0700，classic Docker `COPY` 保留这些模式，UID 1000 因而
+无法读取 root-owned `kernel_research/__init__.py`。失败归档为：
+
+- 路径：
+  `/home/mx/autoresearch-evidence/profiler-image-a7-9362d96f073e-build-v1`
+- manifest digest：
+  `2c0fd536e4f3076b57e492b2561ec89b18e5cbad044865d0e5cd31afa5b9ff39`
+
+该 build 没有 final tag、push、GPU 或数据库动作。不得 chmod A7 worktree 后重试，也
+不得复用失败中间镜像。
+
+### A8 deterministic library filesystem correction
+
+A8 必须是 A7 build commit 的直接子提交。它保持 worker v3、mcTracer、recipe、case、
+candidate、24 GiB memory、双 tmpfs 及 `kernel.py` 不变。Dockerfile 在切换到
+`USER 1000:1000` 前运行固定 build-only normalizer：
+
+- 只接受真实目录和 `.py` 普通文件；symlink、FIFO/device/socket 及其他文件失败关闭；
+- 使用 `O_NOFOLLOW` descriptor 固定 library tree 为 root:root；
+- 目录 mode 固定 `0555`，Python 文件固定 `0444`；
+- 完整重扫并复核后删除 build-only normalizer；
+- UID 1000 随后显式 import package，再运行 `verify-toolchain`。
+
+normalizer SHA、路径、对象白名单、ownership 和 mode 均进入 build profile。冻结的 A8
+inactive identity 为：
+
+- build profile digest：
+  `sha256:bea1abedea118afbaa6206f4826b042a5ce57773fcf73c1a8f2a99ead1c9e549`
+- inactive activation digest：
+  `sha256:d4b3c5923c3aac6f933580fe687e72413b17cd51650cc9a71cc315fb03c9d34c`
+- normalizer SHA-256：
+  `a64c60dc263489144af2a288b14c03d393b2eb5eb082e73bf54deb82de3e366f`
+
+服务器必须从全新干净 A8 worktree 原样构建，保留 checkout 的实际 umask 物化结果；
+不得在 build 前 chmod/chown source tree。classic builder 成功后，先检查 Image ID、
+label、platform、entrypoint 和 USER，再以 UID 1000 执行 package import 和
+`verify-toolchain`。只有本地资格通过后才可临时登录 GHCR、push、解析唯一 RepoDigest、
+按 digest pull 并重复资格验证。随后创建只改 `active=true` 与最终 RepoDigest 的直接子
+activation commit。部署和完整主机回归通过后，必须使用全新 Campaign ID 唯一运行一次
+A8 canary；READY 前不得开始 soak。
 
 对已经进入 `PAUSED_UNKNOWN_OUTCOME` 或 `PAUSED_HARD_FAILURE` 的 image-doctor，先部署
 包含恢复能力的代码会被活动 Campaign 管理锁拒绝。这种情况下只能从该修复提交的干净

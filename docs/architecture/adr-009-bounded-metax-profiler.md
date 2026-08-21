@@ -13,9 +13,12 @@ now been built, pushed, pulled by exact RepoDigest and independently qualified;
 the separate activation profile pins that image without changing build
 identity. Its one-shot canary then failed safely because Docker materialized
 the frozen `/tmp` tmpfs as `noexec`, preventing Triton JIT shared objects from
-being mapped. The failure is known, settled and released; A7 is an inactive
-build submission that retains a noexec parent and adds one bounded executable
-Triton-cache child mount. No A7 image or canary evidence exists yet.
+being mapped. The failure is known, settled and released, and its Campaign was
+terminalized by the trusted A7 finalizer without GPU or replay. The A7 native
+build then failed before its non-root toolchain probe because a checkout made
+under umask `0077` reached legacy Docker `COPY` as mode 0600/0700. A8 adds a
+build-only, fail-closed library filesystem normalization contract. No A8 image,
+activation or canary evidence exists yet.
 
 ## Context
 
@@ -147,6 +150,16 @@ deployment authority merely because it uses the same candidate and device.
     It invokes no doctor, GPU lock, Docker or evaluator and cannot mutate the
     action, lease, diagnostics, History or baseline. Any identity or state
     mismatch fails closed, and repeated calls only return the same proof.
+18. The copied Python library tree is normalized before the runtime `USER`
+    switch. A fixed build-only normalizer first rejects every symlink,
+    non-directory/non-regular object and non-`.py` file, then uses
+    `O_NOFOLLOW` descriptors to set root ownership, directory mode `0555` and
+    Python-file mode `0444`. It re-enumerates and revalidates the complete tree
+    before removal. The normalizer SHA-256, root, ownership, modes, allowed
+    object types and runtime import probe are part of the build profile. A
+    successful root build step is insufficient: after `USER 1000:1000`, the
+    Dockerfile must import the package and run `verify-toolchain`. Host checkout
+    modes therefore cannot change the image contract.
 
 ## Rejected alternatives
 
@@ -179,6 +192,10 @@ deployment authority merely because it uses the same candidate and device.
 - Reuse quarantine abandonment for a known failure. The A6 action has no
   quarantine and already has settled budget plus a released fence; creating a
   doctor or changing those rows would falsify its preserved outcome.
+- Repair the A7 checkout with `chmod` and retry the same build. Checkout umask
+  is not an image identity, and an operator-side repair is neither reviewable
+  nor reproducible. A8 makes the normalization an immutable build step and
+  changes the build digest.
 
 ## Validation and rollout
 
@@ -285,3 +302,29 @@ deployment authority merely because it uses the same candidate and device.
   `sha256:d5a3c6ef8f8e03276d6d75bec9517adf0fa79d3c8a48c218a5ec445f2fe57345`.
   The exact A6 known failure must be finalized before deploying a separately
   qualified A7 activation. A new Campaign ID is mandatory for the next canary.
+- The A6 finalizer was executed once from the exact A7 recovery code and its
+  immutable archive is
+  `/home/mx/autoresearch-evidence/profile-image-canary-a6-known-finalization-9362d96f-v1`
+  with manifest digest
+  `4880b3611d46ab6d59614b544d51fa130f279b3981094838d4e53ce8b9843686`.
+  The subsequent A7 native build from `9362d96f073e7a080720351b7922e544046a2ed0`
+  failed safely before the non-root toolchain probe. A checkout created under
+  umask `0077` materialized tracked Python files/directories as 0600/0700;
+  classic Docker `COPY` preserved those root-owned modes and UID 1000 could not
+  read `kernel_research/__init__.py`. No final tag, push, GPU or database action
+  occurred. The failure archive is
+  `/home/mx/autoresearch-evidence/profiler-image-a7-9362d96f073e-build-v1`
+  with manifest digest
+  `2c0fd536e4f3076b57e492b2561ec89b18e5cbad044865d0e5cd31afa5b9ff39`.
+  The failed intermediate image remains audit evidence and must not be reused.
+- A8 is a direct-child inactive build submission. It keeps the A7 dual-tmpfs,
+  worker v3, recipes, toolchain, candidate, 24 GiB memory cap and `kernel.py`
+  unchanged. It adds only deterministic build-time Python-tree normalization
+  plus the non-root import proof. Its build profile digest is
+  `sha256:bea1abedea118afbaa6206f4826b042a5ce57773fcf73c1a8f2a99ead1c9e549`;
+  its inactive activation digest is
+  `sha256:d4b3c5923c3aac6f933580fe687e72413b17cd51650cc9a71cc315fb03c9d34c`.
+  A new clean checkout with its original hostile umask must be built without
+  operator-side chmod. Only a successful native build, RepoDigest pull and
+  non-root runtime/toolchain qualification may authorize a separate activation
+  commit and a wholly new canary Campaign.
