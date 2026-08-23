@@ -26,16 +26,17 @@ PROFILER_BASE_IMAGE = (
 )
 PROFILER_IMAGE_REPOSITORY = "ghcr.io/masechen/autoresearch-metax-profiler"
 PROFILER_PLATFORM = "linux/amd64"
-# The independently built A8 Linux/amd64 image passed hostile-context
-# normalization, RepoDigest pull, Image ID comparison, and non-root/read-only
-# runtime/toolchain qualification. Activation values remain excluded from the
-# worker-visible build profile.
+# A9 replaces Docker's no-IPC mode with one explicit private, bounded shared
+# memory namespace after the A8 tracked mcTracer phase could not initialize its
+# RPC/shared-memory transport. The rebuilt image must be qualified before a
+# separate activation commit may pin its RepoDigest. Activation values remain
+# excluded from the worker-visible build profile.
 PROFILER_IMAGE = (
     PROFILER_IMAGE_REPOSITORY
-    + "@sha256:4a118982bc868b9e0acd50ae0d3af8b8"
-    + "db1768802a7b096e220f801b131a9c35"
+    + "@sha256:"
+    + "0" * 64
 )
-PROFILER_ACTIVE = True
+PROFILER_ACTIVE = False
 PROFILER_WORKER_REVISION = "metax-bounded-profiler-worker-v3"
 PROFILER_ENTRYPOINT = "/opt/kernel-research/bin/bounded-profiler"
 PROFILER_IMAGE_UID = 1000
@@ -109,6 +110,15 @@ PROFILE_HOST_MIN_TOTAL_MEMORY_BYTES = 24 * 1024**3
 PROFILE_HOST_MIN_AVAILABLE_MEMORY_BYTES = 24 * 1024**3
 PROFILE_CPU_LIMIT = 4.0
 PROFILE_PID_LIMIT = 128
+PROFILE_IPC_MODE = "private"
+PROFILE_SHARED_MEMORY_PATH = "/dev/shm"
+PROFILE_SHARED_MEMORY_SIZE = "1g"
+PROFILE_SHARED_MEMORY_SIZE_BYTES = 1024**3
+PROFILE_SHARED_MEMORY_OWNER_UID = 0
+PROFILE_SHARED_MEMORY_OWNER_GID = 0
+PROFILE_SHARED_MEMORY_MODE = "1777"
+PROFILE_HOST_IPC_ALLOWED = False
+PROFILE_CONTAINER_IPC_SHARING_ALLOWED = False
 PROFILE_RESOURCE_ID = "gpu1"
 PROFILE_LEASE_TTL_SECONDS = PROFILE_TIMEOUT_SECONDS + 30.0
 PROFILE_CANARY_LEASE_TTL_SECONDS = PROFILE_CANARY_WALL_SECONDS + 30.0
@@ -299,7 +309,27 @@ def profiler_build_profile_snapshot() -> dict[str, Any]:
         "isolation": {
             "read_only_root": True,
             "network": "none",
-            "ipc": "none",
+            "ipc": PROFILE_IPC_MODE,
+            "shared_memory": {
+                "path": PROFILE_SHARED_MEMORY_PATH,
+                "size": PROFILE_SHARED_MEMORY_SIZE,
+                "size_bytes": PROFILE_SHARED_MEMORY_SIZE_BYTES,
+                "owner": {
+                    "uid": PROFILE_SHARED_MEMORY_OWNER_UID,
+                    "gid": PROFILE_SHARED_MEMORY_OWNER_GID,
+                },
+                "mode": PROFILE_SHARED_MEMORY_MODE,
+                "runtime_user": {
+                    "uid": PROFILER_IMAGE_UID,
+                    "gid": PROFILER_IMAGE_GID,
+                    "required_access": "rwx",
+                },
+                "host_ipc_allowed": PROFILE_HOST_IPC_ALLOWED,
+                "container_ipc_sharing_allowed": (
+                    PROFILE_CONTAINER_IPC_SHARING_ALLOWED
+                ),
+                "qualification_probe": "uid1000-create-read-delete-v1",
+            },
             "cap_drop": "ALL",
             "no_new_privileges": True,
             "tmpfs": PROFILE_DOCKER_TMPFS,

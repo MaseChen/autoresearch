@@ -461,6 +461,51 @@ activation commit 只设置 `active=true` 和上述 RepoDigest，build digest �
 部署该 activation commit 后执行 static、doctor 和完整主机回归；全部通过后，必须使用
 全新 Campaign ID 唯一运行一次 A8 canary。READY 前不得开始 soak。
 
+### A9 private bounded IPC correction
+
+A8 activation `076dd78f230c1eb2179d3bb2608474c6ab5c3bda` 已完成部署，static、doctor
+和 519 项正式主机回归通过。唯一 canary
+`profile-image-canary-a8-20260823T173630Z` 的 compile 与十次 warmup 成功，正确率
+为 1.0。tracked mcTracer 返回 0、无 timeout/termination signal，但输出
+`ftruncate`/`mmap` bad file descriptor 与 `Rpc connect timeout!`，且没有 target
+sentinel 或 trace。它仍是 UNKNOWN：action RESERVED，gpu1 epoch 5 QUARANTINED，禁止
+重放或手工清理。服务器交接只提供了缩写 manifest `7ea8efe5…965ad`；abandonment 归档
+前必须从封存证据中复制并核对完整 64-hex digest，不得把缩写写入正式manifest。
+
+A9 只改变 IPC/shared-memory Build Profile：
+
+- Docker argv 固定 `--ipc=private --shm-size 1g`；
+- `/dev/shm` 预期为 root:root、mode `1777`、容量 `1073741824` bytes；
+- runtime UID/GID 1000 必须通过 create/read/delete 资格探针；
+- host、shareable、container IPC namespace 全部禁止；
+- 1 GiB shared memory 仍计入并受 24 GiB memory hard limit约束；
+- CLI 不接受 ipc、shm-size、path、mode 或 owner 参数。
+
+A9 保持 worker v3、mcTracer exit/sentinel/trace 规则、recipe、candidate、toolchain、双
+tmpfs、memory cap、Dockerfile、normalizer 与 `kernel.py` 不变。冻结的 inactive identity：
+
+- build profile digest：
+  `sha256:560b4a3176a5b77c324b0453d3032a05700c2e7dae48c46be4cb9c0817ef7e7c`
+- inactive activation digest：
+  `sha256:f1e4d0940d47ab25601f8e7853171a1eccb1d6b7bef099bf7022a6eb1f7c0282`
+
+部署任何 A9代码前，必须从精确A8 activation detached worktree运行一次：
+
+```bash
+PYTHONPATH="$A8_RECOVERY_WORKTREE" "$HOST_PYTHON" -m kernel_research \
+  profile image-doctor-abandon \
+  --config "$AUTORESEARCH_PRO_CONFIG" \
+  --database "$AUTORESEARCH_RUNTIME/campaign/campaign.sqlite3" \
+  --campaign-id "profile-image-canary-a8-20260823T173630Z"
+```
+
+该动作只能由fresh trusted doctor解除epoch 5隔离并终态化旧Campaign；不得重放或结算
+旧action，也不得改变其UNKNOWN/RESERVED/diagnostic证据。完整归档abandonment、doctor、
+budget、lease、attempts和Campaign终态后，才可部署A9 build能力。A9镜像必须重新native
+build、push、RepoDigest pull并执行UID1000/private IPC/1 GiB容量资格验证；随后创建独立
+activation commit。部署和主机回归通过后，用全新Campaign ID唯一运行一次A9 canary。
+只有READY才能从零启动24/72/168小时soak。
+
 对已经进入 `PAUSED_UNKNOWN_OUTCOME` 或 `PAUSED_HARD_FAILURE` 的 image-doctor，先部署
 包含恢复能力的代码会被活动 Campaign 管理锁拒绝。这种情况下只能从该修复提交的干净
 detached recovery worktree 运行以下唯一入口，仍然读取正式配置和 canonical Campaign

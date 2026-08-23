@@ -77,6 +77,9 @@ from .profiler_contract import (
     PROFILE_HOST_MEMORY_SOURCE,
     PROFILE_HOST_MIN_AVAILABLE_MEMORY_BYTES,
     PROFILE_HOST_MIN_TOTAL_MEMORY_BYTES,
+    PROFILE_CONTAINER_IPC_SHARING_ALLOWED,
+    PROFILE_HOST_IPC_ALLOWED,
+    PROFILE_IPC_MODE,
     PROFILE_LEASE_TTL_SECONDS,
     PROFILE_MEMORY_LIMIT,
     PROFILE_OUTCOME_CONTAINER_PATH,
@@ -88,6 +91,12 @@ from .profiler_contract import (
     PROFILE_RESOURCE_ID,
     PROFILE_RESULT_CONTAINER_PATH,
     PROFILE_RESULT_LIMIT_BYTES,
+    PROFILE_SHARED_MEMORY_MODE,
+    PROFILE_SHARED_MEMORY_OWNER_GID,
+    PROFILE_SHARED_MEMORY_OWNER_UID,
+    PROFILE_SHARED_MEMORY_PATH,
+    PROFILE_SHARED_MEMORY_SIZE,
+    PROFILE_SHARED_MEMORY_SIZE_BYTES,
     PROFILE_TIMEOUT_SECONDS,
     PROFILE_TRACE_CONTAINER_PATH,
     PROFILE_TRITON_CACHE_TMPFS,
@@ -1001,6 +1010,28 @@ def _require_profile_runtime_user(config: ControllerConfig) -> None:
         )
 
 
+def _require_profile_ipc_contract() -> None:
+    try:
+        shared_memory_mode = int(PROFILE_SHARED_MEMORY_MODE, 8)
+    except (TypeError, ValueError) as error:
+        raise ValueError("bounded profiler shared memory mode is invalid") from error
+    if (
+        PROFILE_IPC_MODE != "private"
+        or PROFILE_HOST_IPC_ALLOWED is not False
+        or PROFILE_CONTAINER_IPC_SHARING_ALLOWED is not False
+        or PROFILE_SHARED_MEMORY_PATH != "/dev/shm"
+        or PROFILE_SHARED_MEMORY_SIZE != "1g"
+        or PROFILE_SHARED_MEMORY_SIZE_BYTES != 1024**3
+        or PROFILE_SHARED_MEMORY_OWNER_UID != 0
+        or PROFILE_SHARED_MEMORY_OWNER_GID != 0
+        or shared_memory_mode != 0o1777
+        or shared_memory_mode & 0o007 != 0o007
+    ):
+        raise ValueError(
+            "bounded profiler requires exact private bounded shared memory"
+        )
+
+
 def _profile_argv(
     config: ControllerConfig,
     *,
@@ -1013,6 +1044,7 @@ def _profile_argv(
     lease: ResourceLease | None,
 ) -> tuple[str, ...]:
     _require_profile_runtime_user(config)
+    _require_profile_ipc_contract()
     if subject.campaign_id is None:
         raise ValueError("Campaign profiling requires a Campaign-owned subject")
     argv = [
@@ -1029,7 +1061,9 @@ def _profile_argv(
         "--init",
         "--read-only",
         "--network=none",
-        "--ipc=none",
+        f"--ipc={PROFILE_IPC_MODE}",
+        "--shm-size",
+        PROFILE_SHARED_MEMORY_SIZE,
         "--user",
         f"{config.container_uid}:{config.container_gid}",
         "--group-add",

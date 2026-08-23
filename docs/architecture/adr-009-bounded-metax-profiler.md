@@ -20,7 +20,11 @@ under umask `0077` reached legacy Docker `COPY` as mode 0600/0700. A8 adds a
 build-only, fail-closed library filesystem normalization contract. Its native
 image has now been built, pushed, pulled by exact RepoDigest and independently
 qualified; the separate activation profile pins that image without changing
-build identity. No A8 canary evidence exists yet.
+build identity. Its one-shot canary completed compile and ten correct warmups,
+then lost trusted completion when mcTracer could not initialize shared-memory
+RPC under Docker `--ipc=none`. A9 replaces only that isolation axis with an
+explicit private, bounded shared-memory namespace. No A9 image or canary
+evidence exists yet.
 
 ## Context
 
@@ -162,6 +166,15 @@ deployment authority merely because it uses the same candidate and device.
     successful root build step is insufficient: after `USER 1000:1000`, the
     Dockerfile must import the package and run `verify-toolchain`. Host checkout
     modes therefore cannot change the image contract.
+19. Profiler containers use exactly one private IPC namespace and one bounded
+    `/dev/shm`: Docker argv contains `--ipc=private --shm-size 1g`. Host IPC,
+    shareable IPC and container namespace reuse are permanently forbidden. The
+    expected mount is root-owned mode `1777`, so the exact UID/GID 1000 runtime
+    can create, read and delete private RPC objects; its capacity is exactly
+    1 GiB and remains inside the 24 GiB container memory ceiling. IPC mode,
+    size, bytes, path, ownership, mode, runtime identity and qualification probe
+    are worker-visible Build Profile identity and soak invariants. No CLI can
+    override them.
 
 ## Rejected alternatives
 
@@ -198,6 +211,11 @@ deployment authority merely because it uses the same candidate and device.
   is not an image identity, and an operator-side repair is neither reviewable
   nor reproducible. A8 makes the normalization an immutable build step and
   changes the build digest.
+- Use host, shareable or another container's IPC namespace. Those modes create
+  cross-workload authority and can leak profiler RPC/shared-memory state. A9
+  permits only a fresh private namespace. Retaining `--ipc=none` is also
+  rejected because the A8 tracked probe demonstrated that mcTracer cannot
+  establish its required RPC/shared-memory transport under that mode.
 
 ## Validation and rollout
 
@@ -344,4 +362,24 @@ deployment authority merely because it uses the same candidate and device.
   The separate activation profile changes only the active bit and exact
   RepoDigest, preserves the build digest, and has activation digest
   `sha256:073f667748fc7d867e7333988c5daed7f574a0072e11e8bf731ded0e6b0138da`.
-  Deployment verification and a wholly new canary Campaign are still required.
+  Deployment verification completed with static, doctor and 519 host tests.
+- The one-shot A8 canary `profile-image-canary-a8-20260823T173630Z`
+  completed compile plus ten hardware warmups with correctness 1.0. The tracked
+  mcTracer subprocess returned 0 without timeout or signal, but emitted
+  `ftruncate`/`mmap` bad-file-descriptor errors and `Rpc connect timeout!`; it
+  produced neither target sentinel nor trace. Completion therefore remains
+  UNKNOWN, the action remains RESERVED, and gpu1 fencing epoch 5 remains
+  QUARANTINED. It must not be replayed or manually cleaned. The full sealed
+  manifest digest is retained with the server evidence and must be copied
+  verbatim into the abandonment archive before A9 deployment.
+- A9 changes only the IPC/shared-memory isolation contract. It restores
+  `active=false` and the zero RepoDigest, keeps worker v3, mcTracer rules,
+  recipes, candidate, toolchain, memory, dual tmpfs and `kernel.py` unchanged,
+  and records build profile digest
+  `sha256:560b4a3176a5b77c324b0453d3032a05700c2e7dae48c46be4cb9c0817ef7e7c`
+  plus inactive activation digest
+  `sha256:f1e4d0940d47ab25601f8e7853171a1eccb1d6b7bef099bf7022a6eb1f7c0282`.
+  Before any A9 deployment, the exact activated A8 recovery worktree must run
+  the trusted image-doctor abandonment for epoch 5 and archive the unchanged
+  UNKNOWN/RESERVED diagnostics. A9 then requires a new image, separate
+  activation commit and wholly new canary Campaign.

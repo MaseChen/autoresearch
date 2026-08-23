@@ -53,26 +53,31 @@ class ProfilerContractTests(unittest.TestCase):
         "sha256:bea1abedea118afbaa6206f4826b042a5"
         "ce57773fcf73c1a8f2a99ead1c9e549"
     )
-    ACTIVATION_PROFILE_DIGEST = (
-        "sha256:073f667748fc7d867e7333988c5daed7f"
-        "574a0072e11e8bf731ded0e6b0138da"
+    A9_BUILD_PROFILE_DIGEST = (
+        "sha256:560b4a3176a5b77c324b0453d3032a057"
+        "00c2e7dae48c46be4cb9c0817ef7e7c"
     )
-    A8_IMAGE = (
-        "ghcr.io/masechen/autoresearch-metax-profiler@sha256:"
-        "4a118982bc868b9e0acd50ae0d3af8b8"
-        "db1768802a7b096e220f801b131a9c35"
+    ACTIVATION_PROFILE_DIGEST = (
+        "sha256:f1e4d0940d47ab25601f8e7853171a1e"
+        "ccb1d6b7bef099bf7022a6eb1f7c0282"
+    )
+    FUTURE_A9_IMAGE = (
+        "ghcr.io/masechen/autoresearch-metax-profiler@sha256:" + "a" * 64
     )
 
-    def test_a8_activation_is_exact_and_preserves_build_identity(self) -> None:
+    def test_submit_a9_profile_is_exact_and_inactive(self) -> None:
         build = profiler_build_profile_snapshot()
         activation = profiler_activation_profile_snapshot()
-        self.assertTrue(PROFILER_ACTIVE)
+        self.assertFalse(PROFILER_ACTIVE)
         self.assertEqual(build["base_image"], PROFILER_BASE_IMAGE)
         self.assertNotIn("active", build)
         self.assertNotIn("profiler_image", build)
-        self.assertEqual(PROFILER_IMAGE, self.A8_IMAGE)
+        self.assertEqual(
+            PROFILER_IMAGE,
+            PROFILER_IMAGE_REPOSITORY + "@sha256:" + "0" * 64,
+        )
         self.assertEqual(activation["profiler_image"], PROFILER_IMAGE)
-        self.assertTrue(activation["active"])
+        self.assertFalse(activation["active"])
         self.assertTrue(PROFILER_IMAGE.startswith(PROFILER_IMAGE_REPOSITORY))
         self.assertEqual(build["worker_revision"], PROFILER_WORKER_REVISION)
         self.assertEqual(
@@ -80,16 +85,19 @@ class ProfilerContractTests(unittest.TestCase):
             PROFILE_COLLECTION_SCHEMA_VERSION,
         )
         self.assertEqual(PROFILER_BUILD_PROFILE_DIGEST, canonical_sha256(build))
-        self.assertEqual(PROFILER_BUILD_PROFILE_DIGEST, self.A8_BUILD_PROFILE_DIGEST)
+        self.assertEqual(PROFILER_BUILD_PROFILE_DIGEST, self.A9_BUILD_PROFILE_DIGEST)
         self.assertNotEqual(
             PROFILER_BUILD_PROFILE_DIGEST,
-            self.A7_BUILD_PROFILE_DIGEST,
+            self.A8_BUILD_PROFILE_DIGEST,
         )
-        a7_projection = dict(build)
-        self.assertIsNotNone(a7_projection.pop("library_filesystem"))
+        a8_projection = json.loads(json.dumps(build))
+        a8_projection["isolation"]["ipc"] = "none"
+        self.assertIsNotNone(
+            a8_projection["isolation"].pop("shared_memory")
+        )
         self.assertEqual(
-            canonical_sha256(a7_projection),
-            self.A7_BUILD_PROFILE_DIGEST,
+            canonical_sha256(a8_projection),
+            self.A8_BUILD_PROFILE_DIGEST,
         )
         self.assertEqual(
             PROFILER_ACTIVATION_PROFILE_DIGEST,
@@ -99,9 +107,10 @@ class ProfilerContractTests(unittest.TestCase):
             PROFILER_ACTIVATION_PROFILE_DIGEST,
             self.ACTIVATION_PROFILE_DIGEST,
         )
-        self.assertIsNone(require_active_profiler())
+        with self.assertRaisesRegex(ValueError, "inactive"):
+            require_active_profiler()
 
-    def test_a8_worker_echo_survives_activation_only_change(self) -> None:
+    def test_a9_worker_echo_survives_future_activation_only_change(self) -> None:
         request = ProfilerWorkerTests._request()
         commit_a_echo = request.echo()
         commit_a_build = profiler_build_profile_snapshot()
@@ -112,7 +121,7 @@ class ProfilerContractTests(unittest.TestCase):
         commit_b_build = profiler_build_profile_snapshot()
         commit_b_activation = profiler_activation_profile_snapshot(
             active=True,
-            profiler_image=self.A8_IMAGE,
+            profiler_image=self.FUTURE_A9_IMAGE,
         )
         self.assertEqual(commit_b_build, commit_a_build)
         self.assertEqual(
@@ -129,7 +138,7 @@ class ProfilerContractTests(unittest.TestCase):
         )
         self.assertTrue(commit_b_activation["active"])
         self.assertEqual(
-            commit_b_activation["profiler_image"], self.A8_IMAGE
+            commit_b_activation["profiler_image"], self.FUTURE_A9_IMAGE
         )
         self.assertNotIn("profiler_image", commit_a_echo)
         self.assertNotIn("active", commit_a_echo)
@@ -247,6 +256,26 @@ class ProfilerContractTests(unittest.TestCase):
         self.assertEqual(build["limits"]["pids"], 128)
         self.assertTrue(build["isolation"]["read_only_root"])
         self.assertEqual(build["isolation"]["network"], "none")
+        self.assertEqual(build["isolation"]["ipc"], "private")
+        self.assertEqual(
+            build["isolation"]["shared_memory"],
+            {
+                "path": "/dev/shm",
+                "size": "1g",
+                "size_bytes": 1024**3,
+                "owner": {"uid": 0, "gid": 0},
+                "mode": "1777",
+                "runtime_user": {
+                    "uid": 1000,
+                    "gid": 1000,
+                    "required_access": "rwx",
+                },
+                "host_ipc_allowed": False,
+                "container_ipc_sharing_allowed": False,
+                "qualification_probe": "uid1000-create-read-delete-v1",
+            },
+        )
+        self.assertEqual(int(build["isolation"]["shared_memory"]["mode"], 8) & 7, 7)
         self.assertEqual(
             build["isolation"]["tmpfs"],
             "/tmp:rw,nosuid,nodev,noexec,size=64m,mode=700,uid=1000,gid=1000",

@@ -807,6 +807,29 @@ class BoundedProfilingTests(unittest.TestCase):
         )
         self.uid = "00000000-0000-4000-8000-000000000099"
 
+    def test_private_bounded_ipc_contract_rejects_every_unsafe_variant(self):
+        profiling._require_profile_ipc_contract()
+        invalid = (
+            ("PROFILE_IPC_MODE", "none"),
+            ("PROFILE_IPC_MODE", "host"),
+            ("PROFILE_IPC_MODE", "shareable"),
+            ("PROFILE_HOST_IPC_ALLOWED", True),
+            ("PROFILE_CONTAINER_IPC_SHARING_ALLOWED", True),
+            ("PROFILE_SHARED_MEMORY_PATH", "/host/dev/shm"),
+            ("PROFILE_SHARED_MEMORY_SIZE", "2g"),
+            ("PROFILE_SHARED_MEMORY_SIZE_BYTES", 2 * 1024**3),
+            ("PROFILE_SHARED_MEMORY_OWNER_UID", 1000),
+            ("PROFILE_SHARED_MEMORY_OWNER_GID", 1000),
+            ("PROFILE_SHARED_MEMORY_MODE", "0700"),
+        )
+        for field, value in invalid:
+            with (
+                self.subTest(field=field, value=value),
+                mock.patch.object(profiling, field, value),
+                self.assertRaisesRegex(ValueError, "private bounded"),
+            ):
+                profiling._require_profile_ipc_contract()
+
     def _create_campaign(
         self, campaign_id: str, *, wall_ms: int = 20_000_000, gpu_ms: int = 20_000_000
     ) -> str:
@@ -1253,6 +1276,15 @@ class BoundedProfilingTests(unittest.TestCase):
         self.assertIn("--pull=never", argv)
         self.assertIn("--network=none", argv)
         self.assertIn("--read-only", argv)
+        self.assertEqual(
+            [value for value in argv if value.startswith("--ipc=")],
+            ["--ipc=private"],
+        )
+        self.assertNotIn("--ipc=none", argv)
+        self.assertNotIn("--ipc=host", argv)
+        self.assertNotIn("--ipc=shareable", argv)
+        self.assertEqual(argv.count("--shm-size"), 1)
+        self.assertEqual(argv[argv.index("--shm-size") + 1], "1g")
         self.assertIn("no-new-privileges", argv)
         self.assertEqual(
             argv[argv.index("--user") + 1],
@@ -1416,6 +1448,11 @@ class BoundedProfilingTests(unittest.TestCase):
             mounted,
             [f"{device}:{device}:rwm" for device in GPU1_DEVICES],
         )
+        self.assertEqual(
+            [value for value in argv if value.startswith("--ipc=")],
+            ["--ipc=private"],
+        )
+        self.assertEqual(argv[argv.index("--shm-size") + 1], "1g")
         self.assertEqual(
             [
                 argv[index + 1]
@@ -2196,6 +2233,8 @@ class BoundedProfilingTests(unittest.TestCase):
         self.assertFalse(hasattr(args, "timeout"))
         self.assertFalse(hasattr(args, "memory"))
         self.assertFalse(hasattr(args, "memory_swap"))
+        self.assertFalse(hasattr(args, "ipc"))
+        self.assertFalse(hasattr(args, "shm_size"))
 
         with mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(
             SystemExit
@@ -2427,7 +2466,7 @@ class BoundedProfilingTests(unittest.TestCase):
         self.assertEqual(args.campaign_id, "profiler-canary-1")
         for field in (
             "image", "candidate", "case", "device", "timeout", "mctracer",
-            "memory", "memory_swap",
+            "memory", "memory_swap", "ipc", "shm_size",
         ):
             self.assertFalse(hasattr(args, field))
 
@@ -2447,6 +2486,7 @@ class BoundedProfilingTests(unittest.TestCase):
         for field in (
             "image", "candidate", "case", "device", "timeout", "mctracer",
             "resource_id", "doctor_digest", "reason", "memory", "memory_swap",
+            "ipc", "shm_size",
         ):
             self.assertFalse(hasattr(abandon, field))
 
@@ -2469,6 +2509,7 @@ class BoundedProfilingTests(unittest.TestCase):
         for field in (
             "image", "candidate", "case", "device", "timeout", "mctracer",
             "resource_id", "doctor_digest", "reason", "memory", "memory_swap",
+            "ipc", "shm_size",
         ):
             self.assertFalse(hasattr(finalize_known, field))
 
