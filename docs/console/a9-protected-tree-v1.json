@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "source_commit": "562d272aecf935c662abdc987df3aa5531328b73",
+  "a9": {
+    "profiler_image": "ghcr.io/masechen/autoresearch-metax-profiler@sha256:f3f83880c9a0461156aa0c625fb5b0bb4fbf1cba1438a61271264835514f1d27",
+    "build_profile_digest": "sha256:560b4a3176a5b77c324b0453d3032a05700c2e7dae48c46be4cb9c0817ef7e7c",
+    "activation_profile_digest": "sha256:85bd834ca84dd10d7567dd76c94864cb1d68727c027e1422158daf332a1b8120",
+    "worker_revision": "metax-bounded-profiler-worker-v3",
+    "canary_evidence_manifest_digest": "sha256:2215de03977289c3927fd6b772c8996056f2b83b28b56261efb68ccfc5a174ae"
+  },
+  "files": {
+    "kernel.py": "sha256:3c4f2ebaa22b8a347be8eec21e9a803848d87681f69679f11ec367ddf06ae633",
+    "containers/profiler/Dockerfile": "sha256:a04c715d63f58312e16304c555e7125a5112545a0692dd53377882103ab37b29",
+    "containers/profiler/bounded-profiler": "sha256:93d00de4ba7ef10347c6f9cd5d0ae3a9df308c89d371ac5167f6f9a02fa49bcf",
+    "containers/profiler/normalize-library-tree": "sha256:a64c60dc263489144af2a288b14c03d393b2eb5eb082e73bf54deb82de3e366f",
+    "kernel_research/profiler_contract.py": "sha256:e1045940d2edc197d7c67d5cd577f66f836110f3cdbad36e9d13b116aa675311",
+    "kernel_research/profiler_worker.py": "sha256:6325c432c1372d011b7a8dbc21cb00cf4cf6ffaede43b9afcb9430f1e93d1c0c",
+    "kernel_research/profiling.py": "sha256:bc984e09aa2a16c521d1972aa482ced193bba53b7413d61b2691cda61c6db85f",
+    "kernel_research/campaign/soak.py": "sha256:6908e22ddb07dc9ec5883fd53e21652e693114b30f6a88a8664eb0e1a8c38150",
+    "kernel_research/campaign/soak_collector.py": "sha256:52babe9024bff3bc4ff8a5ac37a347a38ca8557cb07d7b1013e6af9685f253c5"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kernel-research.local/schema/console-agent-v1.json",
+  "title": "Autoresearch Console Agent V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_id", "operation", "payload"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "operation": {
+      "enum": ["handshake", "snapshot", "subscribe", "prepare", "execute", "reconcile"]
+    },
+    "payload": {"type": "object", "maxProperties": 16}
+  }
+}
