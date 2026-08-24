@@ -13,8 +13,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+console = [
+    "fastapi==0.141.1",
+    "uvicorn==0.52.4",
+]
 dev = [
     "coverage[toml]>=7.6",
+    "httpx==0.28.1",
 ]
 
 [project.scripts]
@@ -22,9 +27,15 @@ kernel-research = "kernel_research.cli:main"
 kernel-autoresearch = "kernel_research.autorun.cli:main"
 kernel-autoresearch-admin = "kernel_research.autorun.admin:main"
 kernel-autoresearch-campaign = "kernel_research.campaign.cli:main"
+kernel-autoresearch-console-agent = "kernel_research.console.agent:main"
+kernel-autoresearch-console = "kernel_research.console.gateway_cli:main"
+kernel-autoresearch-console-release = "kernel_research.console.release:main"
 
 [tool.setuptools.packages.find]
 include = ["kernel_research*"]
+
+[tool.setuptools.package-data]
+"kernel_research.console" = ["static/**/*"]
 
 [tool.coverage.run]
 branch = true
