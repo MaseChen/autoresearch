@@ -92,6 +92,40 @@ def _asset_manifest(static_dir: Path) -> dict[str, Any]:
     return {**material, "asset_manifest_digest": canonical_sha256(material)}
 
 
+def _require_clean_paths(repository: Path, paths: list[Path]) -> None:
+    relative: list[str] = []
+    for path in paths:
+        selected = path if path.is_absolute() else repository / path
+        try:
+            value = selected.relative_to(repository).as_posix()
+        except ValueError as exc:
+            raise ValueError("release identity path escapes the repository") from exc
+        if value not in relative:
+            relative.append(value)
+    process = subprocess.run(
+        [
+            "git",
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            *relative,
+        ],
+        cwd=repository,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        check=False,
+    )
+    if (
+        process.returncode != 0
+        or len(process.stdout) > 64 * 1024
+        or process.stdout.strip()
+    ):
+        raise ValueError("Console release identity paths are not clean at HEAD")
+
+
 def build_inheritance_proof(
     repository: Path,
     *,
@@ -102,6 +136,20 @@ def build_inheritance_proof(
     if not repository.is_dir() or repository.is_symlink():
         raise ValueError("repository must be a canonical directory")
     manifest = _manifest(protected_manifest)
+    protected_paths = [repository / relative for relative in manifest["files"]]
+    _require_clean_paths(
+        repository,
+        [
+            Path("console"),
+            Path("docs/adr/ADR-006-autoresearch-console-v1.md"),
+            Path("docs/console"),
+            Path("kernel_research/autorun/controller.py"),
+            Path("kernel_research/console"),
+            Path("pyproject.toml"),
+            static_dir,
+            *protected_paths,
+        ],
+    )
     source_commit = manifest["source_commit"]
     current_commit = _git(repository, "rev-parse", "HEAD")
     ancestor = subprocess.run(
