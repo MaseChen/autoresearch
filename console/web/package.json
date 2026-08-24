@@ -1,0 +1,54 @@
+{
+  "name": "@kernel-research/console-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.11.0 <25"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --pretty false",
+    "lint": "eslint . --max-warnings 0",
+    "test": "vitest run --coverage",
+    "test:unit": "vitest run",
+    "storybook": "storybook dev -p 6006",
+    "build-storybook": "storybook build",
+    "test:e2e": "playwright test",
+    "release-preflight": "node ./scripts/release-preflight.mjs"
+  },
+  "dependencies": {
+    "@codemirror/lang-python": "6.2.1",
+    "@tanstack/react-query": "5.102.2",
+    "@xyflow/react": "12.11.3",
+    "antd": "6.5.4",
+    "codemirror": "6.0.2",
+    "echarts": "6.1.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.62.1",
+    "@storybook/addon-a11y": "10.5.10",
+    "@storybook/react-vite": "10.5.10",
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.6",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "@vitejs/plugin-react": "6.1.0",
+    "@vitest/coverage-v8": "4.1.11",
+    "eslint": "10.9.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.4",
+    "jsdom": "30.0.1",
+    "storybook": "10.5.10",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.67.0",
+    "vite": "8.1.5",
+    "vitest": "4.1.11"
+  }
+}

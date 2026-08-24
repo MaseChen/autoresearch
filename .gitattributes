@@ -1,0 +1,4 @@
+# Vite bundles vendor language grammars whose template literals intentionally
+# contain whitespace-only lines.  Scope the exception to immutable generated
+# Console assets; source files retain the repository's normal whitespace checks.
+kernel_research/console/static/** -whitespace
