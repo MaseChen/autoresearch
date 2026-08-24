@@ -26,17 +26,16 @@ PROFILER_BASE_IMAGE = (
 )
 PROFILER_IMAGE_REPOSITORY = "ghcr.io/masechen/autoresearch-metax-profiler"
 PROFILER_PLATFORM = "linux/amd64"
-# A9 replaces Docker's no-IPC mode with one explicit private, bounded shared
-# memory namespace after the A8 tracked mcTracer phase could not initialize its
-# RPC/shared-memory transport. The rebuilt image must be qualified before a
-# separate activation commit may pin its RepoDigest. Activation values remain
-# excluded from the worker-visible build profile.
+# The independently built A9 Linux/amd64 image passed exact RepoDigest pull,
+# Image ID comparison, non-root/read-only runtime qualification and the private
+# bounded shared-memory probe. Activation values remain excluded from the
+# worker-visible build profile.
 PROFILER_IMAGE = (
     PROFILER_IMAGE_REPOSITORY
-    + "@sha256:"
-    + "0" * 64
+    + "@sha256:f3f83880c9a0461156aa0c625fb5b0bb"
+    + "4fbf1cba1438a61271264835514f1d27"
 )
-PROFILER_ACTIVE = False
+PROFILER_ACTIVE = True
 PROFILER_WORKER_REVISION = "metax-bounded-profiler-worker-v3"
 PROFILER_ENTRYPOINT = "/opt/kernel-research/bin/bounded-profiler"
 PROFILER_IMAGE_UID = 1000

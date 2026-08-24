@@ -468,9 +468,12 @@ A8 activation `076dd78f230c1eb2179d3bb2608474c6ab5c3bda` 已完成部署，stati
 `profile-image-canary-a8-20260823T173630Z` 的 compile 与十次 warmup 成功，正确率
 为 1.0。tracked mcTracer 返回 0、无 timeout/termination signal，但输出
 `ftruncate`/`mmap` bad file descriptor 与 `Rpc connect timeout!`，且没有 target
-sentinel 或 trace。它仍是 UNKNOWN：action RESERVED，gpu1 epoch 5 QUARANTINED，禁止
-重放或手工清理。服务器交接只提供了缩写 manifest `7ea8efe5…965ad`；abandonment 归档
-前必须从封存证据中复制并核对完整 64-hex digest，不得把缩写写入正式manifest。
+sentinel 或 trace。它保持 UNKNOWN/action RESERVED，且未被重放或手工清理。完整 canary
+manifest 为
+`7ea8efe5bbea06187898c840dc4d0e41f1f51e316d68cb2014afb8ed698965ad`。
+精确 A8 recovery code 已完成可信 abandonment，在保留 UNKNOWN/RESERVED/diagnostics 的
+同时解除隔离并终态化 Campaign；manifest 为
+`f1d7450f90974564bb02adc66e0643309ad521f98b535fecb6053669efa19f3c`。
 
 A9 只改变 IPC/shared-memory Build Profile：
 
@@ -482,14 +485,28 @@ A9 只改变 IPC/shared-memory Build Profile：
 - CLI 不接受 ipc、shm-size、path、mode 或 owner 参数。
 
 A9 保持 worker v3、mcTracer exit/sentinel/trace 规则、recipe、candidate、toolchain、双
-tmpfs、memory cap、Dockerfile、normalizer 与 `kernel.py` 不变。冻结的 inactive identity：
+tmpfs、memory cap、Dockerfile、normalizer 与 `kernel.py` 不变。最终身份：
 
 - build profile digest：
   `sha256:560b4a3176a5b77c324b0453d3032a05700c2e7dae48c46be4cb9c0817ef7e7c`
-- inactive activation digest：
-  `sha256:f1e4d0940d47ab25601f8e7853171a1eccb1d6b7bef099bf7022a6eb1f7c0282`
+- Image ID：
+  `sha256:4c3f8479ea8871c2fb4cdbf7adfaa6e8c4d3353c42f908b8f9b692f24783f2cd`
+- RepoDigest：
+  `ghcr.io/masechen/autoresearch-metax-profiler@sha256:f3f83880c9a0461156aa0c625fb5b0bb4fbf1cba1438a61271264835514f1d27`
+- toolchain descriptor digest：
+  `sha256:78f1bea1b865bdd3a7f10a38539c1a4e9bff67b8dc3b1536599420844e5bf5ac`
+- activation profile digest：
+  `sha256:85bd834ca84dd10d7567dd76c94864cb1d68727c027e1422158daf332a1b8120`
 
-部署任何 A9代码前，必须从精确A8 activation detached worktree运行一次：
+A9 主证据目录为
+`/home/mx/autoresearch-evidence/profiler-image-a9-e6c42e456be2-build-v1`，manifest
+`1e1fbfeddd222bd0373de55d6a9b810fb58978d24a4ce98345c6e150874ae2a6`。独立 correction
+目录追加 `-correction1`，manifest
+`34f2d956049eeba66ec217822a7f0fa48056e83fcc79adcac23961db91a94685`。二者必须共同引用；
+correction 只消除摘要中 IPC namespace mode 与 `/dev/shm` permission mode 的重名字段，
+没有修改父archive。
+
+可信 A8 abandonment 已经完成，以下命令保留为恢复审计记录，不得再次执行：
 
 ```bash
 PYTHONPATH="$A8_RECOVERY_WORKTREE" "$HOST_PYTHON" -m kernel_research \
@@ -499,11 +516,10 @@ PYTHONPATH="$A8_RECOVERY_WORKTREE" "$HOST_PYTHON" -m kernel_research \
   --campaign-id "profile-image-canary-a8-20260823T173630Z"
 ```
 
-该动作只能由fresh trusted doctor解除epoch 5隔离并终态化旧Campaign；不得重放或结算
-旧action，也不得改变其UNKNOWN/RESERVED/diagnostic证据。完整归档abandonment、doctor、
-budget、lease、attempts和Campaign终态后，才可部署A9 build能力。A9镜像必须重新native
-build、push、RepoDigest pull并执行UID1000/private IPC/1 GiB容量资格验证；随后创建独立
-activation commit。部署和主机回归通过后，用全新Campaign ID唯一运行一次A9 canary。
+该动作已由fresh trusted doctor解除epoch 5隔离并终态化旧Campaign；没有重放或结算
+旧action，也没有改变其UNKNOWN/RESERVED/diagnostic证据。A9 native build、push、
+RepoDigest pull及UID1000/private IPC/1 GiB容量资格验证均已完成。部署本activation commit
+并完成static、doctor及完整主机回归后，使用全新Campaign ID唯一运行一次A9 canary。
 只有READY才能从零启动24/72/168小时soak。
 
 对已经进入 `PAUSED_UNKNOWN_OUTCOME` 或 `PAUSED_HARD_FAILURE` 的 image-doctor，先部署

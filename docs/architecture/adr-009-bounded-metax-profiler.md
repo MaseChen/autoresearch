@@ -24,7 +24,9 @@ build identity. Its one-shot canary completed compile and ten correct warmups,
 then lost trusted completion when mcTracer could not initialize shared-memory
 RPC under Docker `--ipc=none`. A9 replaces only that isolation axis with an
 explicit private, bounded shared-memory namespace. No A9 image or canary
-evidence exists yet.
+evidence existed at design freeze. The A9 image has since been built and
+qualified, and the separate activation profile now pins its exact RepoDigest;
+no A9 canary evidence exists yet.
 
 ## Context
 
@@ -368,10 +370,12 @@ deployment authority merely because it uses the same candidate and device.
   mcTracer subprocess returned 0 without timeout or signal, but emitted
   `ftruncate`/`mmap` bad-file-descriptor errors and `Rpc connect timeout!`; it
   produced neither target sentinel nor trace. Completion therefore remains
-  UNKNOWN, the action remains RESERVED, and gpu1 fencing epoch 5 remains
-  QUARANTINED. It must not be replayed or manually cleaned. The full sealed
-  manifest digest is retained with the server evidence and must be copied
-  verbatim into the abandonment archive before A9 deployment.
+  UNKNOWN and the action remains RESERVED. It was not replayed or manually
+  cleaned. Its sealed manifest digest is
+  `7ea8efe5bbea06187898c840dc4d0e41f1f51e316d68cb2014afb8ed698965ad`.
+  The exact A8 recovery code performed trusted abandonment, preserved those
+  diagnostics and released the quarantine without GPU replay; its manifest is
+  `f1d7450f90974564bb02adc66e0643309ad521f98b535fecb6053669efa19f3c`.
 - A9 changes only the IPC/shared-memory isolation contract. It restores
   `active=false` and the zero RepoDigest, keeps worker v3, mcTracer rules,
   recipes, candidate, toolchain, memory, dual tmpfs and `kernel.py` unchanged,
@@ -379,7 +383,17 @@ deployment authority merely because it uses the same candidate and device.
   `sha256:560b4a3176a5b77c324b0453d3032a05700c2e7dae48c46be4cb9c0817ef7e7c`
   plus inactive activation digest
   `sha256:f1e4d0940d47ab25601f8e7853171a1eccb1d6b7bef099bf7022a6eb1f7c0282`.
-  Before any A9 deployment, the exact activated A8 recovery worktree must run
-  the trusted image-doctor abandonment for epoch 5 and archive the unchanged
-  UNKNOWN/RESERVED diagnostics. A9 then requires a new image, separate
-  activation commit and wholly new canary Campaign.
+  Native Linux/amd64 build and qualification produced Image ID
+  `sha256:4c3f8479ea8871c2fb4cdbf7adfaa6e8c4d3353c42f908b8f9b692f24783f2cd`
+  and RepoDigest
+  `ghcr.io/masechen/autoresearch-metax-profiler@sha256:f3f83880c9a0461156aa0c625fb5b0bb4fbf1cba1438a61271264835514f1d27`.
+  The primary image archive manifest is
+  `1e1fbfeddd222bd0373de55d6a9b810fb58978d24a4ce98345c6e150874ae2a6`;
+  its immutable metadata correction manifest is
+  `34f2d956049eeba66ec217822a7f0fa48056e83fcc79adcac23961db91a94685`.
+  Both are required evidence. The activation profile changes only the active
+  bit and exact RepoDigest, retains build digest
+  `sha256:560b4a3176a5b77c324b0453d3032a05700c2e7dae48c46be4cb9c0817ef7e7c`,
+  and has activation digest
+  `sha256:85bd834ca84dd10d7567dd76c94864cb1d68727c027e1422158daf332a1b8120`.
+  Deployment verification and a wholly new A9 canary Campaign remain required.
