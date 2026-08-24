@@ -21,8 +21,9 @@ are reconciled from durable ledgers and never authorize replay.
 2. Create a dedicated virtual environment and install the final clean tree
    with `pip install '.[console]'`.
 3. In `console/web`, run `npm ci`, `npm run release-preflight`, and
-   `npm run build`.  The build publishes only local assets into
-   `kernel_research/console/static`.
+   `npm run sbom`, `npm run audit:release`, and `npm run build`.  The SBOM is
+   deterministically bound to `package-lock.json`; the build publishes only
+   local assets into `kernel_research/console/static`.
 4. Create `~/.config/kernel-research-console/config.json` mode `0600` with the
    fixed SSH binary/target and the fixed remote Python/Admin-manifest paths.
    The local data directory is created mode `0700`; SQLite/CAS files are

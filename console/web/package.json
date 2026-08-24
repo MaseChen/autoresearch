@@ -16,6 +16,8 @@
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
     "test:e2e": "playwright test",
+    "sbom": "node ./scripts/generate-sbom.mjs",
+    "audit:release": "npm audit --package-lock-only --audit-level=high",
     "release-preflight": "node ./scripts/release-preflight.mjs"
   },
   "dependencies": {
