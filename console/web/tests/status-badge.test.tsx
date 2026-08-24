@@ -9,14 +9,14 @@ describe('StatusBadge', () => {
   })
 
   it('does not turn unavailable into a numeric value', () => {
-    render(<StatusBadge value="UNAVAILABLE" />)
-    expect(screen.getByText('UNAVAILABLE')).toBeInTheDocument()
+    render(<StatusBadge value="UNAVAILABLE" reason="COUNTER_NOT_EXPOSED" />)
+    expect(screen.getByText(/COUNTER_NOT_EXPOSED/)).toBeInTheDocument()
     expect(screen.queryByText('0')).not.toBeInTheDocument()
   })
 
   it('uses safe defaults for missing and unfamiliar states', () => {
     const { rerender } = render(<StatusBadge />)
-    expect(screen.getByText('UNAVAILABLE')).toBeInTheDocument()
+    expect(screen.getByText(/REASON_REQUIRED/)).toBeInTheDocument()
     rerender(<StatusBadge value="CUSTOM_TERMINAL" />)
     expect(screen.getByText('CUSTOM_TERMINAL')).toBeInTheDocument()
     rerender(<StatusBadge value="SUCCEEDED" />)

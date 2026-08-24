@@ -25,6 +25,11 @@ export function Dashboard({ snapshot }: { snapshot: ConsoleSnapshot }) {
       symbolSize: 8,
     }],
   }), [data.experiments])
+  const chartRows = data.experiments.slice(0, 12).reverse().map((row) => ({
+    id: row.id,
+    aggregate_score: row.aggregate_score,
+    status: row.status,
+  }))
 
   return (
     <section aria-labelledby="dashboard-title">
@@ -48,6 +53,20 @@ export function Dashboard({ snapshot }: { snapshot: ConsoleSnapshot }) {
         <Col xs={24} xl={15}>
           <Card title="近期科学评分">
             <Suspense fallback={<div className="chart" aria-label="正在加载图表" />}><EChart option={option} label="近期实验 aggregate score 折线图" /></Suspense>
+            <details className="chart-data">
+              <summary>查看图表数据表</summary>
+              <Table
+                size="small"
+                rowKey={(row) => String(row.id)}
+                dataSource={chartRows}
+                pagination={false}
+                columns={[
+                  { title: 'Experiment ID', dataIndex: 'id' },
+                  { title: 'aggregate score', dataIndex: 'aggregate_score', render: (value: unknown) => value == null ? 'UNAVAILABLE' : String(value) },
+                  { title: 'status', dataIndex: 'status', render: (value: string) => <StatusBadge value={value} /> },
+                ]}
+              />
+            </details>
           </Card>
         </Col>
         <Col xs={24} xl={9}>

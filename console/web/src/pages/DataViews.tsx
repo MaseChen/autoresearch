@@ -20,8 +20,8 @@ function GenericTable({ rows, identity = 'id', actions }: { rows: ConsoleRow[]; 
       columns={[...keys.map((key) => ({
         title: key,
         dataIndex: key,
-        render: (value: unknown) => key === 'status'
-          ? <StatusBadge value={String(value)} />
+        render: (value: unknown, row: ConsoleRow) => key === 'status'
+          ? <StatusBadge value={String(value)} reason={String(row.reason_code ?? row.reason ?? '')} />
           : <Text code={key.includes('id') || key.includes('digest')}>{value == null ? '—' : String(value)}</Text>,
       })), ...(actions ? [{ title: '操作', key: 'actions', fixed: 'right' as const, render: (_: unknown, row: ConsoleRow) => actions(row) }] : [])]}
     />

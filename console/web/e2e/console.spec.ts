@@ -53,6 +53,9 @@ test('desktop shows create-observe-results information architecture', async ({ p
   await expect(page.getByText('创建任务 → 观察过程 → 查看结果')).toBeVisible()
   const results = await new AxeBuilder({ page }).analyze()
   expect(results.violations).toEqual([])
+  await page.getByText('浅色').click()
+  await expect(page.locator('.console-layout')).toHaveClass(/theme-light/)
+  await expect(page.getByText('查看图表数据表')).toBeVisible()
 })
 
 test('tablet and mobile keep every write control disabled', async ({ page }, testInfo) => {
@@ -60,6 +63,8 @@ test('tablet and mobile keep every write control disabled', async ({ page }, tes
   await page.goto('/#bootstrap=test-bootstrap-token')
   if (testInfo.project.name === 'mobile') {
     await expect(page.getByRole('heading', { name: '运行总览' })).toBeVisible()
+    await expect(page.getByText('手机模式仅显示健康状态；所有写操作和任务详情均已禁用。')).toBeVisible()
+    await expect(page.locator('.ant-menu')).toHaveCount(0)
     await expect(page.locator('button:not([disabled])').filter({ hasText: /确认|执行|启动|冻结/ })).toHaveCount(0)
     return
   }

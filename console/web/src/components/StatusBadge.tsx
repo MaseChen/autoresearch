@@ -20,8 +20,12 @@ const colors: Record<string, string> = {
   STABLE: 'green',
 }
 
-export function StatusBadge({ value }: { value?: string }) {
+export function StatusBadge({ value, reason }: { value?: string; reason?: string }) {
   const selected = value ?? 'UNAVAILABLE'
-  const suffix = selected.includes('UNKNOWN') ? ' · 禁止重放' : ''
-  return <Tag color={colors[selected] ?? 'default'}>{selected}{suffix}</Tag>
+  const suffix = selected.includes('UNKNOWN')
+    ? ' · 禁止重放'
+    : selected === 'UNAVAILABLE'
+      ? ` · ${reason?.trim() || 'REASON_REQUIRED'}`
+      : ''
+  return <Tag className={selected === 'UNAVAILABLE' ? 'status-unavailable' : undefined} color={colors[selected] ?? 'default'}>{selected}{suffix}</Tag>
 }

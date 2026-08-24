@@ -16,6 +16,7 @@ body { min-width: 320px; background: #07101d; }
 .topbar-status { display: flex; gap: 12px; align-items: center; color: #a9b7c6; font-size: 12px; }
 .live-dot { width: 8px; height: 8px; border-radius: 50%; background: #f0ad2e; box-shadow: 0 0 8px currentColor; }
 .live-dot.live { background: #28d778; }
+.status-unavailable { color: #d1d5db !important; background: repeating-linear-gradient(135deg,#303640,#303640 4px,#3c434e 4px,#3c434e 8px) !important; border-color: #687180 !important; }
 .content { min-width: 0; padding: 22px; background: radial-gradient(circle at top right,rgba(40,120,215,.08),transparent 35%),#09131f; }
 .content > section { max-width: 1680px; margin: 0 auto; }
 .page-heading { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; }
@@ -23,6 +24,8 @@ body { min-width: 320px; background: #07101d; }
 .metric-grid { margin: 16px 0; }
 .section-card { margin-top: 16px; }
 .chart { width: 100%; height: 330px; }
+.chart-data { margin-top: 12px; }
+.chart-data summary { cursor: pointer; color: #8da3b8; }
 .lineage { width: 100%; height: 320px; background: rgba(4,12,20,.45); border-radius: 6px; }
 .code-editor { border: 1px solid rgba(255,255,255,.16); min-height: 420px; overflow: hidden; border-radius: 6px; }
 .code-editor .cm-editor { min-height: 420px; }
@@ -36,6 +39,13 @@ body { min-width: 320px; background: #07101d; }
 .confirm-panel pre { overflow: auto; max-height: 260px; padding: 12px; background: rgba(0,0,0,.26); border-radius: 6px; }
 .center { min-height: 100vh; display: flex; flex-direction: column; place-content: center; align-items: center; gap: 16px; background: #08131f; }
 .mono, code { font-family: ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; }
+.theme-light .topbar { background: #f7fafc; border-bottom-color: #d7dee7; }
+.theme-light .brand { color: #102238; }
+.theme-light .content { background: radial-gradient(circle at top right,rgba(8,127,112,.08),transparent 35%),#f2f5f8; }
+.theme-light .center { background: #f2f5f8; }
+.theme-light .lineage { background: #edf2f6; }
+.theme-light .code-editor { border-color: #bac5d1; }
+.theme-light .confirm-panel pre { background: #edf2f6; }
 
 @media (max-width: 1279px) {
   .content { padding: 16px; }
@@ -50,6 +60,7 @@ body { min-width: 320px; background: #07101d; }
   .content section:not(:first-child) { overflow: hidden; }
   .wizard-card, .ant-btn-primary, .ant-btn-dangerous { pointer-events: none !important; opacity: .45 !important; }
   .chart { height: 240px; }
+  .mobile-health .content { padding-top: 28px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

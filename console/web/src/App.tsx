@@ -75,9 +75,25 @@ function ConsoleApp({ mode, setMode }: { mode: 'dark' | 'light'; setMode: (mode:
   if (sessionError) return <Result status="error" title="Console 会话未建立" subTitle={sessionError} />
   if (!sessionReady || query.isLoading) return <div className="center"><Spin size="large" /><Text>正在进行可信握手…</Text></div>
   if (query.error || !snapshot) return <Result status="error" title="远端快照不可用" subTitle={String(query.error)} extra={<Button onClick={() => void query.refetch()}>重试只读请求</Button>} />
+  if (viewportWidth < 768) {
+    const activeRuns = snapshot.data.runs.filter((row) => row.status === 'RUNNING').length
+    const activeCampaigns = snapshot.data.campaigns.filter((row) => row.status === 'RUNNING').length
+    return (
+      <Layout className={`console-layout theme-${mode} mobile-health`}>
+        <Header className="topbar"><div className="brand"><span className="brand-mark">AR</span><h1>Autoresearch Console</h1></div></Header>
+        <Content className="content">
+          <section aria-labelledby="mobile-health-title">
+            <Typography.Title id="mobile-health-title" level={2}>运行总览</Typography.Title>
+            <Result status={snapshot.status === 'STABLE' ? 'success' : 'warning'} title={snapshot.status} subTitle="手机模式仅显示健康状态；所有写操作和任务详情均已禁用。" />
+            <Typography.Paragraph>活动 Run：{activeRuns} · 活动 Campaign：{activeCampaigns}</Typography.Paragraph>
+          </section>
+        </Content>
+      </Layout>
+    )
+  }
 
   return (
-    <Layout className="console-layout">
+    <Layout className={`console-layout theme-${mode}`}>
       <Header className="topbar">
         <div className="brand"><span className="brand-mark">AR</span><span><h1>Autoresearch Console</h1><small>可信算子研究控制台</small></span></div>
         <div className="topbar-status"><span className={`live-dot ${streamStatus}`} />{streamStatus === 'live' ? 'LIVE' : 'STALE'}<Text code>{snapshot.runtime_identity.git_commit.slice(0, 10)}</Text><Segmented size="small" value={mode} onChange={(value) => setMode(value as 'dark' | 'light')} options={[{ label: '暗色', value: 'dark' }, { label: '浅色', value: 'light' }]} /></div>
