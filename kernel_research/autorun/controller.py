@@ -4408,7 +4408,13 @@ class ResearchController:
                 )
             return self._run_loop(run_id)
 
-    def start(self, *, proposal_only: bool = False) -> dict[str, Any]:
+    def _start_new_run(
+        self,
+        *,
+        run_id: str,
+        proposal_only: bool,
+        snapshot_extra: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         self._prepare_runtime_dirs()
         if not proposal_only:
             self._require_gpu_risk_acknowledgement()
@@ -4433,7 +4439,6 @@ class ResearchController:
                     "controller preflight failed: "
                     + "; ".join(preflight["errors"])
                 )
-            run_id = uuid.uuid4().hex
             best = self._best()
             history_cutoff = self._history_cutoff()
             baseline_ref = (
@@ -4447,6 +4452,14 @@ class ResearchController:
                 namespace=namespace,
                 baseline_ref=baseline_ref,
             )
+            if snapshot_extra is not None:
+                material = dict(workflow_snapshot)
+                material.pop("snapshot_digest", None)
+                material.update(dict(snapshot_extra))
+                workflow_snapshot = {
+                    **material,
+                    "snapshot_digest": canonical_sha256(material),
+                }
             with ControllerStore(self.controller_db) as store:
                 store.create_run(
                     run_id=run_id,
@@ -4463,6 +4476,60 @@ class ResearchController:
                     history_cutoff=history_cutoff,
                 )
             return self._run_loop(run_id, proposal_only=proposal_only)
+
+    def start(self, *, proposal_only: bool = False) -> dict[str, Any]:
+        return self._start_new_run(
+            run_id=uuid.uuid4().hex,
+            proposal_only=proposal_only,
+        )
+
+    def start_console_operation(
+        self, *, operation_id: str, proposal_only: bool = False
+    ) -> dict[str, Any]:
+        """Start one deterministic Console-owned Run without duplicate launch."""
+
+        try:
+            selected = uuid.UUID(operation_id)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("operation_id must be a canonical UUID") from exc
+        if str(selected) != operation_id:
+            raise ValueError("operation_id must be a canonical lowercase UUID")
+        if not isinstance(proposal_only, bool):
+            raise ValueError("proposal_only must be boolean")
+        run_id = "console-run-" + uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            "kernel-research/console-run/v1/" + operation_id,
+        ).hex
+        if self.controller_db.exists():
+            with ControllerStore(self.controller_db) as store:
+                try:
+                    existing = store.get_run(run_id)
+                except ValueError:
+                    existing = None
+            if existing is not None:
+                self._validate_run_snapshot(existing)
+                snapshot = existing.get("workflow_snapshot")
+                if (
+                    not isinstance(snapshot, Mapping)
+                    or snapshot.get("evidence_operation") != "console-run-v1"
+                    or snapshot.get("console_operation_id") != operation_id
+                    or bool(snapshot.get("proposal_only")) != proposal_only
+                ):
+                    raise ControllerDataIntegrityError(
+                        "Console Run operation identity was reused"
+                    )
+                if existing["status"] in TERMINAL_RUN_STATUSES:
+                    return existing
+                return self.resume(run_id)
+        return self._start_new_run(
+            run_id=run_id,
+            proposal_only=proposal_only,
+            snapshot_extra={
+                "evidence_operation": "console-run-v1",
+                "console_operation_id": operation_id,
+                "proposal_only": proposal_only,
+            },
+        )
 
     def requalify_candidate_for_adoption(
         self,
@@ -4505,6 +4572,342 @@ class ResearchController:
             namespace=CURRENT_RESEARCH_NAMESPACE,
             operation="current-baseline-bootstrap",
         )
+
+    def evaluate_manual_candidate(
+        self,
+        *,
+        candidate: CandidateBundle | Mapping[str, Any],
+        operation_id: str,
+    ) -> dict[str, Any]:
+        """Evaluate one operator-supplied CURRENT CandidateBundle exactly once.
+
+        The Console is an evidence producer, not a baseline authority.  This
+        entry point therefore reuses the ordinary POLICY/SMOKE/QUICK/FULL and
+        CONFIRMATION state machine while freezing the exact deployment pin as
+        parent.  A successful promotion decision remains eligible History
+        evidence, but this method never writes Deployment or Campaign state.
+        """
+
+        try:
+            operation_uuid = uuid.UUID(operation_id)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("operation_id must be a canonical UUID") from exc
+        if str(operation_uuid) != operation_id:
+            raise ValueError("operation_id must be a canonical lowercase UUID")
+        bundle = (
+            candidate
+            if isinstance(candidate, CandidateBundle)
+            else CandidateBundle.from_value(
+                dict(candidate) if isinstance(candidate, Mapping) else candidate,
+                limits=TRITON_PYTHON_BUNDLE_LIMITS,
+            )
+        )
+        bundle.validate(TRITON_PYTHON_BUNDLE_LIMITS)
+        target = _trusted_target(CURRENT_RESEARCH_NAMESPACE)
+        if bundle.entrypoint != target.language.entrypoint or len(bundle.files) != 1:
+            raise ValueError("manual evaluation requires the exact active entrypoint")
+        source = bundle.files[0].content
+        source_bytes = source.encode("utf-8")
+        candidate_hash = hashlib.sha256(source_bytes).hexdigest()
+        policy = target.validate_candidate(source)
+        if not policy.valid or policy.sha256 != candidate_hash:
+            raise ValueError("manual CandidateBundle fails the trusted target policy")
+        if not isinstance(self.evaluator, DockerEvaluator):
+            raise ControlledRuntimeError(
+                "production manual evaluation requires DockerEvaluator"
+            )
+
+        run_uuid = uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            "kernel-research/console-manual-evaluation/v1/"
+            f"{operation_id}/{bundle.artifact_id}",
+        )
+        run_id = "console-manual-" + run_uuid.hex
+        self._prepare_runtime_dirs()
+        self._require_gpu_risk_acknowledgement()
+        with gpu_lock(self.config.controller_dir / "gpu1.lock"):
+            self._assert_noise_resource_available()
+
+            def manual_container_guard(
+                guarded_run_id: str, action: str, timeout: float
+            ) -> None:
+                self._assert_noise_resource_available()
+                self._before_docker_container(guarded_run_id, action, timeout)
+
+            self.evaluator.before_container_start = manual_container_guard
+            pin = self._deployment_pin()
+            if (
+                pin is None
+                or pin.namespace_id != CURRENT_RESEARCH_NAMESPACE.namespace_id
+                or not pin.execution_environment.is_resolved
+            ):
+                raise ControlledRuntimeError(
+                    "manual evaluation requires a resolved CURRENT deployment pin"
+                )
+            baseline = self._best()
+            if (
+                baseline.id != pin.confirmation_experiment_id
+                or baseline.experiment_uid != pin.confirmation_experiment_uid
+                or baseline.candidate_hash != pin.candidate_hash
+                or baseline.artifact_id != str(pin.baseline_ref.artifact_id)
+            ):
+                raise ControllerDataIntegrityError(
+                    "manual evaluation deployment evidence does not match its pin"
+                )
+            runtime_environment = self._resolved_execution_environment(
+                CURRENT_RESEARCH_NAMESPACE
+            )
+            try:
+                pin.execution_environment.require_match(
+                    runtime_environment, context="manual evaluation deployment"
+                )
+                pin.baseline_ref.require_environment(runtime_environment)
+            except ValueError as exc:
+                raise ControllerDataIntegrityError(str(exc)) from exc
+            history_cutoff = self._history_cutoff()
+            snapshot = self._workflow_snapshot(
+                baseline=baseline,
+                history_cutoff=history_cutoff,
+                namespace=CURRENT_RESEARCH_NAMESPACE,
+                baseline_ref=pin.baseline_ref,
+            )
+            material = dict(snapshot)
+            material.pop("snapshot_digest", None)
+            material.update(
+                {
+                    "evidence_operation": "console-manual-evaluation-v1",
+                    "console_operation_id": operation_id,
+                    "candidate_artifact_id": str(bundle.artifact_id),
+                    "candidate_sha256": candidate_hash,
+                }
+            )
+            snapshot = {**material, "snapshot_digest": canonical_sha256(material)}
+
+            with ControllerStore(self.controller_db) as store:
+                try:
+                    existing = store.get_run(run_id)
+                except ValueError:
+                    existing = None
+                if existing is not None:
+                    self._validate_run_snapshot(existing)
+                    persisted_snapshot = existing.get("workflow_snapshot")
+                    if (
+                        not isinstance(persisted_snapshot, Mapping)
+                        or persisted_snapshot.get("evidence_operation")
+                        != "console-manual-evaluation-v1"
+                        or persisted_snapshot.get("console_operation_id")
+                        != operation_id
+                        or persisted_snapshot.get("candidate_artifact_id")
+                        != str(bundle.artifact_id)
+                        or persisted_snapshot.get("candidate_sha256")
+                        != candidate_hash
+                        or existing["baseline_ref"] != pin.baseline_ref.to_dict()
+                    ):
+                        raise ControllerDataIntegrityError(
+                            "manual evaluation operation identity was reused"
+                        )
+                    # The operation owns its original History cutoff.  Replaying
+                    # after the operation wrote evidence must not derive a new
+                    # snapshot from the now-higher live cutoff.
+                    snapshot = dict(persisted_snapshot)
+                    history_cutoff = int(existing["history_cutoff"])
+                    if existing["status"] in TERMINAL_RUN_STATUSES:
+                        return {
+                            "schema_version": 1,
+                            "status": existing["status"],
+                            "run_id": run_id,
+                            "candidate_hash": candidate_hash,
+                            "candidate_artifact_id": str(bundle.artifact_id),
+                            "run": existing,
+                        }
+
+            preflight = self.doctor()
+            if preflight["status"] != "SUCCESS":
+                raise ControlledRuntimeError(
+                    "manual evaluation preflight failed: "
+                    + "; ".join(preflight["errors"])
+                )
+            run_dir = self.config.controller_dir / "runs" / run_id
+            run_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            run_dir.chmod(0o700)
+            candidate_dir = run_dir / "candidates"
+            candidate_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            candidate_path = candidate_dir / f"{candidate_hash}.py"
+            if candidate_path.exists():
+                if candidate_path.is_symlink() or candidate_path.read_bytes() != source_bytes:
+                    raise ControllerDataIntegrityError(
+                        "persisted manual candidate differs from the operation"
+                    )
+            else:
+                candidate_path.write_bytes(source_bytes)
+                candidate_path.chmod(0o600)
+            with HistoryStore(
+                self.history_db, state_dir=self.config.state_dir
+            ) as history:
+                history.store_candidate_bundle(bundle)
+                history.store_candidate_artifact(
+                    source,
+                    artifact_id=str(ArtifactId.source_sha256(candidate_hash)),
+                    artifact_kind="source_text_v1",
+                    manifest={
+                        "format": "python_source_v1",
+                        "entrypoint": target.language.entrypoint,
+                        "media_type": "text/x-python",
+                    },
+                )
+            with ControllerStore(self.controller_db) as store:
+                try:
+                    run = store.get_run(run_id)
+                except ValueError:
+                    run = store.create_run(
+                        run_id=run_id,
+                        deadline_epoch=self.clock() + self.config.max_hours * 3600,
+                        config=self.config.redacted_dict(),
+                        initial_best_hash=baseline.candidate_hash,
+                        preflight=preflight,
+                        namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                        resolved_config_digest=str(snapshot["snapshot_digest"]),
+                        workflow_snapshot=snapshot,
+                        baseline_ref=pin.baseline_ref.to_dict(),
+                        history_cutoff=history_cutoff,
+                    )
+                    iteration = store.create_iteration(
+                        run_id, 1, baseline.candidate_hash
+                    )
+                    store.accept_candidate(
+                        int(iteration["id"]),
+                        candidate_hash=candidate_hash,
+                        hypothesis="operator-supplied Console CandidateBundle",
+                        rationale=(
+                            "one bounded CURRENT manual scientific evaluation; "
+                            "no baseline authority"
+                        ),
+                        candidate_path=str(candidate_path),
+                    )
+                self._validate_run_snapshot(run)
+                iteration = store.latest_iteration(run_id)
+                if iteration is None or iteration["status"] != "RUNNING":
+                    raise ControllerDataIntegrityError(
+                        "manual evaluation has no live deterministic iteration"
+                    )
+                try:
+                    action = self._process_iteration(
+                        store=store,
+                        run_id=run_id,
+                        iteration=iteration,
+                        run_dir=run_dir,
+                    )
+                except UnknownGPUOutcome as exc:
+                    self._finish_iteration(
+                        store,
+                        int(iteration["id"]),
+                        outcome="UNKNOWN_GPU_OUTCOME",
+                        error=str(exc),
+                    )
+                    store.update_run_with_event(
+                        run_id,
+                        "RUN_FINISHED",
+                        {"reason": "unknown manual evaluation GPU outcome"},
+                        status=RunStatus.HARD_FAILED.value,
+                        stop_reason=(
+                            "GPU execution outcome is unknown; trusted doctor and "
+                            "manual recovery are required"
+                        ),
+                    )
+                except ActionBudgetExhausted as exc:
+                    self._finish_iteration(
+                        store,
+                        int(iteration["id"]),
+                        outcome="BUDGET_EXHAUSTED",
+                        error=str(exc),
+                    )
+                    store.update_run_with_event(
+                        run_id,
+                        "RUN_FINISHED",
+                        {"reason": "manual evaluation cannot fit deadline"},
+                        status=RunStatus.BUDGET_EXHAUSTED.value,
+                        stop_reason=str(exc),
+                    )
+                except ControllerDataIntegrityError as exc:
+                    self._finish_iteration(
+                        store,
+                        int(iteration["id"]),
+                        outcome="DATA_INTEGRITY_FAILURE",
+                        error=str(exc),
+                    )
+                    store.update_run_with_event(
+                        run_id,
+                        "RUN_FINISHED",
+                        {"reason": "manual evaluation data integrity failure"},
+                        status=RunStatus.HARD_FAILED.value,
+                        stop_reason=str(exc),
+                    )
+                except BaseException as exc:
+                    current = store.get_iteration(int(iteration["id"]))
+                    if current["status"] == "RUNNING":
+                        attempts = store.list_evaluation_attempts(
+                            run_id, iteration_id=int(iteration["id"])
+                        )
+                        unknown = any(
+                            attempt["status"] in {"RUNNING", "UNKNOWN_OUTCOME"}
+                            for attempt in attempts
+                        )
+                        self._finish_iteration(
+                            store,
+                            int(iteration["id"]),
+                            outcome=(
+                                "UNKNOWN_GPU_OUTCOME" if unknown else "CONTROLLER_ERROR"
+                            ),
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
+                        store.update_run_with_event(
+                            run_id,
+                            "RUN_FINISHED",
+                            {"reason": "manual evaluation interrupted"},
+                            status=(
+                                RunStatus.HARD_FAILED.value
+                                if unknown
+                                else RunStatus.FAILED.value
+                            ),
+                            stop_reason=(
+                                "trusted doctor/manual recovery required"
+                                if unknown
+                                else "manual evaluation failed closed"
+                            ),
+                        )
+                    raise
+                else:
+                    completed = store.get_run(run_id)
+                    if completed["status"] == RunStatus.RUNNING.value:
+                        finished_iteration = store.get_iteration(int(iteration["id"]))
+                        if finished_iteration["status"] != "COMPLETED":
+                            self._finish_iteration(
+                                store,
+                                int(iteration["id"]),
+                                outcome="MANUAL_EVALUATION_STOPPED",
+                                error="manual evaluation ended without a terminal stage",
+                            )
+                        completed = store.update_run_with_event(
+                            run_id,
+                            "RUN_FINISHED",
+                            {"reason": "one manual candidate evaluation completed"},
+                            status=RunStatus.STOPPED.value,
+                            stop_reason="single manual candidate boundary reached",
+                            final_best_hash=(
+                                candidate_hash if action == "STOP" else baseline.candidate_hash
+                            ),
+                        )
+                completed = store.get_run(run_id)
+                return {
+                    "schema_version": 1,
+                    "status": completed["status"],
+                    "run_id": run_id,
+                    "namespace_id": CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                    "candidate_hash": candidate_hash,
+                    "candidate_artifact_id": str(bundle.artifact_id),
+                    "execution_environment": runtime_environment.to_dict(),
+                    "run": completed,
+                }
 
     def _qualify_candidate_for_adoption(
         self,
@@ -5531,7 +5934,13 @@ class ResearchController:
                     "controller resume preflight failed: "
                     + "; ".join(preflight["errors"])
                 )
-            return self._run_loop(run_id)
+            workflow = run.get("workflow_snapshot")
+            proposal_only = bool(
+                isinstance(workflow, Mapping)
+                and workflow.get("evidence_operation") == "console-run-v1"
+                and workflow.get("proposal_only") is True
+            )
+            return self._run_loop(run_id, proposal_only=proposal_only)
 
     def status(self, run_id: str | None = None) -> dict[str, Any]:
         if not self.controller_db.exists():
