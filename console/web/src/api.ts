@@ -1,4 +1,4 @@
-import type { ApiEnvelope, ConsoleSnapshot, OperationReceipt, PreparedOperation } from './types'
+import type { ApiEnvelope, ConsoleSnapshot, OperationReceipt, PreparedOperation, ScientificArtifact } from './types'
 
 let csrfToken = ''
 
@@ -96,6 +96,12 @@ export async function fetchAudit(): Promise<Record<string, unknown>[]> {
   const response = await fetch('/api/v1/audit', { credentials: 'same-origin' })
   const envelope = await decode<ApiEnvelope<{ audit: Record<string, unknown>[] }>>(response)
   return envelope.data.audit
+}
+
+export async function fetchScientificArtifact(artifactId: string): Promise<ScientificArtifact> {
+  const response = await fetch(`/api/v1/artifacts/${encodeURIComponent(artifactId)}`, { credentials: 'same-origin' })
+  const envelope = await decode<ApiEnvelope<{ artifact: ScientificArtifact }>>(response)
+  return envelope.data.artifact
 }
 
 export function subscribeEvents(

@@ -5,6 +5,7 @@ import {
   confirmOperation,
   fetchAudit,
   fetchOperation,
+  fetchScientificArtifact,
   fetchSnapshot,
   prepareOperation,
   subscribeEvents,
@@ -52,11 +53,13 @@ describe('Console API', () => {
       .mockResolvedValueOnce(response(envelope({ operation_receipt: { status: 'EXECUTING' } })))
       .mockResolvedValueOnce(response(envelope({ operation: { status: 'EXECUTING' } })))
       .mockResolvedValueOnce(response(envelope({ audit: [{ sequence: 1 }] })))
+      .mockResolvedValueOnce(response(envelope({ artifact: { schema_version: 1, artifact_id: 'source-bundle-v1:fixture', manifest: {}, entrypoint: 'kernel.py', media_type: 'text/x-python', source: 'def run(): pass\n' } })))
     expect((await fetchSnapshot()).status).toBe('STABLE')
     expect((await prepareOperation('RUN_START', { profile: 'pro' }, prepared.runtime_identity_digest, prepared.operation_id)).operation_id).toBe(prepared.operation_id)
     expect((await confirmOperation(prepared, prepared.confirmation_phrase)).status).toBe('EXECUTING')
     expect((await fetchOperation(prepared.operation_id)).status).toBe('EXECUTING')
     expect(await fetchAudit()).toEqual([{ sequence: 1 }])
+    expect((await fetchScientificArtifact('source-bundle-v1:fixture')).entrypoint).toBe('kernel.py')
   })
 
   it('surfaces bounded server errors with and without detail', async () => {

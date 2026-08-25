@@ -1,23 +1,13 @@
-import { Alert, Card, Col, Descriptions, Empty, Progress, Row, Select, Space, Statistic, Table, Tabs, Tag, Timeline, Typography } from 'antd'
+import { Alert, Button, Card, Col, Collapse, Descriptions, Empty, Input, Modal, Progress, Row, Select, Space, Statistic, Table, Tabs, Tag, Typography } from 'antd'
 import { useMemo, useState, type ReactNode } from 'react'
 import type { ConsoleRow, ConsoleSnapshot } from '../types'
 import { StatusBadge } from '../components/StatusBadge'
 import { OperationButton } from '../components/OperationButton'
-import { formatTime, shortIdentity, stageLabel, taskSummaries, type TaskSummary } from '../presentation'
+import { fetchScientificArtifact } from '../api'
+import type { ScientificArtifact } from '../types'
+import { formatDuration, formatTime, numberValue, shortIdentity, stageLabel, statusLabel, taskDetail, taskSummaries, type TaskDetailView, type TaskSummary } from '../presentation'
 
 const { Paragraph, Text, Title } = Typography
-
-function numberValue(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0
-}
-
-function formatDuration(milliseconds: unknown): string {
-  const value = numberValue(milliseconds)
-  if (value <= 0) return '0 秒'
-  if (value >= 3_600_000) return `${(value / 3_600_000).toFixed(2)} 小时`
-  if (value >= 60_000) return `${(value / 60_000).toFixed(1)} 分钟`
-  return `${(value / 1000).toFixed(1)} 秒`
-}
 
 function GenericTable({ rows, identity = 'id' }: { rows: ConsoleRow[]; identity?: string }) {
   const keys = Array.from(new Set(rows.flatMap((row) => Object.keys(row)))).slice(0, 10)
@@ -45,84 +35,157 @@ function taskActions(task: TaskSummary, runtime: string, canWrite: boolean): Rea
   </Space>
 }
 
-function TaskDetail({ task, snapshot, canWrite }: { task: TaskSummary; snapshot: ConsoleSnapshot; canWrite: boolean }) {
-  const runtime = snapshot.runtime_identity.runtime_identity_digest
-  const children = task.kind === 'RUN' ? [] : snapshot.data.child_runs.filter((row) => String(row.campaign_id) === task.id)
-  const runIds = new Set(task.kind === 'RUN' ? [task.id] : children.map((row) => String(row.controller_run_id ?? '')))
-  const iterations = snapshot.data.iterations.filter((row) => runIds.has(String(row.run_id ?? '')))
-  const iterationIds = new Set(iterations.map((row) => String(row.id)))
-  const attempts = snapshot.data.evaluation_attempts.filter((row) => iterationIds.has(String(row.iteration_id ?? '')) || runIds.has(String(row.run_id ?? '')))
-  const experimentIds = new Set(attempts.map((row) => String(row.experiment_uid ?? '')).filter(Boolean))
-  const experiments = snapshot.data.experiments.filter((row) => experimentIds.has(String(row.experiment_uid ?? '')))
-  const budgets = snapshot.data.budget_actions.filter((row) => String(row.campaign_id ?? '') === task.id)
-  const completedAttempts = attempts.filter((row) => ['SUCCESS', 'SUCCEEDED'].includes(String(row.status))).length
-  const candidateHashes = new Set(iterations.map((row) => String(row.candidate_hash ?? '')).filter(Boolean))
-  const latestAttempt = attempts[0]
-  const scored = experiments.filter((row) => typeof row.aggregate_score === 'number')
-  const bestScore = scored.length ? Math.max(...scored.map((row) => Number(row.aggregate_score))) : null
-  const actualGpu = budgets.reduce((total, row) => total + numberValue(row.actual_gpu_ms), 0)
-  const reservedGpu = budgets.reduce((total, row) => total + numberValue(row.reserved_gpu_ms), 0)
-  const progress = attempts.length ? Math.round(completedAttempts / attempts.length * 100) : 0
-
-  return <div className="task-detail">
-    <div className="task-detail-heading"><div><Text className="eyebrow">{task.kind === 'LONG' ? '长期任务' : task.kind === 'BENCHMARK' ? '策略对照' : '短期任务'}</Text><Title level={3}>{task.title}</Title><Paragraph>{task.subtitle}</Paragraph></div><StatusBadge value={task.status} /></div>
-    <div className="task-action-strip">{taskActions(task, runtime, canWrite)}{!canWrite && <Text type="secondary">当前连接只允许查看。</Text>}</div>
-
-    <Tabs items={[
-      { key: 'overview', label: '任务概览', children: <>
-        <Row gutter={[12, 12]} className="task-metrics">
-          <Col xs={12} lg={6}><Card size="small"><Statistic title="完成进度" value={progress} suffix="%" /></Card></Col>
-          <Col xs={12} lg={6}><Card size="small"><Statistic title="候选代码" value={candidateHashes.size || numberValue(task.row.valid_candidates)} suffix="个" /></Card></Col>
-          <Col xs={12} lg={6}><Card size="small"><Statistic title="已完成评测" value={completedAttempts} suffix={`/ ${attempts.length}`} /></Card></Col>
-          <Col xs={12} lg={6}><Card size="small"><Statistic title="最佳评分" value={bestScore ?? '暂无'} /></Card></Col>
-        </Row>
-        <Card className="detail-card" variant="borderless" title="当前进展">
-          <Progress percent={progress} status={task.status.includes('FAIL') ? 'exception' : task.status === 'RUNNING' ? 'active' : 'normal'} />
-          <Descriptions size="small" column={{ xs: 1, md: 2 }} className="task-facts">
-            <Descriptions.Item label="当前步骤">{stageLabel(latestAttempt?.stage ?? iterations[0]?.stage)}</Descriptions.Item>
-            <Descriptions.Item label="最近更新">{formatTime(task.updatedAt)}</Descriptions.Item>
-            <Descriptions.Item label="算子">Fused MoE I8 TN</Descriptions.Item>
-            <Descriptions.Item label="运行环境">Triton · MetaX C500</Descriptions.Item>
-            <Descriptions.Item label="任务编号"><Text code copyable>{task.id}</Text></Descriptions.Item>
-            <Descriptions.Item label="子任务数量">{children.length}</Descriptions.Item>
-          </Descriptions>
-        </Card>
-      </> },
-      { key: 'process', label: '评测进度', children: <Card className="detail-card" variant="borderless">
-        {attempts.length === 0 ? <Empty description="任务还没有开始评测" /> : <Timeline items={attempts.slice().reverse().map((row) => ({
-          color: String(row.status).includes('FAIL') ? 'red' : ['SUCCEEDED', 'SUCCESS'].includes(String(row.status)) ? 'green' : 'blue',
-          children: <div className="evaluation-step"><div><strong>{stageLabel(row.stage)}</strong><StatusBadge value={String(row.status ?? 'UNAVAILABLE')} /></div><Space wrap><Text>测试集：{String(row.suite ?? '—')}</Text><Text>类型：{String(row.replicate_kind ?? '—')}</Text>{row.history_experiment_id ? <Text>结果编号：{String(row.history_experiment_id)}</Text> : null}</Space>{row.error ? <Alert type="error" title={String(row.error)} /> : null}</div>,
-        }))} />}
-      </Card> },
-      { key: 'results', label: '性能结果', children: <Card className="detail-card" variant="borderless">
-        {experiments.length === 0 ? <Empty description="评测完成后，这里会显示评分和候选代码信息" /> : <div className="record-list">{experiments.map((row) => <div className="record-row" key={String(row.experiment_uid ?? row.id)}><div className="record-row-main"><Space wrap><strong>{stageLabel(row.replicate_kind ?? row.suite)}</strong><Tag>{row.aggregate_score == null ? '评分暂不可用' : `评分 ${String(row.aggregate_score)}`}</Tag></Space><div className="result-details"><span>候选代码 <Text code copyable={{ text: String(row.candidate_hash ?? '') }}>{shortIdentity(row.candidate_hash, 14)}</Text></span><span>测试集 {String(row.suite ?? '—')}</span><span>评测后端 {String(row.backend ?? '—')}</span><span>完成时间 {formatTime(row.created_at)}</span></div></div><StatusBadge value={String(row.status ?? 'UNAVAILABLE')} /></div>)}</div>}
-      </Card> },
-      { key: 'usage', label: '资源用量', children: <Card className="detail-card" variant="borderless">
-        {budgets.length === 0 ? <Empty description="当前任务没有单独的长期预算记录" /> : <>
-          <Row gutter={[12, 12]}><Col xs={24} md={8}><Statistic title="已使用 GPU 时间" value={formatDuration(actualGpu)} /></Col><Col xs={24} md={8}><Statistic title="已预留 GPU 时间" value={formatDuration(reservedGpu)} /></Col><Col xs={24} md={8}><Statistic title="预算记录" value={budgets.length} suffix="条" /></Col></Row>
-          <Progress className="usage-progress" percent={reservedGpu ? Math.min(100, Math.round(actualGpu / reservedGpu * 100)) : 0} format={(value) => `已使用 ${value}%`} />
-          <div className="record-list">{budgets.map((row) => <div className="record-row" key={String(row.id)}><div className="record-row-main"><strong>{String(row.action_kind ?? '预算记录')}</strong><Text type="secondary">GPU {formatDuration(row.actual_gpu_ms)} · 运行 {formatDuration(row.actual_wall_ms)} · 候选 {numberValue(row.actual_candidates)} 个</Text></div><StatusBadge value={String(row.status ?? 'UNAVAILABLE')} /></div>)}</div>
-        </>}
-      </Card> },
-    ]} />
-  </div>
+function scoreText(value: number | null): string {
+  return value == null ? '暂无' : value.toLocaleString('zh-CN', { maximumFractionDigits: 6 })
 }
 
-export function TaskCenterPage({ snapshot, canWrite = false }: { snapshot: ConsoleSnapshot; canWrite?: boolean }) {
+function taskKindLabel(task: TaskSummary): string {
+  return task.kind === 'LONG' ? '长期优化' : task.kind === 'BENCHMARK' ? '策略对照' : '短期任务'
+}
+
+function taskNeedsAttention(status: string): boolean {
+  return status.includes('UNKNOWN') || status.includes('HARD') || status.includes('DATA_INTEGRITY')
+}
+
+function ResultRecords({ detail }: { detail: TaskDetailView }) {
+  if (detail.experiments.length === 0) return <Empty description="评测完成后，这里会显示可比较的结果" />
+  return <div className="result-card-grid">{detail.experiments.map((row) => <article className="result-card" key={String(row.experiment_uid ?? row.id)}>
+    <div className="result-card-heading"><div><Text type="secondary">{stageLabel(row.replicate_kind ?? row.suite)}</Text><strong>{row.aggregate_score == null ? '评分暂不可用' : `综合评分 ${String(row.aggregate_score)}`}</strong></div><StatusBadge value={String(row.status ?? 'UNAVAILABLE')} /></div>
+    <Descriptions size="small" column={1}>
+      <Descriptions.Item label="测试集">{String(row.suite ?? '—')}</Descriptions.Item>
+      <Descriptions.Item label="评测后端">{String(row.backend ?? '—')}</Descriptions.Item>
+      <Descriptions.Item label="候选代码"><Text code copyable={{ text: String(row.candidate_hash ?? '') }}>{shortIdentity(row.candidate_hash, 16)}</Text></Descriptions.Item>
+      <Descriptions.Item label="完成时间">{formatTime(row.created_at)}</Descriptions.Item>
+    </Descriptions>
+  </article>)}</div>
+}
+
+function TaskDetailPage({ detail, snapshot, canWrite, onBack }: { detail: TaskDetailView; snapshot: ConsoleSnapshot; canWrite: boolean; onBack: () => void }) {
+  const [artifact, setArtifact] = useState<ScientificArtifact>()
+  const [artifactLoading, setArtifactLoading] = useState(false)
+  const [artifactError, setArtifactError] = useState('')
+  const { task } = detail
+  const bestExperiment = detail.experiments.filter((row) => typeof row.aggregate_score === 'number').sort((left, right) => Number(right.aggregate_score) - Number(left.aggregate_score))[0] ?? detail.experiments[0]
+  const bestCandidate = String(bestExperiment?.candidate_hash ?? detail.rounds.find((round) => round.candidateHash)?.candidateHash ?? '')
+  const bestArtifactId = String(bestExperiment?.artifact_id ?? '')
+  const profilerReady = Boolean(snapshot.runtime_identity.profiler_activation_profile_digest)
+  const showArtifact = async () => {
+    if (!bestArtifactId) return
+    setArtifactError('')
+    setArtifactLoading(true)
+    try {
+      setArtifact(await fetchScientificArtifact(bestArtifactId))
+    } catch (error) {
+      setArtifactError(String(error))
+    } finally {
+      setArtifactLoading(false)
+    }
+  }
+  const downloadArtifact = () => {
+    if (!artifact) return
+    const url = URL.createObjectURL(new Blob([artifact.source], { type: artifact.media_type }))
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = artifact.entrypoint
+    anchor.click()
+    URL.revokeObjectURL(url)
+  }
+  return <section aria-labelledby="task-detail-title" className="task-detail-page">
+    <div className="detail-breadcrumb"><Button onClick={onBack}>返回运行记录</Button><Text type="secondary">运行记录 / 任务详情</Text></div>
+    <Card className="task-hero-card">
+      <div className="task-detail-heading"><div><Space wrap><StatusBadge value={task.status} /><Text className="eyebrow">{taskKindLabel(task)}</Text></Space><Title id="task-detail-title" level={2}>{task.title}</Title><Paragraph>{task.subtitle}</Paragraph><Text code copyable>{task.id}</Text></div><div className="task-hero-actions">{taskActions(task, snapshot.runtime_identity.runtime_identity_digest, canWrite)}{!canWrite && <Text type="secondary">当前连接只允许查看</Text>}</div></div>
+      <Descriptions className="task-identity-strip" column={{ xs: 1, md: 2, xl: 4 }}>
+        <Descriptions.Item label="算子">Fused MoE I8 TN</Descriptions.Item>
+        <Descriptions.Item label="实现语言">Triton</Descriptions.Item>
+        <Descriptions.Item label="运行设备">MetaX C500</Descriptions.Item>
+        <Descriptions.Item label="最近更新">{formatTime(detail.updatedAt)}</Descriptions.Item>
+      </Descriptions>
+    </Card>
+
+    {taskNeedsAttention(task.status) && <Alert className="section-card" type="error" showIcon title="这项任务需要人工检查" description="运行结果尚不能安全确认，请查看下方失败阶段和已保存的错误信息。" />}
+
+    <Row gutter={[16, 16]} className="detail-metric-grid">
+      <Col xs={12} xl={6}><Card><Statistic title="最佳综合评分" value={scoreText(detail.bestScore)} /></Card></Col>
+      <Col xs={12} xl={6}><Card><Statistic title="候选代码" value={detail.candidateCount} suffix="个" /></Card></Col>
+      <Col xs={12} xl={6}><Card><Statistic title="完成评测" value={detail.completedAttempts} suffix={`/ ${detail.attempts.length}`} /></Card></Col>
+      <Col xs={12} xl={6}><Card><Statistic title="当前步骤" value={detail.currentStage} /></Card></Col>
+    </Row>
+
+    <Card className="detail-section" title="执行进度" extra={<Text strong>{detail.progress}%</Text>}>
+      <Progress aria-label={`任务完成进度 ${detail.progress}%`} percent={detail.progress} status={taskNeedsAttention(task.status) ? 'exception' : task.status === 'RUNNING' ? 'active' : 'normal'} />
+      <div className="stage-flow">{detail.stages.map((stage, index) => <div className={`stage-node stage-${stage.status.toLowerCase()}`} key={stage.key}><span>{String(index + 1).padStart(2, '0')}</span><div><strong>{stage.label}</strong><small>{stage.total ? `${stage.completed} / ${stage.total} 次完成` : '尚未执行'}</small></div><StatusBadge value={stage.status} /></div>)}</div>
+    </Card>
+
+    <Card className="detail-section" title="优化轮次" extra={<Text type="secondary">共 {detail.rounds.length} 轮</Text>}>
+      {detail.rounds.length === 0 ? <Empty description="任务还没有生成候选代码" /> : <Collapse ghost items={detail.rounds.map((round, index) => ({
+        key: round.id,
+        label: <div className="round-summary"><strong>第 {round.index || detail.rounds.length - index} 轮</strong><span>{round.stage}</span><span>{round.attempts.length} 次评测</span><span>{round.bestScore == null ? '暂无评分' : `最佳 ${scoreText(round.bestScore)}`}</span><StatusBadge value={round.status} /></div>,
+        children: <Descriptions column={{ xs: 1, md: 2 }} size="small"><Descriptions.Item label="候选代码"><Text code copyable={{ text: round.candidateHash }}>{shortIdentity(round.candidateHash, 20)}</Text></Descriptions.Item><Descriptions.Item label="最近更新">{formatTime(round.updatedAt)}</Descriptions.Item><Descriptions.Item label="运行结果">{round.outcome ? statusLabel(round.outcome) : '等待结果'}</Descriptions.Item><Descriptions.Item label="到达阶段">{round.stage}</Descriptions.Item>{round.error && <Descriptions.Item label="失败原因" span={2}><Text type="danger">{round.error}</Text></Descriptions.Item>}</Descriptions>,
+      }))} />}
+    </Card>
+
+    <Card className="detail-section" title="性能结果" extra={<Text type="secondary">只显示已保存的正式评测</Text>}><ResultRecords detail={detail} /></Card>
+
+    <Row gutter={[16, 16]} className="detail-section-row">
+      <Col xs={24} xl={12}><Card className="detail-section" title="最佳候选代码">{bestCandidate ? <><Paragraph>当前任务中评分最高的候选代码。</Paragraph><div className="candidate-identity"><Text code copyable={{ text: bestCandidate }}>{bestCandidate}</Text></div><Space wrap><Button onClick={() => void showArtifact()} loading={artifactLoading} disabled={!bestArtifactId}>查看源代码</Button><Button disabled>与基准对比</Button></Space>{!bestArtifactId && <Text className="capability-note" type="secondary">当前记录没有可读取的源码制品。</Text>}{artifactError && <Alert className="inline-feedback" type="error" showIcon title="无法读取候选代码" description={artifactError} />}</> : <Empty description="当前还没有候选代码" />}</Card></Col>
+      <Col xs={24} xl={12}><Card className="detail-section" title="Profiler 分析"><div className="profiler-task-state"><Tag color={profilerReady ? 'green' : 'red'}>{profilerReady ? '工具已就绪' : '工具不可用'}</Tag><Title level={4}>本任务尚未采集性能分析</Title><Paragraph>完成常规评测后，可由受信流程采集编译信息与 MetaX 硬件 trace。</Paragraph></div></Card></Col>
+    </Row>
+
+    <Card className="detail-section" title="资源消耗">
+      {detail.budgets.length === 0 ? <Empty description="这项任务没有独立的长期预算记录" /> : <><Row gutter={[12, 12]}><Col xs={12} lg={6}><Statistic title="GPU 时间" value={formatDuration(detail.actualGpuMs)} /></Col><Col xs={12} lg={6}><Statistic title="总运行时间" value={formatDuration(detail.actualWallMs)} /></Col><Col xs={12} lg={6}><Statistic title="Token" value={detail.actualTokens.toLocaleString('zh-CN')} /></Col><Col xs={12} lg={6}><Statistic title="已预留 GPU" value={formatDuration(detail.reservedGpuMs)} /></Col></Row><Progress aria-label="GPU 预算使用进度" className="usage-progress" percent={detail.reservedGpuMs ? Math.min(100, Math.round(detail.actualGpuMs / detail.reservedGpuMs * 100)) : 0} format={(value) => `已使用 ${value}%`} /></>}
+    </Card>
+
+    <Collapse className="advanced-evidence" items={[{ key: 'evidence', label: '高级技术信息', children: <Descriptions column={{ xs: 1, md: 2 }} size="small"><Descriptions.Item label="任务编号"><Text code copyable>{task.id}</Text></Descriptions.Item><Descriptions.Item label="运行环境"><Text code copyable>{snapshot.runtime_identity.execution_environment_digest}</Text></Descriptions.Item><Descriptions.Item label="命名空间"><Text code copyable>{snapshot.runtime_identity.namespace_id}</Text></Descriptions.Item><Descriptions.Item label="Profiler 配置"><Text code copyable>{snapshot.runtime_identity.profiler_activation_profile_digest}</Text></Descriptions.Item><Descriptions.Item label="评测关系">{detail.relations.length} 条</Descriptions.Item><Descriptions.Item label="子任务">{detail.children.length} 个</Descriptions.Item></Descriptions> }]} />
+    <Modal open={Boolean(artifact)} onCancel={() => setArtifact(undefined)} onOk={downloadArtifact} cancelText="关闭" okText={`下载 ${artifact?.entrypoint ?? ''}`} width={900} title="候选源代码">
+      {artifact && <><Descriptions size="small" column={1}><Descriptions.Item label="文件">{artifact.entrypoint}</Descriptions.Item><Descriptions.Item label="制品"><Text code copyable>{artifact.artifact_id}</Text></Descriptions.Item></Descriptions><pre className="artifact-source"><code>{artifact.source}</code></pre></>}
+    </Modal>
+  </section>
+}
+
+export function RunRecordsPage({ snapshot, canWrite = false, selectedTaskId, onOpenTask, onBack, onCreate }: { snapshot: ConsoleSnapshot; canWrite?: boolean; selectedTaskId?: string; onOpenTask: (id: string) => void; onBack: () => void; onCreate: () => void }) {
   const tasks = useMemo(() => taskSummaries(snapshot), [snapshot])
+  const details = useMemo(() => new Map(tasks.map((task) => [task.id, taskDetail(snapshot, task)])), [snapshot, tasks])
   const [filter, setFilter] = useState('ALL')
-  const filtered = tasks.filter((task) => filter === 'ALL' || (filter === 'ACTIVE' ? task.status === 'RUNNING' : task.kind === filter))
-  const [selectedId, setSelectedId] = useState(tasks[0]?.id ?? '')
-  const selected = filtered.find((task) => task.id === selectedId) ?? filtered[0]
-  return <section aria-labelledby="tasks-title">
-    <div className="page-heading"><div><Text className="eyebrow">任务中心</Text><Title id="tasks-title" level={2}>运行记录与结果</Title><Paragraph type="secondary">选择一个任务，查看进度、性能结果和资源用量。</Paragraph></div><Select aria-label="筛选任务" value={filter} onChange={(value) => { setFilter(value); setSelectedId('') }} options={[{ value: 'ALL', label: '全部任务' }, { value: 'ACTIVE', label: '正在运行' }, { value: 'LONG', label: '长期任务' }, { value: 'RUN', label: '短期任务' }, { value: 'BENCHMARK', label: '策略对照' }]} /></div>
-    <Row gutter={[16, 16]}><Col xs={24} xl={8}><Card className="task-list-panel" title={`任务列表 · ${filtered.length}`}>{filtered.length === 0 ? <Empty description="没有符合条件的任务" /> : <div className="task-list">{filtered.map((task) => <button type="button" key={`${task.kind}-${task.id}`} className={`task-list-item ${selected?.id === task.id ? 'selected' : ''}`} onClick={() => setSelectedId(task.id)}><span><strong>{task.title}</strong><small>{formatTime(task.updatedAt)} · {shortIdentity(task.id, 14)}</small></span><StatusBadge value={task.status} /></button>)}</div>}</Card></Col><Col xs={24} xl={16}>{selected ? <Card className="task-detail-panel"><TaskDetail task={selected} snapshot={snapshot} canWrite={canWrite} /></Card> : <Card><Empty description="请选择一个任务" /></Card>}</Col></Row>
+  const [search, setSearch] = useState('')
+  const selected = selectedTaskId ? details.get(selectedTaskId) : undefined
+  if (selected) return <TaskDetailPage detail={selected} snapshot={snapshot} canWrite={canWrite} onBack={onBack} />
+  const normalizedSearch = search.trim().toLowerCase()
+  const filtered = tasks.filter((task) => {
+    const matchesFilter = filter === 'ALL' || (filter === 'ACTIVE' ? task.status === 'RUNNING' : filter === 'ATTENTION' ? taskNeedsAttention(task.status) : filter === 'DONE' ? ['COMPLETED', 'PROMOTED', 'SUCCEEDED', 'SUCCESS', 'STOPPED'].includes(task.status) : task.kind === filter)
+    const matchesSearch = !normalizedSearch || `${task.title} ${task.id}`.toLowerCase().includes(normalizedSearch)
+    return matchesFilter && matchesSearch
+  })
+  const active = tasks.filter((task) => task.status === 'RUNNING').length
+  const attention = tasks.filter((task) => taskNeedsAttention(task.status)).length
+  const completed = tasks.filter((task) => ['COMPLETED', 'PROMOTED', 'SUCCEEDED', 'SUCCESS', 'STOPPED'].includes(task.status)).length
+  const lease = snapshot.data.resource_leases.find((row) => row.status === 'ACTIVE' || row.status === 'QUARANTINED')
+  const columns = [
+    { title: '状态', key: 'status', width: 130, render: (_: unknown, task: TaskSummary) => <StatusBadge value={task.status} /> },
+    { title: '任务', key: 'task', render: (_: unknown, task: TaskSummary) => <div className="run-name-cell"><strong>{task.title}</strong><small>{taskKindLabel(task)} · {shortIdentity(task.id, 18)}</small></div> },
+    { title: '算子与语言', key: 'operator', width: 185, render: () => <div className="run-fact-cell"><strong>Fused MoE I8 TN</strong><small>Triton</small></div> },
+    { title: '当前阶段', key: 'stage', width: 140, render: (_: unknown, task: TaskSummary) => details.get(task.id)?.currentStage ?? '等待开始' },
+    { title: '最佳结果', key: 'result', width: 130, render: (_: unknown, task: TaskSummary) => scoreText(details.get(task.id)?.bestScore ?? null) },
+    { title: '进度', key: 'progress', width: 150, render: (_: unknown, task: TaskSummary) => <Progress aria-label={`${task.title} 完成进度`} size="small" percent={details.get(task.id)?.progress ?? 0} /> },
+    { title: '最近更新', key: 'updated', width: 150, render: (_: unknown, task: TaskSummary) => formatTime(task.updatedAt) },
+  ]
+  return <section aria-labelledby="runs-title">
+    <div className="page-heading"><div><Text className="eyebrow">算子优化</Text><Title id="runs-title" level={2}>运行记录</Title><Paragraph type="secondary">查看每项任务的进度、最佳结果和完整优化过程。</Paragraph></div><Button type="primary" onClick={onCreate}>新建任务</Button></div>
+    <Row gutter={[16, 16]} className="run-overview">
+      <Col xs={12} xl={6}><Card><Statistic title="正在运行" value={active} suffix="项" /></Card></Col>
+      <Col xs={12} xl={6}><Card><Statistic title="需要处理" value={attention} suffix="项" /></Card></Col>
+      <Col xs={12} xl={6}><Card><Statistic title="最近完成" value={completed} suffix="项" /></Card></Col>
+      <Col xs={12} xl={6}><Card><Statistic title="GPU 状态" value={lease?.status === 'QUARANTINED' ? '需要检查' : lease ? '使用中' : '空闲'} /></Card></Col>
+    </Row>
+    <Card className="run-records-card">
+      <div className="run-toolbar"><Input.Search allowClear aria-label="搜索运行记录" placeholder="搜索任务名称或编号" value={search} onChange={(event) => setSearch(event.target.value)} /><Select aria-label="筛选运行记录" value={filter} onChange={setFilter} options={[{ value: 'ALL', label: '全部任务' }, { value: 'ACTIVE', label: '正在运行' }, { value: 'ATTENTION', label: '需要处理' }, { value: 'DONE', label: '已完成' }, { value: 'LONG', label: '长期优化' }, { value: 'RUN', label: '短期任务' }, { value: 'BENCHMARK', label: '策略对照' }]} /></div>
+      <Table rowKey={(task) => `${task.kind}-${task.id}`} dataSource={filtered} columns={columns} scroll={{ x: 1080 }} pagination={{ pageSize: 12, hideOnSinglePage: true }} locale={{ emptyText: <Empty description="没有符合条件的任务"><Button type="primary" onClick={onCreate}>新建任务</Button></Empty> }} onRow={(task) => ({ onClick: () => onOpenTask(task.id), onKeyDown: (event) => { if (event.key === 'Enter' || event.key === ' ') onOpenTask(task.id) }, tabIndex: 0, role: 'button', 'aria-label': `查看任务 ${task.title}` })} />
+    </Card>
   </section>
 }
 
 function DataDiagnostics({ snapshot }: { snapshot: ConsoleSnapshot }) {
   const tables = [['runs', '任务', snapshot.data.runs], ['iterations', '优化轮次', snapshot.data.iterations], ['attempts', '评测步骤', snapshot.data.evaluation_attempts], ['experiments', '评测结果', snapshot.data.experiments], ['relations', '结果关系', snapshot.data.experiment_relations], ['campaigns', '长期任务', snapshot.data.campaigns], ['children', '子任务', snapshot.data.child_runs], ['leases', 'GPU 资源记录', snapshot.data.resource_leases], ['budgets', '预算记录', snapshot.data.budget_actions], ['soak', '稳定性测试', snapshot.data.soak_generations], ['violations', '异常记录', snapshot.data.soak_violations]] as const
-  return <Card title="原始数据" extra={<Tag>高级功能</Tag>}><Paragraph type="secondary">用于排查问题。日常查看请使用任务中心和系统状态。</Paragraph><Tabs className="diagnostic-tabs" tabPlacement="start" items={tables.map(([key, label, rows]) => ({ key, label: `${label} (${rows.length})`, children: <GenericTable rows={rows} identity={key === 'experiments' ? 'experiment_uid' : 'id'} /> }))} /></Card>
+  return <Card title="原始数据" extra={<Tag>高级功能</Tag>}><Paragraph type="secondary">用于排查问题。日常查看请使用运行记录和系统状态。</Paragraph><Tabs className="diagnostic-tabs" tabPlacement="start" items={tables.map(([key, label, rows]) => ({ key, label: `${label} (${rows.length})`, children: <GenericTable rows={rows} identity={key === 'experiments' ? 'experiment_uid' : 'id'} /> }))} /></Card>
 }
 
 function RuntimeStatus({ snapshot }: { snapshot: ConsoleSnapshot }) {
@@ -156,7 +219,7 @@ function ResourceStatus({ snapshot }: { snapshot: ConsoleSnapshot }) {
     </Row>
     <Row gutter={[16, 16]}>
       <Col xs={24} xl={12}><Card title="GPU 使用记录">{latest ? <Descriptions column={1} size="small"><Descriptions.Item label="最近状态"><StatusBadge value={String(latest.status ?? 'UNAVAILABLE')} /></Descriptions.Item><Descriptions.Item label="所属任务">{String(latest.campaign_id ?? '无')}</Descriptions.Item><Descriptions.Item label="开始时间">{formatTime(latest.acquired_at)}</Descriptions.Item><Descriptions.Item label="释放时间">{formatTime(latest.released_at)}</Descriptions.Item><Descriptions.Item label="说明">{String(latest.reason ?? '—')}</Descriptions.Item></Descriptions> : <Empty description="暂无 GPU 使用记录" />}</Card></Col>
-      <Col xs={24} xl={12}><Card title="长期任务预算"><Row gutter={[12, 12]}><Col span={12}><Statistic title="已使用" value={formatDuration(actualGpu)} /></Col><Col span={12}><Statistic title="已预留" value={formatDuration(reservedGpu)} /></Col></Row><Progress className="usage-progress" percent={reservedGpu ? Math.min(100, Math.round(actualGpu / reservedGpu * 100)) : 0} format={(value) => `已使用 ${value}%`} /><Text type="secondary">仅统计系统已经记录的长期任务。</Text></Card></Col>
+      <Col xs={24} xl={12}><Card title="长期任务预算"><Row gutter={[12, 12]}><Col span={12}><Statistic title="已使用" value={formatDuration(actualGpu)} /></Col><Col span={12}><Statistic title="已预留" value={formatDuration(reservedGpu)} /></Col></Row><Progress aria-label="长期任务预算使用进度" className="usage-progress" percent={reservedGpu ? Math.min(100, Math.round(actualGpu / reservedGpu * 100)) : 0} format={(value) => `已使用 ${value}%`} /><Text type="secondary">仅统计系统已经记录的长期任务。</Text></Card></Col>
     </Row>
   </>
 }
@@ -174,7 +237,7 @@ export function SystemPage({ snapshot }: { snapshot: ConsoleSnapshot }) {
       { key: 'health', label: '运行环境', children: <RuntimeStatus snapshot={snapshot} /> },
       { key: 'resources', label: '服务器资源', children: <ResourceStatus snapshot={snapshot} /> },
       { key: 'profiler', label: 'Profiler', children: <ProfilerStatus snapshot={snapshot} /> },
-      { key: 'soak', label: '稳定性测试', children: <Card title="24 / 72 / 168 小时稳定性测试">{latestSoak ? <><Row gutter={[16, 16]}><Col xs={24} md={8}><Statistic title="当前阶段" value={String(latestSoak.stage ?? '等待开始')} /></Col><Col xs={24} md={8}><Statistic title="已累计" value={formatDuration(numberValue(latestSoak.accumulated_seconds) * 1000)} /></Col><Col xs={24} md={8}><Statistic title="目标时长" value={formatDuration(numberValue(latestSoak.required_seconds) * 1000)} /></Col></Row><Progress percent={numberValue(latestSoak.required_seconds) ? Math.min(100, Math.round(numberValue(latestSoak.accumulated_seconds) / numberValue(latestSoak.required_seconds) * 100)) : 0} /><Descriptions column={{ xs: 1, md: 2 }}><Descriptions.Item label="状态"><StatusBadge value={String(latestSoak.status ?? 'UNAVAILABLE')} /></Descriptions.Item><Descriptions.Item label="最近记录">{latestSoak.last_heartbeat_epoch ? new Date(numberValue(latestSoak.last_heartbeat_epoch) * 1000).toLocaleString('zh-CN') : '—'}</Descriptions.Item></Descriptions>{snapshot.data.soak_violations.length > 0 && <Alert type="error" showIcon title={`${snapshot.data.soak_violations.length} 条异常记录`} />}</> : <Empty description="稳定性测试尚未开始" />}</Card> },
+      { key: 'soak', label: '稳定性测试', children: <Card title="24 / 72 / 168 小时稳定性测试">{latestSoak ? <><Row gutter={[16, 16]}><Col xs={24} md={8}><Statistic title="当前阶段" value={String(latestSoak.stage ?? '等待开始')} /></Col><Col xs={24} md={8}><Statistic title="已累计" value={formatDuration(numberValue(latestSoak.accumulated_seconds) * 1000)} /></Col><Col xs={24} md={8}><Statistic title="目标时长" value={formatDuration(numberValue(latestSoak.required_seconds) * 1000)} /></Col></Row><Progress aria-label="稳定性测试完成进度" percent={numberValue(latestSoak.required_seconds) ? Math.min(100, Math.round(numberValue(latestSoak.accumulated_seconds) / numberValue(latestSoak.required_seconds) * 100)) : 0} /><Descriptions column={{ xs: 1, md: 2 }}><Descriptions.Item label="状态"><StatusBadge value={String(latestSoak.status ?? 'UNAVAILABLE')} /></Descriptions.Item><Descriptions.Item label="最近记录">{latestSoak.last_heartbeat_epoch ? new Date(numberValue(latestSoak.last_heartbeat_epoch) * 1000).toLocaleString('zh-CN') : '—'}</Descriptions.Item></Descriptions>{snapshot.data.soak_violations.length > 0 && <Alert type="error" showIcon title={`${snapshot.data.soak_violations.length} 条异常记录`} />}</> : <Empty description="稳定性测试尚未开始" />}</Card> },
       { key: 'diagnostics', label: '原始数据', children: <DataDiagnostics snapshot={snapshot} /> },
     ]} />
   </section>

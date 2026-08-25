@@ -5,10 +5,9 @@ import { bootstrapSession, bootstrapTokenFromFragment, fetchSnapshot, subscribeE
 import './styles.css'
 import { canMutate } from './operationDrafts'
 
-const Dashboard = lazy(() => import('./pages/Dashboard').then((module) => ({ default: module.Dashboard })))
 const CreateTask = lazy(() => import('./pages/CreateTask').then((module) => ({ default: module.CreateTask })))
 const dataViews = () => import('./pages/DataViews')
-const TaskCenterPage = lazy(() => dataViews().then((module) => ({ default: module.TaskCenterPage })))
+const RunRecordsPage = lazy(() => dataViews().then((module) => ({ default: module.RunRecordsPage })))
 const SystemPage = lazy(() => dataViews().then((module) => ({ default: module.SystemPage })))
 
 const { Header, Sider, Content } = Layout
@@ -16,10 +15,11 @@ const { Text } = Typography
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 const initialBootstrapToken = bootstrapTokenFromFragment()
 
-type Page = 'dashboard' | 'create' | 'tasks' | 'system'
+type Page = 'create' | 'runs' | 'system'
 
 function ConsoleApp({ mode, setMode }: { mode: 'dark' | 'light'; setMode: (mode: 'dark' | 'light') => void }) {
-  const [page, setPage] = useState<Page>('dashboard')
+  const [page, setPage] = useState<Page>('runs')
+  const [selectedTaskId, setSelectedTaskId] = useState<string>()
   const [sessionReady, setSessionReady] = useState(false)
   const [sessionError, setSessionError] = useState(
     initialBootstrapToken ? '' : '缺少一次性 bootstrap token。请从 kernel-autoresearch-console 输出的 URL 打开页面。',
@@ -54,13 +54,17 @@ function ConsoleApp({ mode, setMode }: { mode: 'dark' | 'light'; setMode: (mode:
   const pageContent = useMemo(() => {
     if (!snapshot) return null
     const pages: Record<Page, React.ReactNode> = {
-      dashboard: <Dashboard snapshot={snapshot} onNavigate={setPage} />,
       create: <CreateTask canWrite={canWrite} runtimeIdentityDigest={snapshot.runtime_identity.runtime_identity_digest} />,
-      tasks: <TaskCenterPage snapshot={snapshot} canWrite={canWrite} />,
+      runs: <RunRecordsPage snapshot={snapshot} canWrite={canWrite} selectedTaskId={selectedTaskId} onOpenTask={setSelectedTaskId} onBack={() => setSelectedTaskId(undefined)} onCreate={() => { setSelectedTaskId(undefined); setPage('create') }} />,
       system: <SystemPage snapshot={snapshot} />,
     }
     return pages[page]
-  }, [canWrite, page, snapshot])
+  }, [canWrite, page, selectedTaskId, snapshot])
+
+  const navigate = (next: Page) => {
+    setSelectedTaskId(undefined)
+    setPage(next)
+  }
 
   if (sessionError) return <Result status="error" title="控制台会话未建立" subTitle={sessionError} />
   if (!sessionReady || query.isLoading) return <div className="center"><Spin size="large" /><Text>正在连接服务器…</Text></div>
@@ -93,11 +97,10 @@ function ConsoleApp({ mode, setMode }: { mode: 'dark' | 'light'; setMode: (mode:
           <Menu
             mode="inline"
             selectedKeys={[page]}
-            onClick={({ key }) => setPage(key as Page)}
+            onClick={({ key }) => navigate(key as Page)}
             items={[
-              { key: 'dashboard', label: '工作台' },
               { key: 'create', label: '创建任务' },
-              { key: 'tasks', label: '任务中心' },
+              { key: 'runs', label: '运行记录' },
               { key: 'system', label: '系统状态' },
             ]}
           />

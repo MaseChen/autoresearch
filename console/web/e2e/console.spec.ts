@@ -27,7 +27,7 @@ const snapshot = {
     runs: [{ id: 'run-1', status: 'RUNNING', valid_candidates: 1, updated_at: '2026-08-24T00:02:00Z' }],
     iterations: [{ id: 11, run_id: 'run-1', status: 'RUNNING', stage: 'QUICK', candidate_hash: 'c'.repeat(64) }],
     evaluation_attempts: [{ id: 21, run_id: 'run-1', iteration_id: 11, experiment_uid: 'experiment-one', stage: 'SMOKE', suite: 'smoke', replicate_kind: 'validation', status: 'SUCCEEDED', history_experiment_id: 1 }], experiments: [
-      { id: 1, experiment_uid: 'experiment-one', status: 'SUCCESS', aggregate_score: 2.5, candidate_hash: 'c'.repeat(64), suite: 'smoke', backend: 'metax-c500', created_at: '2026-08-24T00:01:00Z' },
+      { id: 1, experiment_uid: 'experiment-one', status: 'SUCCESS', aggregate_score: 2.5, candidate_hash: 'c'.repeat(64), artifact_id: 'source-bundle-v1:fixture', suite: 'smoke', backend: 'metax-c500', created_at: '2026-08-24T00:01:00Z' },
       { id: 2, status: 'SUCCESS', aggregate_score: null },
     ], experiment_relations: [],
     campaigns: [{ id: 'campaign-1', mode: 'DISCOVERY', status: 'RUNNING' }],
@@ -36,6 +36,7 @@ const snapshot = {
 }
 
 test.beforeEach(async ({ page }) => {
+  page.on('pageerror', (error) => { throw error })
   await page.route('**/api/v1/session/bootstrap', (route) => route.fulfill({
     contentType: 'application/json',
     body: JSON.stringify({ schema_version: 1, request_id: 'bootstrap', data: { csrf_token: 'csrf' } }),
@@ -48,27 +49,42 @@ test.beforeEach(async ({ page }) => {
     contentType: 'text/event-stream',
     body: `id: one\nevent: snapshot\ndata: ${JSON.stringify({ snapshot })}\n\n`,
   }))
+  await page.route('**/api/v1/artifacts/**', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ schema_version: 1, request_id: 'artifact', data: { artifact: { schema_version: 1, artifact_id: 'source-bundle-v1:fixture', manifest: {}, entrypoint: 'kernel.py', media_type: 'text/x-python', source: 'def run():\n    return 1\n' } } }),
+  }))
 })
 
-test('desktop presents a four-entry workflow instead of database pages', async ({ page }, testInfo) => {
+test('desktop follows create, run records, and full task detail workflow', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop')
   await page.goto('/#bootstrap=test-bootstrap-token')
-  await expect(page.getByRole('heading', { name: '算子优化概览' })).toBeVisible()
-  for (const item of ['工作台', '创建任务', '任务中心', '系统状态']) {
+  await expect(page.getByRole('heading', { name: '运行记录' })).toBeVisible({ timeout: 15_000 })
+  for (const item of ['创建任务', '运行记录', '系统状态']) {
     await expect(page.getByRole('menuitem', { name: item })).toBeVisible()
   }
-  await expect(page.getByRole('menuitem')).toHaveCount(4)
+  await expect(page.getByRole('menuitem')).toHaveCount(3)
   const results = await new AxeBuilder({ page }).analyze()
   expect(results.violations).toEqual([])
   await expect(page.locator('.console-layout')).toHaveClass(/theme-light/)
-  await expect(page.getByText('查看详细数据')).toBeVisible()
-  const chart = page.getByRole('img', { name: /近期评测评分折线图/ })
-  await expect(chart).toHaveAttribute('aria-label', /1 次数据不可用/)
-  await expect(chart).not.toHaveAttribute('aria-label', /NaN/)
   await expect(page.locator('[aria-label*="NaN"]')).toHaveCount(0)
   await expect(page.locator('body')).not.toContainText('NaN')
-  await page.getByText('查看详细数据').click()
-  await expect(page.getByRole('cell', { name: '数据不可用' })).toBeVisible()
+  await expect(page.getByText('单次自主优化').first()).toBeVisible()
+  await expect(page.getByText('快速验证').first()).toBeVisible()
+  await expect(page.getByText('2.5').first()).toBeVisible()
+
+  await page.getByRole('button', { name: '查看任务 单次自主优化' }).click()
+  await expect(page.getByRole('heading', { name: '单次自主优化' })).toBeVisible()
+  await expect(page.getByText('执行进度')).toBeVisible()
+  await expect(page.getByText('优化轮次')).toBeVisible()
+  await expect(page.getByText('性能结果')).toBeVisible()
+  await expect(page.getByText('Profiler 分析')).toBeVisible()
+  await expect(page.getByText('综合评分 2.5')).toBeVisible()
+  await page.getByRole('button', { name: '查看源代码' }).click()
+  await expect(page.getByRole('dialog', { name: '候选源代码' })).toBeVisible()
+  await expect(page.getByText('def run():')).toBeVisible()
+  await page.getByRole('button', { name: /关\s*闭/ }).click()
+  await page.getByRole('button', { name: '返回运行记录' }).click()
+  await expect(page.getByRole('heading', { name: '运行记录' })).toBeVisible()
 
   await page.getByRole('menuitem', { name: '创建任务' }).click()
   await expect(page.getByRole('heading', { name: '创建优化任务' })).toBeVisible()
@@ -91,20 +107,12 @@ test('desktop presents a four-entry workflow instead of database pages', async (
   expect(Math.abs(lineTops[0] - gutterTops[0])).toBeLessThan(2)
   expect(Math.abs(lineTops[1] - gutterTops[1])).toBeLessThan(2)
 
-  await page.getByRole('menuitem', { name: '任务中心' }).click()
-  await expect(page.getByRole('heading', { name: '运行记录与结果' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: '单次自主优化' })).toBeVisible()
-  await page.getByRole('button', { name: /单次自主优化/ }).click()
-  await expect(page.getByText('完成进度')).toBeVisible()
-  await page.getByRole('tab', { name: '性能结果' }).click()
-  await expect(page.getByText('评分 2.5')).toBeVisible()
-
   await page.getByRole('menuitem', { name: '系统状态' }).click()
   await expect(page.getByRole('heading', { name: '服务器与评测环境' })).toBeVisible()
   await page.getByRole('tab', { name: 'Profiler' }).click()
   await expect(page.getByRole('heading', { name: '性能分析工具' })).toBeVisible()
   await page.getByRole('tab', { name: '原始数据' }).click()
-  await expect(page.getByText('用于排查问题。日常查看请使用任务中心和系统状态。')).toBeVisible()
+  await expect(page.getByText('用于排查问题。日常查看请使用运行记录和系统状态。')).toBeVisible()
 })
 
 test('tablet and mobile keep every write control disabled', async ({ page }, testInfo) => {

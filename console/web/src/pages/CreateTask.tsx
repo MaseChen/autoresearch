@@ -303,7 +303,7 @@ export function CreateTask({ canWrite, runtimeIdentityDigest }: { canWrite: bool
               <div className="execution-preview">
                 <div className="preview-block-title"><strong>执行步骤</strong></div>
                 <ol className="execution-chain">
-                  {chains[kind].map((item, index) => <li key={item}><span>{String(index + 1).padStart(2, '0')}</span><div><strong>{item}</strong><small>{index === chains[kind].length - 1 ? '完成后可在任务中心查看' : '系统自动执行'}</small></div></li>)}
+                  {chains[kind].map((item, index) => <li key={item}><span>{String(index + 1).padStart(2, '0')}</span><div><strong>{item}</strong><small>{index === chains[kind].length - 1 ? '完成后可在运行记录中查看' : '系统自动执行'}</small></div></li>)}
                 </ol>
               </div>
 

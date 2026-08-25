@@ -82,3 +82,12 @@ export interface OperationReceipt {
   result: Record<string, unknown> | null
   problem: Record<string, unknown> | null
 }
+
+export interface ScientificArtifact {
+  schema_version: 1
+  artifact_id: string
+  manifest: Record<string, unknown>
+  entrypoint: string
+  media_type: string
+  source: string
+}
