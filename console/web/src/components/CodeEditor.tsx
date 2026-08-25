@@ -1,107 +1,75 @@
-import { useEffect, useRef } from 'react'
-import { basicSetup } from 'codemirror'
-import { python } from '@codemirror/lang-python'
-import { Compartment, EditorState } from '@codemirror/state'
-import { EditorView, placeholder } from '@codemirror/view'
-
-const editorTheme = EditorView.theme({
-  '&': {
-    height: '420px',
-    fontSize: '14px',
-    backgroundColor: 'transparent',
-  },
-  '&.cm-focused': { outline: 'none' },
-  '.cm-scroller': {
-    overflow: 'auto',
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-    lineHeight: '1.65',
-  },
-  '.cm-content': {
-    minHeight: '100%',
-    padding: '12px 0',
-    caretColor: '#2563eb',
-  },
-  '.cm-line': { padding: '0 14px' },
-  '.cm-gutters': {
-    backgroundColor: '#f5f7fb',
-    borderRight: '1px solid #dbe3ee',
-  },
-  '.cm-gutterElement': {
-    minWidth: '40px',
-    padding: '0 10px 0 6px',
-    color: '#66758a',
-  },
-  '.cm-cursor': { borderLeftWidth: '2px', borderLeftColor: '#2563eb' },
-  '.cm-placeholder': { color: '#77869a', fontStyle: 'normal' },
-  '.cm-activeLine': { backgroundColor: '#f5f8ff' },
-  '.cm-activeLineGutter': { backgroundColor: '#eaf1ff', color: '#174fb2' },
-})
+import Editor from '@monaco-editor/react'
+import '../monacoSetup'
 
 export function CodeEditor({
   value,
   onChange,
   readOnly = false,
+  theme = 'light',
 }: {
   value: string
   onChange: (value: string) => void
   readOnly?: boolean
+  theme?: 'dark' | 'light'
 }) {
-  const container = useRef<HTMLDivElement>(null)
-  const callback = useRef(onChange)
-  const viewRef = useRef<EditorView | null>(null)
-  const access = useRef(new Compartment())
-  const initialValue = useRef(value)
-  const initialReadOnly = useRef(readOnly)
+  const lineCount = value.length === 0 ? 1 : value.split('\n').length
 
-  useEffect(() => {
-    callback.current = onChange
-  }, [onChange])
-
-  useEffect(() => {
-    if (!container.current) return
-    const view = new EditorView({
-      parent: container.current,
-      state: EditorState.create({
-        doc: initialValue.current,
-        extensions: [
-          basicSetup,
-          python(),
-          editorTheme,
-          placeholder('从第一行开始输入或粘贴 kernel.py'),
-          EditorView.contentAttributes.of({ 'aria-label': 'kernel.py 代码编辑器' }),
-          access.current.of([
-            EditorState.readOnly.of(initialReadOnly.current),
-            EditorView.editable.of(!initialReadOnly.current),
-          ]),
-          EditorView.updateListener.of((update) => {
-            if (update.docChanged) callback.current(update.state.doc.toString())
-          }),
-        ],
-      }),
-    })
-    viewRef.current = view
-    return () => {
-      viewRef.current = null
-      view.destroy()
-    }
-  }, [])
-
-  useEffect(() => {
-    const view = viewRef.current
-    if (!view) return
-    view.dispatch({
-      effects: access.current.reconfigure([
-        EditorState.readOnly.of(readOnly),
-        EditorView.editable.of(!readOnly),
-      ]),
-    })
-  }, [readOnly])
-
-  useEffect(() => {
-    const view = viewRef.current
-    if (!view || view.state.doc.toString() === value) return
-    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } })
-  }, [value])
-
-  return <div ref={container} className="code-editor" />
+  return (
+    <section className="code-editor-shell" aria-label="kernel.py 编辑区域">
+      <header className="code-editor-toolbar">
+        <strong>kernel.py</strong>
+        <span>Python</span>
+        {readOnly && <span className="code-editor-readonly">只读</span>}
+      </header>
+      <div className="code-editor-frame">
+        <Editor
+          height="520px"
+          path="file:///candidate/kernel.py"
+          language="python"
+          theme={theme === 'dark' ? 'vs-dark' : 'vs'}
+          value={value}
+          onChange={(nextValue) => onChange(nextValue ?? '')}
+          loading={<div className="code-editor-loading" role="status">正在加载代码编辑器…</div>}
+          keepCurrentModel={false}
+          options={{
+            ariaLabel: 'kernel.py 代码编辑器',
+            accessibilitySupport: 'auto',
+            automaticLayout: true,
+            bracketPairColorization: { enabled: true },
+            contextmenu: true,
+            cursorBlinking: 'blink',
+            detectIndentation: false,
+            folding: true,
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+            fontSize: 14,
+            glyphMargin: false,
+            guides: { bracketPairs: true, indentation: true },
+            hideCursorInOverviewRuler: true,
+            insertSpaces: true,
+            lineHeight: 22,
+            lineNumbers: 'on',
+            lineNumbersMinChars: 3,
+            minimap: { enabled: false },
+            occurrencesHighlight: 'singleFile',
+            overviewRulerLanes: 0,
+            padding: { top: 14, bottom: 14 },
+            readOnly,
+            renderLineHighlight: 'all',
+            renderWhitespace: 'selection',
+            scrollBeyondLastLine: false,
+            selectionHighlight: true,
+            smoothScrolling: false,
+            stickyScroll: { enabled: false },
+            tabSize: 4,
+            wordWrap: 'on',
+          }}
+        />
+      </div>
+      <footer className="code-editor-status" aria-label="编辑器状态">
+        <span>{lineCount} 行</span>
+        <span>空格: 4</span>
+        <span>UTF-8</span>
+      </footer>
+    </section>
+  )
 }

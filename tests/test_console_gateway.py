@@ -388,6 +388,7 @@ class ConsoleGatewayTests(unittest.TestCase):
         self.assertNotIn("__CSP_NONCE__", page.text)
         self.assertIn('meta name="csp-nonce"', page.text)
         self.assertIn("script-src 'nonce-", page.headers["content-security-policy"])
+        self.assertIn("worker-src 'self'", page.headers["content-security-policy"])
 
     def test_runtime_requires_one_time_session_and_returns_snapshot(self) -> None:
         self.assertEqual(self.client.get("/api/v1/runtime").status_code, 401)

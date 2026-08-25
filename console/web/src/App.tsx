@@ -54,12 +54,12 @@ function ConsoleApp({ mode, setMode }: { mode: 'dark' | 'light'; setMode: (mode:
   const pageContent = useMemo(() => {
     if (!snapshot) return null
     const pages: Record<Page, React.ReactNode> = {
-      create: <CreateTask canWrite={canWrite} runtimeIdentityDigest={snapshot.runtime_identity.runtime_identity_digest} />,
+      create: <CreateTask canWrite={canWrite} runtimeIdentityDigest={snapshot.runtime_identity.runtime_identity_digest} mode={mode} />,
       runs: <RunRecordsPage snapshot={snapshot} canWrite={canWrite} selectedTaskId={selectedTaskId} onOpenTask={setSelectedTaskId} onBack={() => setSelectedTaskId(undefined)} onCreate={() => { setSelectedTaskId(undefined); setPage('create') }} />,
       system: <SystemPage snapshot={snapshot} />,
     }
     return pages[page]
-  }, [canWrite, page, selectedTaskId, snapshot])
+  }, [canWrite, mode, page, selectedTaskId, snapshot])
 
   const navigate = (next: Page) => {
     setSelectedTaskId(undefined)

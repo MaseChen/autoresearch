@@ -79,7 +79,7 @@ function redactedPreview(value: Record<string, unknown> | null, sourceBytes: num
   }
 }
 
-export function CreateTask({ canWrite, runtimeIdentityDigest }: { canWrite: boolean; runtimeIdentityDigest: string }) {
+export function CreateTask({ canWrite, runtimeIdentityDigest, mode }: { canWrite: boolean; runtimeIdentityDigest: string; mode: 'dark' | 'light' }) {
   const [cycle, setCycle] = useState<TaskCycle>('SHORT')
   const [kind, setKind] = useState<TaskKind>('MANUAL_EVALUATION_START')
   const [source, setSource] = useState('')
@@ -272,8 +272,8 @@ export function CreateTask({ canWrite, runtimeIdentityDigest }: { canWrite: bool
                     </Upload>
                     <Text type={sourceBytes > 262_144 ? 'danger' : 'secondary'}> {sourceBytes.toLocaleString()} / 262,144 bytes</Text>
                   </Form.Item>
-                  <Suspense fallback={<div className="code-editor" aria-label="正在加载候选编辑器" />}>
-                    <CodeEditor value={source} onChange={setSource} readOnly={locked} />
+                  <Suspense fallback={<div className="code-editor-loading" role="status">正在加载代码编辑器…</div>}>
+                    <CodeEditor value={source} onChange={setSource} readOnly={locked} theme={mode} />
                   </Suspense>
                 </>
               )}

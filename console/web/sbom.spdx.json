@@ -3,13 +3,13 @@
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
   "name": "@kernel-research/console-web@1.0.0",
-  "documentNamespace": "https://github.com/masechen/autoresearch/sbom/console-v1/493abfc44bcd55b40cc74873e2c9895b7146211caf21424f85e55d22890f5b3b",
+  "documentNamespace": "https://github.com/masechen/autoresearch/sbom/console-v1/da7e745399b64f9551864140f4785a6010ce70cb80b2ab1611156e4d45f7895a",
   "creationInfo": {
     "created": "1970-01-01T00:00:00.000Z",
     "creators": [
       "Tool: npm/cli-11.17.0"
     ],
-    "comment": "Deterministic package-lock SHA-256: 493abfc44bcd55b40cc74873e2c9895b7146211caf21424f85e55d22890f5b3b"
+    "comment": "Deterministic package-lock SHA-256: da7e745399b64f9551864140f4785a6010ce70cb80b2ab1611156e4d45f7895a"
   },
   "documentDescribes": [
     "SPDXRef-Package-kernel-research.console-web-1.0.0"
@@ -743,190 +743,6 @@
         {
           "algorithm": "SHA512",
           "checksumValue": "72dc6d27f780fadfbaab6fbebe3e63ec5617de746edf5d6ad707d81f7c6394b3ac733865871020d8558d5178691af030dc15a8d7105cbce57afd82dcdabe4527"
-        }
-      ]
-    },
-    {
-      "name": "@codemirror/autocomplete",
-      "SPDXID": "SPDXRef-Package-codemirror.autocomplete-6.20.3",
-      "versionInfo": "6.20.3",
-      "packageFileName": "node_modules/@codemirror/autocomplete",
-      "downloadLocation": "https://registry.npmjs.org/@codemirror/autocomplete/-/autocomplete-6.20.3.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/%40codemirror/autocomplete@6.20.3"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "b65a2c52a6fedc16f10b165dbb8b4a7918213c50be40ceeae17e5884a57678298f1bed6bd85ddfe00692cf9b02ac5a94b57e09876d1515329e725d7a320895f6"
-        }
-      ]
-    },
-    {
-      "name": "@codemirror/commands",
-      "SPDXID": "SPDXRef-Package-codemirror.commands-6.11.0",
-      "versionInfo": "6.11.0",
-      "packageFileName": "node_modules/@codemirror/commands",
-      "downloadLocation": "https://registry.npmjs.org/@codemirror/commands/-/commands-6.11.0.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/%40codemirror/commands@6.11.0"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "fcae1197904dd0eb5388f5a624276a383bb7f179c332c0f1298e6b82b3e70a4bad3d325fdb055b9288b12df79a945e4ac2c7bfb3c3fc3398c0894462c12c2714"
-        }
-      ]
-    },
-    {
-      "name": "@codemirror/lang-python",
-      "SPDXID": "SPDXRef-Package-codemirror.lang-python-6.2.1",
-      "versionInfo": "6.2.1",
-      "packageFileName": "node_modules/@codemirror/lang-python",
-      "downloadLocation": "https://registry.npmjs.org/@codemirror/lang-python/-/lang-python-6.2.1.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/%40codemirror/lang-python@6.2.1"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "2118c2f11501867f66191f72c1e70d841e75c9e3d608682f1df63595637f32ba7770ab87af48ac0ca89afbd1e7be18963673296c6856ae486e58e734f5ec51cb"
-        }
-      ]
-    },
-    {
-      "name": "@codemirror/language",
-      "SPDXID": "SPDXRef-Package-codemirror.language-6.12.4",
-      "versionInfo": "6.12.4",
-      "packageFileName": "node_modules/@codemirror/language",
-      "downloadLocation": "https://registry.npmjs.org/@codemirror/language/-/language-6.12.4.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/%40codemirror/language@6.12.4"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "d6ae0f693fa8e8f6e0a6426de10f05bf95c9c53cb8154678316113b72883c372743f2afd136bea70a2fe93dc1cbe335322c6aec6f13b39f9968f71513c743be8"
-        }
-      ]
-    },
-    {
-      "name": "@codemirror/lint",
-      "SPDXID": "SPDXRef-Package-codemirror.lint-6.9.7",
-      "versionInfo": "6.9.7",
-      "packageFileName": "node_modules/@codemirror/lint",
-      "downloadLocation": "https://registry.npmjs.org/@codemirror/lint/-/lint-6.9.7.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/%40codemirror/lint@6.9.7"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "dbcffe8962d8c4ac6cbc66214982fbcda099a8bcf9f851450eaf6d56cbc6bfd92ff116387c501c849e565fd33762bad195322c1028ec5cfa9e3609d298d3f676"
-        }
-      ]
-    },
-    {
-      "name": "@codemirror/search",
-      "SPDXID": "SPDXRef-Package-codemirror.search-6.7.1",
-      "versionInfo": "6.7.1",
-      "packageFileName": "node_modules/@codemirror/search",
-      "downloadLocation": "https://registry.npmjs.org/@codemirror/search/-/search-6.7.1.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/%40codemirror/search@6.7.1"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "b8c7b950ee8f6a626d487ad78611cecd25f745e5ad889aef6ba1a73ccc123ab66d884c5be57e5e13186bd8e519415bddc4fb0aa58dd1a369856d069da4f5a61c"
-        }
-      ]
-    },
-    {
-      "name": "@codemirror/state",
-      "SPDXID": "SPDXRef-Package-codemirror.state-6.7.1",
-      "versionInfo": "6.7.1",
-      "packageFileName": "node_modules/@codemirror/state",
-      "downloadLocation": "https://registry.npmjs.org/@codemirror/state/-/state-6.7.1.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/%40codemirror/state@6.7.1"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "f50ccd0e01381180e70077eb4e547697088f72288eca62edc0a2bef321d0cc273b1978403fdc5d11b109172d88581d63f5419497d06c80c993a3f226034d93ec"
-        }
-      ]
-    },
-    {
-      "name": "@codemirror/view",
-      "SPDXID": "SPDXRef-Package-codemirror.view-6.43.9",
-      "versionInfo": "6.43.9",
-      "packageFileName": "node_modules/@codemirror/view",
-      "downloadLocation": "https://registry.npmjs.org/@codemirror/view/-/view-6.43.9.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/%40codemirror/view@6.43.9"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "b13b94cd3a4f30579b46183a75ac0286828a827748c1f8e6260295c4179f3c495c53637043a005ae8ba9934485a847ab43264e1917c336748df03c3f94c02c5f"
         }
       ]
     },
@@ -2288,11 +2104,11 @@
       ]
     },
     {
-      "name": "@lezer/common",
-      "SPDXID": "SPDXRef-Package-lezer.common-1.5.2",
-      "versionInfo": "1.5.2",
-      "packageFileName": "node_modules/@lezer/common",
-      "downloadLocation": "https://registry.npmjs.org/@lezer/common/-/common-1.5.2.tgz",
+      "name": "@monaco-editor/loader",
+      "SPDXID": "SPDXRef-Package-monaco-editor.loader-1.7.0",
+      "versionInfo": "1.7.0",
+      "packageFileName": "node_modules/@monaco-editor/loader",
+      "downloadLocation": "https://registry.npmjs.org/@monaco-editor/loader/-/loader-1.7.0.tgz",
       "filesAnalyzed": false,
       "homepage": "NOASSERTION",
       "licenseDeclared": "MIT",
@@ -2300,22 +2116,22 @@
         {
           "referenceCategory": "PACKAGE-MANAGER",
           "referenceType": "purl",
-          "referenceLocator": "pkg:npm/%40lezer/common@1.5.2"
+          "referenceLocator": "pkg:npm/%40monaco-editor/loader@1.7.0"
         }
       ],
       "checksums": [
         {
           "algorithm": "SHA512",
-          "checksumValue": "b31404e3ad1f3d9c94dec75cf2569fc623f0247073651cbfb9d345ca7190932d5278f60176190197590e6a003db93de9c51f0ad3d6ceae64d4a80f706ff3e349"
+          "checksumValue": "808c11d47ac9aebc7ebdfc8e858982674fc9716a86e646df1bbf9dddffc2d4b5e4d84bf301b1d2837310e653b6b0c968f62ce8019d38b21a217ca2d54fa72b54"
         }
       ]
     },
     {
-      "name": "@lezer/highlight",
-      "SPDXID": "SPDXRef-Package-lezer.highlight-1.2.3",
-      "versionInfo": "1.2.3",
-      "packageFileName": "node_modules/@lezer/highlight",
-      "downloadLocation": "https://registry.npmjs.org/@lezer/highlight/-/highlight-1.2.3.tgz",
+      "name": "@monaco-editor/react",
+      "SPDXID": "SPDXRef-Package-monaco-editor.react-4.7.0",
+      "versionInfo": "4.7.0",
+      "packageFileName": "node_modules/@monaco-editor/react",
+      "downloadLocation": "https://registry.npmjs.org/@monaco-editor/react/-/react-4.7.0.tgz",
       "filesAnalyzed": false,
       "homepage": "NOASSERTION",
       "licenseDeclared": "MIT",
@@ -2323,82 +2139,13 @@
         {
           "referenceCategory": "PACKAGE-MANAGER",
           "referenceType": "purl",
-          "referenceLocator": "pkg:npm/%40lezer/highlight@1.2.3"
+          "referenceLocator": "pkg:npm/%40monaco-editor/react@4.7.0"
         }
       ],
       "checksums": [
         {
           "algorithm": "SHA512",
-          "checksumValue": "a97747ed4a93bc67dd54120dae02a10ec553253c5a72d34dc4b93bf94330661535de530768e06525ef55aa9f74ef26b9e98dfe79ddad96acf2b3b8c3913996d2"
-        }
-      ]
-    },
-    {
-      "name": "@lezer/lr",
-      "SPDXID": "SPDXRef-Package-lezer.lr-1.4.10",
-      "versionInfo": "1.4.10",
-      "packageFileName": "node_modules/@lezer/lr",
-      "downloadLocation": "https://registry.npmjs.org/@lezer/lr/-/lr-1.4.10.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/%40lezer/lr@1.4.10"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "ae70a94c805a7cec78991a78df13b10c96c58a9266fdcd1c89afd5e5388696198c6bec2c49da06994377c3906aae4b3fd3d43f0f8b4d02659a4fca7a3518bbec"
-        }
-      ]
-    },
-    {
-      "name": "@lezer/python",
-      "SPDXID": "SPDXRef-Package-lezer.python-1.1.19",
-      "versionInfo": "1.1.19",
-      "packageFileName": "node_modules/@lezer/python",
-      "downloadLocation": "https://registry.npmjs.org/@lezer/python/-/python-1.1.19.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/%40lezer/python@1.1.19"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "3214085111d1cadb0dccffd85e7aa960a5ba95aeafa001f7932a654ce3a209d8f2158e9c59618556661574720fac496a4837f88820e4b500a872407d171ba1cd"
-        }
-      ]
-    },
-    {
-      "name": "@marijn/find-cluster-break",
-      "SPDXID": "SPDXRef-Package-marijn.find-cluster-break-1.0.4",
-      "versionInfo": "1.0.4",
-      "packageFileName": "node_modules/@marijn/find-cluster-break",
-      "downloadLocation": "https://registry.npmjs.org/@marijn/find-cluster-break/-/find-cluster-break-1.0.4.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/%40marijn/find-cluster-break@1.0.4"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "5b2d15efe4865239c5f7f4e488cd612950cf8fb8ca5ddb8f35ba0c56d1d303c77248c5115aa7e0fc967d1364aaf09812266925ee4ed07bd14b78c4ab4ab69699"
+          "checksumValue": "732cd7402b4ee3bc9dcf1a50b42192406382f069376547815c50310fe0965d8168e4ea99c995289c59740f05254f201f4479ed05fc36a77c38b3d47aa1ed5e08"
         }
       ]
     },
@@ -5715,6 +5462,29 @@
       ]
     },
     {
+      "name": "@types/trusted-types",
+      "SPDXID": "SPDXRef-Package-types.trusted-types-2.0.7",
+      "versionInfo": "2.0.7",
+      "packageFileName": "node_modules/@types/trusted-types",
+      "downloadLocation": "https://registry.npmjs.org/@types/trusted-types/-/trusted-types-2.0.7.tgz",
+      "filesAnalyzed": false,
+      "homepage": "NOASSERTION",
+      "licenseDeclared": "MIT",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:npm/%40types/trusted-types@2.0.7"
+        }
+      ],
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "49c68f767d5d41cce06e5d101537933a65471542eddfde17260390368c95859eabdaf2e730b25f04f779dd2079d93ff71b7e95235fe0d8c65a5f47300ee5ec7f"
+        }
+      ]
+    },
+    {
       "name": "@typescript-eslint/eslint-plugin",
       "SPDXID": "SPDXRef-Package-typescript-eslint.eslint-plugin-8.67.0",
       "versionInfo": "8.67.0",
@@ -6911,29 +6681,6 @@
       ]
     },
     {
-      "name": "codemirror",
-      "SPDXID": "SPDXRef-Package-codemirror-6.0.2",
-      "versionInfo": "6.0.2",
-      "packageFileName": "node_modules/codemirror",
-      "downloadLocation": "https://registry.npmjs.org/codemirror/-/codemirror-6.0.2.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/codemirror@6.0.2"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "561c9d1e8b4d5b9c355062b4423f7a0704a4fd9a9ba7d59b9f22b65bf79532fe10c85e3520d446a6352114963bfee0cdbae752737ddafcf2abe220ea45dbaf1f"
-        }
-      ]
-    },
-    {
       "name": "compute-scroll-into-view",
       "SPDXID": "SPDXRef-Package-compute-scroll-into-view-3.1.1",
       "versionInfo": "3.1.1",
@@ -6976,29 +6723,6 @@
         {
           "algorithm": "SHA512",
           "checksumValue": "2afa78e7d1eb576144275080b22d4abbe318de46ac1f5f53172913cf6c5698c7aae9b936354dd75ef7c9f90eb59b4c64b56c2dfb51d261fdc966c4e6b3769126"
-        }
-      ]
-    },
-    {
-      "name": "crelt",
-      "SPDXID": "SPDXRef-Package-crelt-1.0.7",
-      "versionInfo": "1.0.7",
-      "packageFileName": "node_modules/crelt",
-      "downloadLocation": "https://registry.npmjs.org/crelt/-/crelt-1.0.7.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/crelt@1.0.7"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "68ae816d67e17f853fc0270b1ca3c997fc5ae95915b2d45a3f2c16b4c286c2e38b73fc194f2418ba8c60bd99cdb01befeca83761305061804282072f890733b8"
         }
       ]
     },
@@ -7620,6 +7344,29 @@
         {
           "algorithm": "SHA512",
           "checksumValue": "5fb049db2125b27389df4a59178b882037c1115805e17101c4bf41c61cba767ae6e61933aa6b161c64e21ea46221336133214bc808969dd2093fb675353b5e0e"
+        }
+      ]
+    },
+    {
+      "name": "dompurify",
+      "SPDXID": "SPDXRef-Package-dompurify-3.4.8",
+      "versionInfo": "3.4.8",
+      "packageFileName": "node_modules/dompurify",
+      "downloadLocation": "https://registry.npmjs.org/dompurify/-/dompurify-3.4.8.tgz",
+      "filesAnalyzed": false,
+      "homepage": "NOASSERTION",
+      "licenseDeclared": "(MPL-2.0 OR Apache-2.0)",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:npm/dompurify@3.4.8"
+        }
+      ],
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "c9bd5c12668eba6ef016f382490c727e0565bf90f8ed1737d22656a0ca5b0c85939c9ea0ac30d0caed8a149cc1da4eeed2932e25c435ce9847fff7c59f0dad8d"
         }
       ]
     },
@@ -9602,6 +9349,29 @@
       ]
     },
     {
+      "name": "marked",
+      "SPDXID": "SPDXRef-Package-marked-14.0.0",
+      "versionInfo": "14.0.0",
+      "packageFileName": "node_modules/marked",
+      "downloadLocation": "https://registry.npmjs.org/marked/-/marked-14.0.0.tgz",
+      "filesAnalyzed": false,
+      "homepage": "NOASSERTION",
+      "licenseDeclared": "MIT",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:npm/marked@14.0.0"
+        }
+      ],
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "b888f8f9f690f8c807830516d65d8fb0f82564b38b393d6e12bb74e9d00fb71da48ed78b0246ec77fd0589883f3064be8bb64a2dbef0d960a5c4793338ebabc9"
+        }
+      ]
+    },
+    {
       "name": "mdn-data",
       "SPDXID": "SPDXRef-Package-mdn-data-2.27.1",
       "versionInfo": "2.27.1",
@@ -9713,6 +9483,29 @@
         {
           "algorithm": "SHA512",
           "checksumValue": "b44047a839c8a0cff5ad7304d738246bd83a43695ca029311cbb9cece0c9e41c5b3f977873667970682d5c092ee7ddb4d02c7b762b874ce61f4810fc9fa9a6f0"
+        }
+      ]
+    },
+    {
+      "name": "monaco-editor",
+      "SPDXID": "SPDXRef-Package-monaco-editor-0.56.0",
+      "versionInfo": "0.56.0",
+      "packageFileName": "node_modules/monaco-editor",
+      "downloadLocation": "https://registry.npmjs.org/monaco-editor/-/monaco-editor-0.56.0.tgz",
+      "filesAnalyzed": false,
+      "homepage": "NOASSERTION",
+      "licenseDeclared": "MIT",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:npm/monaco-editor@0.56.0"
+        }
+      ],
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "b176e8466dc178178b9bddfc79a8b22cc7b43b1cdf5c8959bdbbf88abfe3560432d730e15a38269f2d16a0de397ee0ca842090b1831b049aeffc0ea377c68252"
         }
       ]
     },
@@ -10867,6 +10660,29 @@
       ]
     },
     {
+      "name": "state-local",
+      "SPDXID": "SPDXRef-Package-state-local-1.0.7",
+      "versionInfo": "1.0.7",
+      "packageFileName": "node_modules/state-local",
+      "downloadLocation": "https://registry.npmjs.org/state-local/-/state-local-1.0.7.tgz",
+      "filesAnalyzed": false,
+      "homepage": "NOASSERTION",
+      "licenseDeclared": "MIT",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:npm/state-local@1.0.7"
+        }
+      ],
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "1d310730d89e6a4127a1edf7b21058719ecd5fcdc00948c2bbc738d22386119b27823f7346792a4bd8f5a6a40f5f0a1b07465c553936ed111bec2390d14479f7"
+        }
+      ]
+    },
+    {
       "name": "std-env",
       "SPDXID": "SPDXRef-Package-std-env-4.2.0",
       "versionInfo": "4.2.0",
@@ -11001,29 +10817,6 @@
         {
           "algorithm": "SHA512",
           "checksumValue": "4a5c91a1291d8757583f43f37252c4eebd0cf6c81b14a28c157a4545430db8a85049b0ba550206ceadc4d2ab1fbc625a50524f1afe96b35359fe16930237db30"
-        }
-      ]
-    },
-    {
-      "name": "style-mod",
-      "SPDXID": "SPDXRef-Package-style-mod-4.1.3",
-      "versionInfo": "4.1.3",
-      "packageFileName": "node_modules/style-mod",
-      "downloadLocation": "https://registry.npmjs.org/style-mod/-/style-mod-4.1.3.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/style-mod@4.1.3"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "8bf9fc56c67276bba08f722ece597cfb1ff4d061f6be762c9357a8983f10891ad201e5ba22d6c2403b5f5c27891ddd22c2235a82a8d092fa6f44410fb56dc8a1"
         }
       ]
     },
@@ -11764,29 +11557,6 @@
       ]
     },
     {
-      "name": "w3c-keyname",
-      "SPDXID": "SPDXRef-Package-w3c-keyname-2.2.8",
-      "versionInfo": "2.2.8",
-      "packageFileName": "node_modules/w3c-keyname",
-      "downloadLocation": "https://registry.npmjs.org/w3c-keyname/-/w3c-keyname-2.2.8.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/w3c-keyname@2.2.8"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "769a2306136c08d37b4fcd939bb936e80e86f4c2f7364843b27c3d9ff7a8c52465541078084b4843f29308b2361707f76ad6925d1858164422dd29671703ef3d"
-        }
-      ]
-    },
-    {
       "name": "w3c-xmlserializer",
       "SPDXID": "SPDXRef-Package-w3c-xmlserializer-5.0.0",
       "versionInfo": "5.0.0",
@@ -12208,7 +11978,7 @@
       "relationshipType": "DESCRIBES"
     },
     {
-      "spdxElementId": "SPDXRef-Package-codemirror.lang-python-6.2.1",
+      "spdxElementId": "SPDXRef-Package-monaco-editor.react-4.7.0",
       "relatedSpdxElement": "SPDXRef-Package-kernel-research.console-web-1.0.0",
       "relationshipType": "DEPENDENCY_OF"
     },
@@ -12228,12 +11998,12 @@
       "relationshipType": "DEPENDENCY_OF"
     },
     {
-      "spdxElementId": "SPDXRef-Package-codemirror-6.0.2",
+      "spdxElementId": "SPDXRef-Package-echarts-6.1.0",
       "relatedSpdxElement": "SPDXRef-Package-kernel-research.console-web-1.0.0",
       "relationshipType": "DEPENDENCY_OF"
     },
     {
-      "spdxElementId": "SPDXRef-Package-echarts-6.1.0",
+      "spdxElementId": "SPDXRef-Package-monaco-editor-0.56.0",
       "relatedSpdxElement": "SPDXRef-Package-kernel-research.console-web-1.0.0",
       "relationshipType": "DEPENDENCY_OF"
     },
@@ -12793,156 +12563,6 @@
       "relationshipType": "DEPENDENCY_OF"
     },
     {
-      "spdxElementId": "SPDXRef-Package-codemirror.language-6.12.4",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.autocomplete-6.20.3",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.state-6.7.1",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.autocomplete-6.20.3",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.view-6.43.9",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.autocomplete-6.20.3",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-lezer.common-1.5.2",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.autocomplete-6.20.3",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.language-6.12.4",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.commands-6.11.0",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.state-6.7.1",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.commands-6.11.0",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.view-6.43.9",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.commands-6.11.0",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-lezer.common-1.5.2",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.commands-6.11.0",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.autocomplete-6.20.3",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.lang-python-6.2.1",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.language-6.12.4",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.lang-python-6.2.1",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.state-6.7.1",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.lang-python-6.2.1",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-lezer.common-1.5.2",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.lang-python-6.2.1",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-lezer.python-1.1.19",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.lang-python-6.2.1",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.state-6.7.1",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.language-6.12.4",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.view-6.43.9",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.language-6.12.4",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-lezer.common-1.5.2",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.language-6.12.4",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-lezer.highlight-1.2.3",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.language-6.12.4",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-lezer.lr-1.4.10",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.language-6.12.4",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-style-mod-4.1.3",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.language-6.12.4",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.state-6.7.1",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.lint-6.9.7",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.view-6.43.9",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.lint-6.9.7",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-crelt-1.0.7",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.lint-6.9.7",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.state-6.7.1",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.search-6.7.1",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.view-6.43.9",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.search-6.7.1",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-crelt-1.0.7",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.search-6.7.1",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-marijn.find-cluster-break-1.0.4",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.state-6.7.1",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.state-6.7.1",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.view-6.43.9",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-crelt-1.0.7",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.view-6.43.9",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-style-mod-4.1.3",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.view-6.43.9",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-w3c-keyname-2.2.8",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror.view-6.43.9",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
       "spdxElementId": "SPDXRef-Package-csstools.css-parser-algorithms-4.0.0",
       "relatedSpdxElement": "SPDXRef-Package-csstools.css-calc-3.3.0",
       "relationshipType": "PREREQUISITE_FOR"
@@ -13123,28 +12743,28 @@
       "relationshipType": "DEPENDENCY_OF"
     },
     {
-      "spdxElementId": "SPDXRef-Package-lezer.common-1.5.2",
-      "relatedSpdxElement": "SPDXRef-Package-lezer.highlight-1.2.3",
+      "spdxElementId": "SPDXRef-Package-state-local-1.0.7",
+      "relatedSpdxElement": "SPDXRef-Package-monaco-editor.loader-1.7.0",
       "relationshipType": "DEPENDENCY_OF"
     },
     {
-      "spdxElementId": "SPDXRef-Package-lezer.common-1.5.2",
-      "relatedSpdxElement": "SPDXRef-Package-lezer.lr-1.4.10",
-      "relationshipType": "DEPENDENCY_OF"
+      "spdxElementId": "SPDXRef-Package-monaco-editor-0.56.0",
+      "relatedSpdxElement": "SPDXRef-Package-monaco-editor.react-4.7.0",
+      "relationshipType": "PREREQUISITE_FOR"
     },
     {
-      "spdxElementId": "SPDXRef-Package-lezer.common-1.5.2",
-      "relatedSpdxElement": "SPDXRef-Package-lezer.python-1.1.19",
-      "relationshipType": "DEPENDENCY_OF"
+      "spdxElementId": "SPDXRef-Package-react-19.2.7",
+      "relatedSpdxElement": "SPDXRef-Package-monaco-editor.react-4.7.0",
+      "relationshipType": "PREREQUISITE_FOR"
     },
     {
-      "spdxElementId": "SPDXRef-Package-lezer.highlight-1.2.3",
-      "relatedSpdxElement": "SPDXRef-Package-lezer.python-1.1.19",
-      "relationshipType": "DEPENDENCY_OF"
+      "spdxElementId": "SPDXRef-Package-react-dom-19.2.7",
+      "relatedSpdxElement": "SPDXRef-Package-monaco-editor.react-4.7.0",
+      "relationshipType": "PREREQUISITE_FOR"
     },
     {
-      "spdxElementId": "SPDXRef-Package-lezer.lr-1.4.10",
-      "relatedSpdxElement": "SPDXRef-Package-lezer.python-1.1.19",
+      "spdxElementId": "SPDXRef-Package-monaco-editor.loader-1.7.0",
+      "relatedSpdxElement": "SPDXRef-Package-monaco-editor.react-4.7.0",
       "relationshipType": "DEPENDENCY_OF"
     },
     {
@@ -15628,41 +15248,6 @@
       "relationshipType": "DEPENDENCY_OF"
     },
     {
-      "spdxElementId": "SPDXRef-Package-codemirror.autocomplete-6.20.3",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror-6.0.2",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.commands-6.11.0",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror-6.0.2",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.language-6.12.4",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror-6.0.2",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.lint-6.9.7",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror-6.0.2",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.search-6.7.1",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror-6.0.2",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.state-6.7.1",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror-6.0.2",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-codemirror.view-6.43.9",
-      "relatedSpdxElement": "SPDXRef-Package-codemirror-6.0.2",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
       "spdxElementId": "SPDXRef-Package-path-key-3.1.1",
       "relatedSpdxElement": "SPDXRef-Package-cross-spawn-7.0.6",
       "relationshipType": "DEPENDENCY_OF"
@@ -15801,6 +15386,11 @@
       "spdxElementId": "SPDXRef-Package-esutils-2.0.3",
       "relatedSpdxElement": "SPDXRef-Package-doctrine-3.0.0",
       "relationshipType": "DEPENDENCY_OF"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-types.trusted-types-2.0.7",
+      "relatedSpdxElement": "SPDXRef-Package-dompurify-3.4.8",
+      "relationshipType": "OPTIONAL_DEPENDENCY_OF"
     },
     {
       "spdxElementId": "SPDXRef-Package-tslib-2.3.0",
@@ -16505,6 +16095,16 @@
     {
       "spdxElementId": "SPDXRef-Package-brace-expansion-5.0.9",
       "relatedSpdxElement": "SPDXRef-Package-minimatch-10.2.6",
+      "relationshipType": "DEPENDENCY_OF"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-dompurify-3.4.8",
+      "relatedSpdxElement": "SPDXRef-Package-monaco-editor-0.56.0",
+      "relationshipType": "DEPENDENCY_OF"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-marked-14.0.0",
+      "relatedSpdxElement": "SPDXRef-Package-monaco-editor-0.56.0",
       "relationshipType": "DEPENDENCY_OF"
     },
     {

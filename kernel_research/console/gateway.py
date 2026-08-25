@@ -454,6 +454,7 @@ def create_app(state: GatewayState) -> FastAPI:
                 f"script-src 'nonce-{nonce}' 'strict-dynamic'",
                 f"style-src 'self' 'nonce-{nonce}'",
                 "connect-src 'self'",
+                "worker-src 'self'",
                 "img-src 'self' data:",
                 "font-src 'self'",
                 "frame-ancestors 'none'",

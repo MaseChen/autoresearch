@@ -1,92 +1,149 @@
 {
-  "_api-CJF0Bv9d.js": {
-    "file": "assets/api-CJF0Bv9d.js",
+  "_api-D7jVcLJN.js": {
+    "file": "assets/api-D7jVcLJN.js",
     "name": "api",
     "imports": [
-      "_jsx-runtime-bzQ4Vb5N.js"
+      "_rolldown-runtime-QTnfLwEv.js",
+      "_jsx-runtime-CIxEorsV.js"
     ]
   },
-  "_jsx-runtime-bzQ4Vb5N.js": {
-    "file": "assets/jsx-runtime-bzQ4Vb5N.js",
-    "name": "jsx-runtime"
+  "_editor-BJ215w34.css": {
+    "file": "assets/editor-BJ215w34.css",
+    "src": "_editor-BJ215w34.css"
   },
-  "_preload-helper-UahojKNF.js": {
-    "file": "assets/preload-helper-UahojKNF.js",
-    "name": "preload-helper",
+  "_editor.api-BRovRFdx.js": {
+    "file": "assets/editor.api-BRovRFdx.js",
+    "name": "editor.api",
     "imports": [
-      "_jsx-runtime-bzQ4Vb5N.js",
-      "_api-CJF0Bv9d.js"
+      "_rolldown-runtime-QTnfLwEv.js",
+      "_preload-helper-Czpn1I53.js"
+    ],
+    "css": [
+      "assets/editor-BJ215w34.css"
+    ],
+    "assets": [
+      "assets/editorWebWorkerMain-J2ryhYi2.js"
     ]
   },
-  "_spin-Kv7MWlUR.js": {
-    "file": "assets/spin-Kv7MWlUR.js",
+  "_jsx-runtime-CIxEorsV.js": {
+    "file": "assets/jsx-runtime-CIxEorsV.js",
+    "name": "jsx-runtime",
+    "imports": [
+      "_rolldown-runtime-QTnfLwEv.js"
+    ]
+  },
+  "_operationDrafts-CdlWSRV9.js": {
+    "file": "assets/operationDrafts-CdlWSRV9.js",
+    "name": "operationDrafts",
+    "imports": [
+      "_rolldown-runtime-QTnfLwEv.js",
+      "_jsx-runtime-CIxEorsV.js",
+      "_api-D7jVcLJN.js"
+    ]
+  },
+  "_preload-helper-Czpn1I53.js": {
+    "file": "assets/preload-helper-Czpn1I53.js",
+    "name": "preload-helper"
+  },
+  "_rolldown-runtime-QTnfLwEv.js": {
+    "file": "assets/rolldown-runtime-QTnfLwEv.js",
+    "name": "rolldown-runtime"
+  },
+  "_spin-DhM87ofr.js": {
+    "file": "assets/spin-DhM87ofr.js",
     "name": "spin",
     "imports": [
-      "_jsx-runtime-bzQ4Vb5N.js",
-      "_api-CJF0Bv9d.js"
+      "_rolldown-runtime-QTnfLwEv.js",
+      "_jsx-runtime-CIxEorsV.js",
+      "_api-D7jVcLJN.js"
     ]
   },
-  "_tag-i5e-oAgM.js": {
-    "file": "assets/tag-i5e-oAgM.js",
+  "_tag-DX-bATrE.js": {
+    "file": "assets/tag-DX-bATrE.js",
     "name": "tag",
     "imports": [
-      "_jsx-runtime-bzQ4Vb5N.js",
-      "_api-CJF0Bv9d.js"
+      "_rolldown-runtime-QTnfLwEv.js",
+      "_jsx-runtime-CIxEorsV.js",
+      "_api-D7jVcLJN.js"
     ]
   },
   "index.html": {
-    "file": "assets/index-5Yp27pzw.js",
+    "file": "assets/index-CIk4wiWS.js",
     "name": "index",
     "src": "index.html",
     "isEntry": true,
     "imports": [
-      "_jsx-runtime-bzQ4Vb5N.js",
-      "_api-CJF0Bv9d.js",
-      "_spin-Kv7MWlUR.js",
-      "_preload-helper-UahojKNF.js"
+      "_rolldown-runtime-QTnfLwEv.js",
+      "_jsx-runtime-CIxEorsV.js",
+      "_api-D7jVcLJN.js",
+      "_spin-DhM87ofr.js",
+      "_operationDrafts-CdlWSRV9.js",
+      "_preload-helper-Czpn1I53.js"
     ],
     "dynamicImports": [
       "src/pages/CreateTask.tsx",
       "src/pages/DataViews.tsx"
     ],
     "css": [
-      "assets/index-C_eOWqMd.css"
+      "assets/index-w1xgLk-D.css"
+    ]
+  },
+  "node_modules/monaco-editor/esm/vs/editor/common/services/editorWebWorkerMain.js": {
+    "file": "assets/editorWebWorkerMain-J2ryhYi2.js",
+    "src": "node_modules/monaco-editor/esm/vs/editor/common/services/editorWebWorkerMain.js"
+  },
+  "node_modules/monaco-editor/esm/vs/languages/definitions/python/python.js": {
+    "file": "assets/python-Dzx49z6q.js",
+    "name": "python",
+    "src": "node_modules/monaco-editor/esm/vs/languages/definitions/python/python.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "_editor.api-BRovRFdx.js"
     ]
   },
   "src/components/CodeEditor.tsx": {
-    "file": "assets/CodeEditor-hMwm9urR.js",
+    "file": "assets/CodeEditor-Dncma5HD.js",
     "name": "CodeEditor",
     "src": "src/components/CodeEditor.tsx",
     "isDynamicEntry": true,
     "imports": [
-      "_jsx-runtime-bzQ4Vb5N.js"
+      "_rolldown-runtime-QTnfLwEv.js",
+      "_jsx-runtime-CIxEorsV.js",
+      "_preload-helper-Czpn1I53.js",
+      "_editor.api-BRovRFdx.js"
+    ],
+    "dynamicImports": [
+      "node_modules/monaco-editor/esm/vs/languages/definitions/python/python.js"
     ]
   },
   "src/pages/CreateTask.tsx": {
-    "file": "assets/CreateTask-CLzkV0m4.js",
+    "file": "assets/CreateTask-42EjwY4L.js",
     "name": "CreateTask",
     "src": "src/pages/CreateTask.tsx",
     "isDynamicEntry": true,
     "imports": [
-      "_jsx-runtime-bzQ4Vb5N.js",
-      "_api-CJF0Bv9d.js",
-      "_tag-i5e-oAgM.js",
-      "_preload-helper-UahojKNF.js"
+      "_rolldown-runtime-QTnfLwEv.js",
+      "_jsx-runtime-CIxEorsV.js",
+      "_api-D7jVcLJN.js",
+      "_tag-DX-bATrE.js",
+      "_operationDrafts-CdlWSRV9.js",
+      "_preload-helper-Czpn1I53.js"
     ],
     "dynamicImports": [
       "src/components/CodeEditor.tsx"
     ]
   },
   "src/pages/DataViews.tsx": {
-    "file": "assets/DataViews-CF0qhtNt.js",
+    "file": "assets/DataViews-Ks-IRgBO.js",
     "name": "DataViews",
     "src": "src/pages/DataViews.tsx",
     "isDynamicEntry": true,
     "imports": [
-      "_jsx-runtime-bzQ4Vb5N.js",
-      "_api-CJF0Bv9d.js",
-      "_tag-i5e-oAgM.js",
-      "_spin-Kv7MWlUR.js"
+      "_rolldown-runtime-QTnfLwEv.js",
+      "_jsx-runtime-CIxEorsV.js",
+      "_api-D7jVcLJN.js",
+      "_tag-DX-bATrE.js",
+      "_spin-DhM87ofr.js"
     ]
   }
 }
