@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
-import { App as AntApp, Button, ConfigProvider, Layout, Menu, Result, Segmented, Spin, Typography, theme } from 'antd'
+import { App as AntApp, Button, ConfigProvider, Layout, Menu, Result, Segmented, Spin, Tooltip, Typography, theme } from 'antd'
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
 import { bootstrapSession, bootstrapTokenFromFragment, fetchSnapshot, subscribeEvents } from './api'
 import './styles.css'
@@ -62,19 +62,19 @@ function ConsoleApp({ mode, setMode }: { mode: 'dark' | 'light'; setMode: (mode:
     return pages[page]
   }, [canWrite, page, snapshot])
 
-  if (sessionError) return <Result status="error" title="Console 会话未建立" subTitle={sessionError} />
-  if (!sessionReady || query.isLoading) return <div className="center"><Spin size="large" /><Text>正在进行可信握手…</Text></div>
-  if (query.error || !snapshot) return <Result status="error" title="远端快照不可用" subTitle={String(query.error)} extra={<Button onClick={() => void query.refetch()}>重试只读请求</Button>} />
+  if (sessionError) return <Result status="error" title="控制台会话未建立" subTitle={sessionError} />
+  if (!sessionReady || query.isLoading) return <div className="center"><Spin size="large" /><Text>正在连接服务器…</Text></div>
+  if (query.error || !snapshot) return <Result status="error" title="暂时无法读取服务器状态" subTitle={String(query.error)} extra={<Button onClick={() => void query.refetch()}>重新连接</Button>} />
   if (viewportWidth < 768) {
     const activeRuns = snapshot.data.runs.filter((row) => row.status === 'RUNNING').length
     const activeCampaigns = snapshot.data.campaigns.filter((row) => row.status === 'RUNNING').length
     return (
       <Layout className={`console-layout theme-${mode} mobile-health`}>
-        <Header className="topbar"><div className="brand"><span className="brand-mark">AR</span><h1>Autoresearch Console</h1></div></Header>
+        <Header className="topbar"><div className="brand"><h1>算子优化控制台</h1></div></Header>
         <Content className="content">
           <section aria-labelledby="mobile-health-title">
             <Typography.Title id="mobile-health-title" level={2}>运行健康状态</Typography.Title>
-            <Result status={snapshot.status === 'STABLE' ? 'success' : 'warning'} title={snapshot.status === 'STABLE' ? '系统稳定' : '数据正在变化'} subTitle="手机模式仅显示健康状态；所有写操作和任务详情均已禁用。" />
+            <Result status={snapshot.status === 'STABLE' ? 'success' : 'warning'} title={snapshot.status === 'STABLE' ? '系统稳定' : '数据正在变化'} subTitle="手机模式只显示健康状态，不能执行任务操作。" />
             <Typography.Paragraph>活动单次任务：{activeRuns} · 活动长期任务：{activeCampaigns}</Typography.Paragraph>
           </section>
         </Content>
@@ -85,8 +85,8 @@ function ConsoleApp({ mode, setMode }: { mode: 'dark' | 'light'; setMode: (mode:
   return (
     <Layout className={`console-layout theme-${mode}`}>
       <Header className="topbar">
-        <div className="brand"><span className="brand-mark">AR</span><span><h1>Autoresearch Console</h1><small>可信算子研究控制台</small></span></div>
-        <div className="topbar-status"><span className={`live-dot ${streamStatus}`} />{streamStatus === 'live' ? '实时' : '连接滞后'}<Text code>{snapshot.runtime_identity.git_commit.slice(0, 10)}</Text><Segmented size="small" value={mode} onChange={(value) => setMode(value as 'dark' | 'light')} options={[{ label: '暗色', value: 'dark' }, { label: '浅色', value: 'light' }]} /></div>
+        <div className="brand"><span><h1>算子优化控制台</h1><small>Autoresearch Console</small></span></div>
+        <div className="topbar-status"><span className={`live-dot ${streamStatus}`} />{streamStatus === 'live' ? '实时' : '连接滞后'}<Tooltip title="当前服务器正在运行的控制面代码版本"><Text className="version-chip">版本 {snapshot.runtime_identity.git_commit.slice(0, 8)}</Text></Tooltip><Segmented size="small" value={mode} onChange={(value) => setMode(value as 'dark' | 'light')} options={[{ label: '暗色', value: 'dark' }, { label: '浅色', value: 'light' }]} /></div>
       </Header>
       <Layout>
         <Sider width={208} breakpoint="lg" collapsedWidth={68} className="console-sider">
@@ -98,7 +98,7 @@ function ConsoleApp({ mode, setMode }: { mode: 'dark' | 'light'; setMode: (mode:
               { key: 'dashboard', label: '工作台' },
               { key: 'create', label: '创建任务' },
               { key: 'tasks', label: '任务中心' },
-              { key: 'system', label: '系统与门禁' },
+              { key: 'system', label: '系统状态' },
             ]}
           />
         </Sider>

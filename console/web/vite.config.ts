@@ -30,6 +30,7 @@ export default defineConfig({
         'src/api.ts',
         'src/chartAccessibility.ts',
         'src/components/EChart.tsx',
+        'src/components/CodeEditor.tsx',
         'src/operationDrafts.ts',
         'src/components/StatusBadge.tsx',
         'src/presentation.ts',

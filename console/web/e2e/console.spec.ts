@@ -24,9 +24,10 @@ const snapshot = {
   observed_at: '2026-08-24T00:00:00Z',
   source_digests: {},
   data: {
-    runs: [{ id: 'run-1', status: 'RUNNING', valid_candidates: 1 }],
-    iterations: [], evaluation_attempts: [], experiments: [
-      { id: 1, status: 'SUCCESS', aggregate_score: 2.5 },
+    runs: [{ id: 'run-1', status: 'RUNNING', valid_candidates: 1, updated_at: '2026-08-24T00:02:00Z' }],
+    iterations: [{ id: 11, run_id: 'run-1', status: 'RUNNING', stage: 'QUICK', candidate_hash: 'c'.repeat(64) }],
+    evaluation_attempts: [{ id: 21, run_id: 'run-1', iteration_id: 11, experiment_uid: 'experiment-one', stage: 'SMOKE', suite: 'smoke', replicate_kind: 'validation', status: 'SUCCEEDED', history_experiment_id: 1 }], experiments: [
+      { id: 1, experiment_uid: 'experiment-one', status: 'SUCCESS', aggregate_score: 2.5, candidate_hash: 'c'.repeat(64), suite: 'smoke', backend: 'metax-c500', created_at: '2026-08-24T00:01:00Z' },
       { id: 2, status: 'SUCCESS', aggregate_score: null },
     ], experiment_relations: [],
     campaigns: [{ id: 'campaign-1', mode: 'DISCOVERY', status: 'RUNNING' }],
@@ -52,38 +53,58 @@ test.beforeEach(async ({ page }) => {
 test('desktop presents a four-entry workflow instead of database pages', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop')
   await page.goto('/#bootstrap=test-bootstrap-token')
-  await expect(page.getByRole('heading', { name: '从任务目标出发，而不是从数据库出发' })).toBeVisible()
-  for (const item of ['工作台', '创建任务', '任务中心', '系统与门禁']) {
+  await expect(page.getByRole('heading', { name: '算子优化概览' })).toBeVisible()
+  for (const item of ['工作台', '创建任务', '任务中心', '系统状态']) {
     await expect(page.getByRole('menuitem', { name: item })).toBeVisible()
   }
   await expect(page.getByRole('menuitem')).toHaveCount(4)
   const results = await new AxeBuilder({ page }).analyze()
   expect(results.violations).toEqual([])
   await expect(page.locator('.console-layout')).toHaveClass(/theme-light/)
-  await expect(page.getByText('查看无障碍数据表')).toBeVisible()
-  const chart = page.getByRole('img', { name: /近期实验 aggregate score 折线图/ })
-  await expect(chart).toHaveAttribute('aria-label', /1 个 UNAVAILABLE/)
+  await expect(page.getByText('查看详细数据')).toBeVisible()
+  const chart = page.getByRole('img', { name: /近期评测评分折线图/ })
+  await expect(chart).toHaveAttribute('aria-label', /1 次数据不可用/)
   await expect(chart).not.toHaveAttribute('aria-label', /NaN/)
   await expect(page.locator('[aria-label*="NaN"]')).toHaveCount(0)
   await expect(page.locator('body')).not.toContainText('NaN')
-  await page.getByText('查看无障碍数据表').click()
-  await expect(page.getByRole('cell', { name: 'UNAVAILABLE' })).toBeVisible()
+  await page.getByText('查看详细数据').click()
+  await expect(page.getByRole('cell', { name: '数据不可用' })).toBeVisible()
 
   await page.getByRole('menuitem', { name: '创建任务' }).click()
   await expect(page.getByRole('heading', { name: '创建优化任务' })).toBeVisible()
   await expect(page.getByText('Fused MoE I8 TN', { exact: true }).first()).toBeVisible()
   await expect(page.getByRole('button', { name: /FlashInfer Ragged Prefill/ })).toBeDisabled()
   await expect(page.getByRole('button', { name: /TileLang/ })).toBeDisabled()
-  await expect(page.getByText('计划执行链')).toBeVisible()
+  await expect(page.getByText('执行步骤', { exact: true })).toBeVisible()
+  await expect(page.getByText('编译与运行框架')).toBeVisible()
+  const editor = page.getByRole('textbox', { name: 'kernel.py 代码编辑器' })
+  await editor.click()
+  await editor.pressSequentially('import triton')
+  await page.keyboard.press('Enter')
+  await editor.pressSequentially('import numpy')
+  await expect(editor).toContainText('import triton')
+  await expect(page.locator('.cm-cursor-primary')).toBeVisible()
+  const lineTops = await page.locator('.cm-line').evaluateAll((nodes) => nodes.slice(0, 2).map((node) => node.getBoundingClientRect().top))
+  const gutterTops = await page.locator('.cm-lineNumbers .cm-gutterElement').evaluateAll((nodes) => nodes.filter((node) => ['1', '2'].includes(node.textContent ?? '')).slice(0, 2).map((node) => node.getBoundingClientRect().top))
+  expect(lineTops).toHaveLength(2)
+  expect(gutterTops).toHaveLength(2)
+  expect(Math.abs(lineTops[0] - gutterTops[0])).toBeLessThan(2)
+  expect(Math.abs(lineTops[1] - gutterTops[1])).toBeLessThan(2)
 
   await page.getByRole('menuitem', { name: '任务中心' }).click()
-  await expect(page.getByRole('heading', { name: '任务中心' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: '长期持续优化' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '运行记录与结果' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '单次自主优化' })).toBeVisible()
+  await page.getByRole('button', { name: /单次自主优化/ }).click()
+  await expect(page.getByText('完成进度')).toBeVisible()
+  await page.getByRole('tab', { name: '性能结果' }).click()
+  await expect(page.getByText('评分 2.5')).toBeVisible()
 
-  await page.getByRole('menuitem', { name: '系统与门禁' }).click()
-  await expect(page.getByRole('heading', { name: '系统与门禁' })).toBeVisible()
-  await page.getByRole('tab', { name: '数据与诊断' }).click()
-  await expect(page.getByText('这里是唯一直接展示原始账本的页面')).toBeVisible()
+  await page.getByRole('menuitem', { name: '系统状态' }).click()
+  await expect(page.getByRole('heading', { name: '服务器与评测环境' })).toBeVisible()
+  await page.getByRole('tab', { name: 'Profiler' }).click()
+  await expect(page.getByRole('heading', { name: '性能分析工具' })).toBeVisible()
+  await page.getByRole('tab', { name: '原始数据' }).click()
+  await expect(page.getByText('用于排查问题。日常查看请使用任务中心和系统状态。')).toBeVisible()
 })
 
 test('tablet and mobile keep every write control disabled', async ({ page }, testInfo) => {
@@ -91,12 +112,12 @@ test('tablet and mobile keep every write control disabled', async ({ page }, tes
   await page.goto('/#bootstrap=test-bootstrap-token')
   if (testInfo.project.name === 'mobile') {
     await expect(page.getByRole('heading', { name: '运行健康状态' })).toBeVisible()
-    await expect(page.getByText('手机模式仅显示健康状态；所有写操作和任务详情均已禁用。')).toBeVisible()
+    await expect(page.getByText('手机模式只显示健康状态，不能执行任务操作。')).toBeVisible()
     await expect(page.locator('.ant-menu')).toHaveCount(0)
     await expect(page.locator('button:not([disabled])').filter({ hasText: /确认|执行|启动|冻结/ })).toHaveCount(0)
     return
   }
   await page.getByRole('menuitem', { name: '创建任务' }).click()
   await expect(page.getByRole('heading', { name: '创建优化任务' })).toBeVisible()
-  await expect(page.getByRole('button', { name: '冻结任务配置并预检' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: '检查配置并继续' })).toBeDisabled()
 })

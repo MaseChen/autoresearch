@@ -41,7 +41,7 @@ describe('chart accessibility', () => {
     expect(aggregateScoreValue('1.25')).toBeNull()
     expect(aggregateScoreValue(Number.NaN)).toBeNull()
     expect(aggregateScoreValue(Number.POSITIVE_INFINITY)).toBeNull()
-    expect(aggregateScoreText(Number.NaN)).toBe('UNAVAILABLE')
+    expect(aggregateScoreText(Number.NaN)).toBe('数据不可用')
     expect(aggregateScoreText(1.25)).toBe('1.25')
   })
 
@@ -51,14 +51,14 @@ describe('chart accessibility', () => {
       { id: 2, aggregate_score: null },
       { id: 3, aggregate_score: Number.NaN },
     ])
-    expect(summary).toContain('1 个可用')
-    expect(summary).toContain('2 个 UNAVAILABLE')
+    expect(summary).toContain('1 次有评分')
+    expect(summary).toContain('2 次数据不可用')
     expect(summary).not.toContain('NaN')
-    expect(aggregateScoreChartSummary([])).toContain('0 个 UNAVAILABLE')
+    expect(aggregateScoreChartSummary([])).toContain('0 次数据不可用')
   })
 
   it('disables automatic numeric aria and preserves the controlled label', () => {
-    const label = '近期实验 aggregate score 折线图：1 个 UNAVAILABLE。详细数值见后续数据表。'
+    const label = '近期评测评分折线图：1 次数据不可用。详细数据见图表下方。'
     const { unmount } = render(
       <EChart
         option={{ series: [{ type: 'line', data: [1, null] }] }}
@@ -70,7 +70,7 @@ describe('chart accessibility', () => {
       aria: { enabled: false },
     }))
     const image = screen.getByRole('img', { name: label })
-    expect(image).toHaveAttribute('aria-label', expect.stringContaining('UNAVAILABLE'))
+    expect(image).toHaveAttribute('aria-label', expect.stringContaining('数据不可用'))
     expect(image).not.toHaveAttribute('aria-label', expect.stringContaining('NaN'))
 
     unmount()

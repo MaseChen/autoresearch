@@ -43,11 +43,16 @@ export const stageLabels: Record<string, string> = {
   CONFIRMATION: '确认评测',
   BASELINE_QUALIFICATION: '基准资格验证',
   DONE: '生成证据',
-  smoke: '冒烟评测',
+  smoke: '快速检查',
   quick: '快速评测',
   full_primary: '完整主评测',
   confirmation: '确认评测',
   baseline_qualification: '基准资格验证',
+  validation: '验证测试',
+  qualification: '资格测试',
+  primary: '主评测',
+  noise: '稳定性采样',
+  full: '完整测试',
 }
 
 export function statusLabel(value?: string): string {
@@ -102,7 +107,7 @@ export function taskSummaries(snapshot: ConsoleSnapshot): TaskSummary[] {
       id: String(row.id),
       kind: benchmark ? 'BENCHMARK' : 'LONG',
       title: benchmark ? '模型策略对照实验' : '长期持续优化',
-      subtitle: benchmark ? '冻结 Pro / Flash 对照组' : '多轮候选探索与人工谱系复证',
+      subtitle: benchmark ? '比较 Pro 和 Flash 两种模型策略' : '连续生成、测试并筛选候选代码',
       status: String(row.status ?? 'UNAVAILABLE'),
       updatedAt: row.updated_at ?? row.created_at,
       row,
@@ -115,8 +120,8 @@ export function taskSummaries(snapshot: ConsoleSnapshot): TaskSummary[] {
       kind: 'RUN',
       title: String(row.id).startsWith('console-manual-') ? '已有代码评测' : '单次自主优化',
       subtitle: String(row.id).startsWith('console-manual-')
-        ? '一个候选的完整 CURRENT 评测链'
-        : '受信模型生成并评测候选',
+        ? '测试一份已有 kernel.py'
+        : '模型生成并测试候选代码',
       status: String(row.status ?? 'UNAVAILABLE'),
       updatedAt: row.updated_at ?? row.created_at,
       row,

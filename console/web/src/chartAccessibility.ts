@@ -6,15 +6,15 @@ export function aggregateScoreValue(value: unknown): number | null {
 
 export function aggregateScoreText(value: unknown): string {
   const selected = aggregateScoreValue(value)
-  return selected === null ? 'UNAVAILABLE' : String(selected)
+  return selected === null ? '数据不可用' : String(selected)
 }
 
 export function aggregateScoreChartSummary(rows: ConsoleRow[]): string {
   const available = rows.filter((row) => aggregateScoreValue(row.aggregate_score) !== null).length
   const unavailable = rows.length - available
   return [
-    `近期实验 aggregate score 折线图：共 ${rows.length} 个实验，`,
-    `${available} 个可用，${unavailable} 个 UNAVAILABLE。`,
-    '详细数值和状态见后续数据表。',
+    `近期评测评分折线图：共 ${rows.length} 次评测，`,
+    `${available} 次有评分，${unavailable} 次数据不可用。`,
+    '详细数据见图表下方。',
   ].join('')
 }

@@ -66,7 +66,7 @@ export function OperationButton({
       <Space direction="vertical" className="confirm-panel">
         {error && <Alert type="error" showIcon title={error} />}
         {prepared && <>
-          <Alert type="warning" showIcon title="影响摘要已由远端冻结；确认不会修改任何参数。" />
+          <Alert type="warning" showIcon title="请核对操作内容。确认后将立即提交到服务器。" />
           <Text code copyable>{prepared.operation_digest}</Text>
           <pre>{JSON.stringify(prepared.impact, null, 2)}</pre>
           <Input value={phrase} onChange={(event) => setPhrase(event.target.value)} placeholder={prepared.confirmation_phrase} />
