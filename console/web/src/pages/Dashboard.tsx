@@ -2,6 +2,11 @@ import { Alert, Card, Col, Descriptions, Row, Statistic, Table, Typography } fro
 import { lazy, Suspense, useMemo } from 'react'
 import type { ConsoleSnapshot } from '../types'
 import { StatusBadge } from '../components/StatusBadge'
+import {
+  aggregateScoreChartSummary,
+  aggregateScoreText,
+  aggregateScoreValue,
+} from '../chartAccessibility'
 
 const EChart = lazy(() => import('../components/EChart').then((module) => ({ default: module.EChart })))
 
@@ -15,21 +20,26 @@ export function Dashboard({ snapshot }: { snapshot: ConsoleSnapshot }) {
   const blocked = [...data.runs, ...data.campaigns].filter((row) =>
     String(row.status ?? '').includes('UNKNOWN') || String(row.status ?? '').includes('HARD'),
   ).length
+  const recentExperiments = useMemo(
+    () => data.experiments.slice(0, 12).reverse(),
+    [data.experiments],
+  )
   const option = useMemo(() => ({
     tooltip: {},
-    xAxis: { type: 'category', data: data.experiments.slice(0, 12).reverse().map((row) => row.id) },
+    xAxis: { type: 'category', data: recentExperiments.map((row) => row.id) },
     yAxis: { type: 'value', name: 'aggregate score' },
     series: [{
       type: 'line',
-      data: data.experiments.slice(0, 12).reverse().map((row) => row.aggregate_score ?? null),
+      data: recentExperiments.map((row) => aggregateScoreValue(row.aggregate_score)),
       symbolSize: 8,
     }],
-  }), [data.experiments])
-  const chartRows = data.experiments.slice(0, 12).reverse().map((row) => ({
+  }), [recentExperiments])
+  const chartRows = recentExperiments.map((row) => ({
     id: row.id,
     aggregate_score: row.aggregate_score,
     status: row.status,
   }))
+  const chartSummary = aggregateScoreChartSummary(recentExperiments)
 
   return (
     <section aria-labelledby="dashboard-title">
@@ -52,7 +62,7 @@ export function Dashboard({ snapshot }: { snapshot: ConsoleSnapshot }) {
       <Row gutter={[16, 16]}>
         <Col xs={24} xl={15}>
           <Card title="近期科学评分">
-            <Suspense fallback={<div className="chart" aria-label="正在加载图表" />}><EChart option={option} label="近期实验 aggregate score 折线图" /></Suspense>
+            <Suspense fallback={<div className="chart" aria-label="正在加载图表" />}><EChart option={option} label={chartSummary} /></Suspense>
             <details className="chart-data">
               <summary>查看图表数据表</summary>
               <Table
@@ -62,7 +72,7 @@ export function Dashboard({ snapshot }: { snapshot: ConsoleSnapshot }) {
                 pagination={false}
                 columns={[
                   { title: 'Experiment ID', dataIndex: 'id' },
-                  { title: 'aggregate score', dataIndex: 'aggregate_score', render: (value: unknown) => value == null ? 'UNAVAILABLE' : String(value) },
+                  { title: 'aggregate score', dataIndex: 'aggregate_score', render: aggregateScoreText },
                   { title: 'status', dataIndex: 'status', render: (value: string) => <StatusBadge value={value} /> },
                 ]}
               />

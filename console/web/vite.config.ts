@@ -28,6 +28,8 @@ export default defineConfig({
       provider: 'v8',
       include: [
         'src/api.ts',
+        'src/chartAccessibility.ts',
+        'src/components/EChart.tsx',
         'src/operationDrafts.ts',
         'src/components/StatusBadge.tsx',
       ],

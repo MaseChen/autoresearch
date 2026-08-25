@@ -25,7 +25,10 @@ const snapshot = {
   source_digests: {},
   data: {
     runs: [{ id: 'run-1', status: 'RUNNING', valid_candidates: 1 }],
-    iterations: [], evaluation_attempts: [], experiments: [], experiment_relations: [],
+    iterations: [], evaluation_attempts: [], experiments: [
+      { id: 1, status: 'SUCCESS', aggregate_score: 2.5 },
+      { id: 2, status: 'SUCCESS', aggregate_score: null },
+    ], experiment_relations: [],
     campaigns: [{ id: 'campaign-1', mode: 'DISCOVERY', status: 'RUNNING' }],
     child_runs: [], resource_leases: [], budget_actions: [], soak_generations: [], soak_violations: [],
   },
@@ -56,6 +59,13 @@ test('desktop shows create-observe-results information architecture', async ({ p
   await page.getByText('浅色').click()
   await expect(page.locator('.console-layout')).toHaveClass(/theme-light/)
   await expect(page.getByText('查看图表数据表')).toBeVisible()
+  const chart = page.getByRole('img', { name: /近期实验 aggregate score 折线图/ })
+  await expect(chart).toHaveAttribute('aria-label', /1 个 UNAVAILABLE/)
+  await expect(chart).not.toHaveAttribute('aria-label', /NaN/)
+  await expect(page.locator('[aria-label*="NaN"]')).toHaveCount(0)
+  await expect(page.locator('body')).not.toContainText('NaN')
+  await page.getByText('查看图表数据表').click()
+  await expect(page.getByRole('cell', { name: 'UNAVAILABLE' })).toBeVisible()
 })
 
 test('tablet and mobile keep every write control disabled', async ({ page }, testInfo) => {

@@ -29,15 +29,18 @@ export function EChart({ option, label }: { option: EChartsCoreOption; label: st
 
   useEffect(() => {
     if (!element.current) return
-    const chart = echarts.init(element.current, undefined, { renderer: 'canvas' })
-    chart.setOption({ ...option, aria: { enabled: true } })
+    const container = element.current
+    const chart = echarts.init(container, undefined, { renderer: 'canvas' })
+    chart.setOption({ ...option, aria: { enabled: false } })
+    container.setAttribute('role', 'img')
+    container.setAttribute('aria-label', label)
     const observer = new ResizeObserver(() => chart.resize())
-    observer.observe(element.current)
+    observer.observe(container)
     return () => {
       observer.disconnect()
       chart.dispose()
     }
-  }, [option])
+  }, [label, option])
 
   return <div ref={element} className="chart" role="img" aria-label={label} />
 }
