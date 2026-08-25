@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import resource
 import time
+import traceback
 from typing import Any, Mapping
 
 from ..autorun.admin import AdminManifest
@@ -133,6 +134,9 @@ def run_worker(manifest_path: Path, operation_id: str) -> int:
             result=result,
         )
     except Exception as exc:
+        # This stream is a private, mode-0600 Controller diagnostic bounded by
+        # RLIMIT_FSIZE.  Do not include locals or expose it through HTTP.
+        traceback.print_exc()
         receipt = _receipt(
             prepared,
             status="FAILED",

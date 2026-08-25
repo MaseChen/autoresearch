@@ -4759,31 +4759,36 @@ class ResearchController:
                 try:
                     run = store.get_run(run_id)
                 except ValueError:
-                    run = store.create_run(
-                        run_id=run_id,
-                        deadline_epoch=self.clock() + self.config.max_hours * 3600,
-                        config=self.config.redacted_dict(),
-                        initial_best_hash=baseline.candidate_hash,
-                        preflight=preflight,
-                        namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
-                        resolved_config_digest=str(snapshot["snapshot_digest"]),
-                        workflow_snapshot=snapshot,
-                        baseline_ref=pin.baseline_ref.to_dict(),
-                        history_cutoff=history_cutoff,
-                    )
-                    iteration = store.create_iteration(
-                        run_id, 1, baseline.candidate_hash
-                    )
-                    store.accept_candidate(
-                        int(iteration["id"]),
-                        candidate_hash=candidate_hash,
-                        hypothesis="operator-supplied Console CandidateBundle",
-                        rationale=(
-                            "one bounded CURRENT manual scientific evaluation; "
-                            "no baseline authority"
-                        ),
-                        candidate_path=str(candidate_path),
-                    )
+                    with store.atomic_write():
+                        run = store.create_run(
+                            run_id=run_id,
+                            deadline_epoch=(
+                                self.clock() + self.config.max_hours * 3600
+                            ),
+                            config=self.config.redacted_dict(),
+                            initial_best_hash=baseline.candidate_hash,
+                            preflight=preflight,
+                            namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                            resolved_config_digest=str(snapshot["snapshot_digest"]),
+                            workflow_snapshot=snapshot,
+                            baseline_ref=pin.baseline_ref.to_dict(),
+                            history_cutoff=history_cutoff,
+                        )
+                        iteration = store.create_iteration(
+                            run_id, 1, baseline.candidate_hash
+                        )
+                        store.accept_candidate(
+                            int(iteration["id"]),
+                            candidate_hash=candidate_hash,
+                            hypothesis=(
+                                "operator-supplied Console CandidateBundle"
+                            ),
+                            rationale=(
+                                "one bounded CURRENT manual scientific "
+                                "evaluation; no baseline authority"
+                            ),
+                            candidate_path=str(candidate_path),
+                        )
                 self._validate_run_snapshot(run)
                 iteration = store.latest_iteration(run_id)
                 if iteration is None or iteration["status"] != "RUNNING":

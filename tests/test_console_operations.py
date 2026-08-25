@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
+import hashlib
+import io
 import os
 from pathlib import Path
 import stat
@@ -14,6 +16,7 @@ import uuid
 from unittest import mock
 
 from kernel_research.autorun.admin import AdminManifest
+from kernel_research.autorun.store import ControllerStore
 from kernel_research.console.local_store import ConsoleLocalStore
 from kernel_research.console import operations as operation_module
 from kernel_research.console.operations import ConsoleOperationService
@@ -28,6 +31,7 @@ from kernel_research.console import worker as worker_module
 from kernel_research.console import write_service
 from kernel_research.platform.artifacts import ArtifactId
 from kernel_research.platform.identity import BaselineRef, ExecutionEnvironmentDigest
+from kernel_research.platform.canonical import canonical_sha256
 from kernel_research.platform.profiles import CURRENT_RESEARCH_NAMESPACE
 from kernel_research.platform.proposal import CandidateBundle
 
@@ -343,6 +347,119 @@ class ConsoleRemoteOperationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fields"):
             self.service.reconcile({"operation_id": dead.operation_id, "sql": "x"})
 
+    def _failed_manual_orphan(self) -> tuple[PreparedOperationV1, str, Path]:
+        self.paths = replace(
+            self.paths,
+            controller_db=self.paths.controller_dir / "controller-domain.sqlite3",
+        )
+        self.service.paths = self.paths
+        operation_id = str(uuid.uuid4())
+        bundle = CandidateBundle.single_file(content=SEED)
+        prepared = self.service.prepare(
+            {
+                "operation_id": operation_id,
+                "kind": "MANUAL_EVALUATION_START",
+                "runtime_identity_digest": self.model.runtime_identity().digest,
+                "parameters": {"candidate": bundle.to_dict()},
+            }
+        )
+        request = ManualEvaluationRequestV1.from_value(
+            operation_module._read_record(
+                self.service._path(operation_id)
+            )["parameters"]
+        )
+        run_id = operation_module._manual_run_id(request)
+        candidate_hash = hashlib.sha256(
+            request.candidate.files[0].content_bytes
+        ).hexdigest()
+        material = {
+            "evidence_operation": "console-manual-evaluation-v1",
+            "console_operation_id": operation_id,
+            "candidate_artifact_id": str(bundle.artifact_id),
+            "candidate_sha256": candidate_hash,
+        }
+        snapshot = {**material, "snapshot_digest": canonical_sha256(material)}
+        environment = ExecutionEnvironmentDigest.resolved(
+            evaluator_image_digest="sha256:" + "1" * 64,
+            toolchain_digest="sha256:" + "2" * 64,
+            framework_digest="sha256:" + "3" * 64,
+            operator_abi_digest="sha256:" + "4" * 64,
+            build_flags_digest="sha256:" + "5" * 64,
+        )
+        baseline = BaselineRef.create(
+            namespace=CURRENT_RESEARCH_NAMESPACE,
+            artifact_id="source-sha256-v1:" + "a" * 64,
+            source="deployment",
+            revision="history-1",
+            execution_environment=environment,
+        )
+        with ControllerStore(self.paths.controller_db) as store:
+            store.create_run(
+                run_id=run_id,
+                deadline_epoch=time.time() + 3600,
+                config={},
+                initial_best_hash="a" * 64,
+                namespace_id=CURRENT_RESEARCH_NAMESPACE.namespace_id,
+                resolved_config_digest=snapshot["snapshot_digest"],
+                workflow_snapshot=snapshot,
+                baseline_ref=baseline.to_dict(),
+                history_cutoff=0,
+            )
+        path = self.service._path(operation_id)
+        record = operation_module._read_record(path)
+        receipt = OperationReceiptV1(
+            operation_id=operation_id,
+            kind=prepared.kind,
+            operation_digest=prepared.operation_digest,
+            status="FAILED",
+            observed_at=_now(),
+            domain_identity={},
+            problem={"code": "OperationalError", "detail": "disk I/O error"},
+        )
+        record.update(
+            {"state": "FAILED", "pid": 99999999, "receipt": receipt.to_dict()}
+        )
+        operation_module._atomic_json(path, record)
+        return prepared, run_id, path
+
+    def test_failed_manual_pre_iteration_orphan_is_terminalized_without_replay(
+        self,
+    ) -> None:
+        prepared, run_id, _path = self._failed_manual_orphan()
+        with mock.patch("os.kill", side_effect=ProcessLookupError):
+            receipt = self.service.reconcile(
+                {"operation_id": prepared.operation_id}
+            )
+        self.assertEqual(receipt.status, "FAILED")
+        with ControllerStore(self.paths.controller_db) as store:
+            run = store.get_run(run_id)
+            self.assertEqual(run["status"], "FAILED")
+            self.assertEqual(
+                run["stop_reason"],
+                "Console manual evaluation failed before iteration initialization",
+            )
+            self.assertEqual(store.list_iterations(run_id), [])
+            self.assertEqual(store.list_evaluation_attempts(run_id), [])
+            self.assertEqual(
+                [event["event"] for event in store.list_events(run_id)],
+                ["RUN_CREATED", "RUN_FINISHED"],
+            )
+        with mock.patch("os.kill", side_effect=ProcessLookupError):
+            self.assertEqual(
+                self.service.reconcile({"operation_id": prepared.operation_id}),
+                receipt,
+            )
+
+    def test_failed_manual_orphan_with_iteration_fails_closed(self) -> None:
+        prepared, run_id, _path = self._failed_manual_orphan()
+        with ControllerStore(self.paths.controller_db) as store:
+            store.create_iteration(run_id, 1, "a" * 64)
+        with mock.patch("os.kill", side_effect=ProcessLookupError):
+            with self.assertRaisesRegex(ValueError, "not a trusted"):
+                self.service.reconcile({"operation_id": prepared.operation_id})
+        with ControllerStore(self.paths.controller_db) as store:
+            self.assertEqual(store.get_run(run_id)["status"], "RUNNING")
+
     def test_fixed_domain_dtos_validate_every_mutating_family(self) -> None:
         budget = {
             "candidates": 5,
@@ -475,6 +592,41 @@ class ConsoleWorkerAndFacadeTests(unittest.TestCase):
                     )
                 record = operation_module._read_record(path)
                 self.assertEqual(record["receipt"]["status"], expected)
+
+    def test_worker_failure_emits_private_bounded_traceback(self) -> None:
+        operation_id, _path = self._worker_record()
+        diagnostics = io.StringIO()
+        with (
+            mock.patch("resource.setrlimit"),
+            mock.patch.object(
+                worker_module.ConsolePaths,
+                "from_admin_manifest",
+                return_value=self.paths,
+            ),
+            mock.patch(
+                "kernel_research.console.worker.ConsoleReadModel",
+                return_value=self.model,
+            ),
+            mock.patch.object(
+                worker_module.AdminManifest,
+                "load",
+                return_value=mock.MagicMock(spec=AdminManifest),
+            ),
+            mock.patch(
+                "kernel_research.console.write_service.execute_domain_operation",
+                side_effect=ValueError("private diagnostic marker"),
+            ),
+            mock.patch("sys.stderr", diagnostics),
+        ):
+            self.assertEqual(
+                worker_module.run_worker(
+                    self.paths.manifest_path, operation_id
+                ),
+                0,
+            )
+        output = diagnostics.getvalue()
+        self.assertIn("Traceback (most recent call last)", output)
+        self.assertIn("ValueError: private diagnostic marker", output)
 
     def test_write_facade_uses_only_fixed_controller_and_campaign_calls(self) -> None:
         runtime_root = self.paths.runtime_root

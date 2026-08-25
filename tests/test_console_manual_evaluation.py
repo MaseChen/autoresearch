@@ -4,6 +4,7 @@ from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 import uuid
@@ -280,6 +281,47 @@ class ConsoleManualEvaluationTests(unittest.TestCase):
                     },
                     operation_id=str(uuid.uuid4()),
                 )
+            self.assertEqual(evaluator.stages, [])
+
+    def test_manual_candidate_initialization_rolls_back_as_one_unit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            config, _pin, baseline, _pin_path = self._install_current_evidence(root)
+            bundle = CandidateBundle.single_file(
+                content=_with_block_size_n(SEED, 64)
+            )
+            operation_id = str(uuid.uuid4())
+            run_id = "console-manual-" + uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "kernel-research/console-manual-evaluation/v1/"
+                f"{operation_id}/{bundle.artifact_id}",
+            ).hex
+            evaluator = requalification_helpers.TrustedFakeDockerEvaluator()
+            controller = ResearchController(config, evaluator=evaluator)
+            with (
+                mock.patch.object(
+                    controller, "doctor", return_value=self._PREFLIGHT
+                ),
+                mock.patch.object(controller, "_best", return_value=baseline),
+                mock.patch.object(
+                    ControllerStore,
+                    "create_iteration",
+                    side_effect=sqlite3.OperationalError("injected I/O failure"),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    sqlite3.OperationalError, "injected I/O failure"
+                ):
+                    controller.evaluate_manual_candidate(
+                        candidate=bundle,
+                        operation_id=operation_id,
+                    )
+            with ControllerStore(controller.controller_db) as store:
+                with self.assertRaisesRegex(ValueError, "unknown run id"):
+                    store.get_run(run_id)
+                self.assertEqual(store.list_events(run_id), [])
+                self.assertEqual(store.list_iterations(run_id), [])
+                self.assertEqual(store.list_evaluation_attempts(run_id), [])
             self.assertEqual(evaluator.stages, [])
 
     def test_console_run_start_is_deterministic_and_proposal_only_on_replay(

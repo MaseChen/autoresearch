@@ -98,6 +98,7 @@ class ControllerStore:
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(path, isolation_level=None)
+        self._savepoint_sequence = 0
         try:
             self.connection.row_factory = sqlite3.Row
             self.connection.execute("PRAGMA foreign_keys = ON")
@@ -572,14 +573,35 @@ class ControllerStore:
 
     @contextmanager
     def _transaction(self):
-        self.connection.execute("BEGIN IMMEDIATE")
+        nested = self.connection.in_transaction
+        savepoint = ""
+        if nested:
+            self._savepoint_sequence += 1
+            savepoint = f"controller_store_{self._savepoint_sequence}"
+            self.connection.execute(f"SAVEPOINT {savepoint}")
+        else:
+            self.connection.execute("BEGIN IMMEDIATE")
         try:
             yield
-        except Exception:
-            self.connection.execute("ROLLBACK")
+        except BaseException:
+            if nested:
+                self.connection.execute(f"ROLLBACK TO {savepoint}")
+                self.connection.execute(f"RELEASE {savepoint}")
+            else:
+                self.connection.execute("ROLLBACK")
             raise
         else:
-            self.connection.execute("COMMIT")
+            if nested:
+                self.connection.execute(f"RELEASE {savepoint}")
+            else:
+                self.connection.execute("COMMIT")
+
+    @contextmanager
+    def atomic_write(self):
+        """Group trusted Store mutations into one durable transaction."""
+
+        with self._transaction():
+            yield
 
     def _add_event(
         self,

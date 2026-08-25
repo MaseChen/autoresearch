@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,9 @@ MAX_CAMPAIGN_CANDIDATES = 1000
 MAX_CAMPAIGN_MILLISECONDS = 30 * 24 * 60 * 60 * 1000
 MAX_CAMPAIGN_TOKENS = 10**12
 MAX_CAMPAIGN_COST_MICROUSD = 10**12
+_MANUAL_INITIALIZATION_FAILURE = (
+    "Console manual evaluation failed before iteration initialization"
+)
 _PHRASES = {
     "RUN_START": "启动自治 Run",
     "RUN_STOP": "停止 Run",
@@ -365,8 +369,113 @@ class ConsoleOperationService:
             record = _read_record(path)
             prepared = PreparedOperationV1.from_value(record.get("prepared"))
             if record.get("receipt") is not None:
-                return _receipt_from_value(record["receipt"])
+                receipt = _receipt_from_value(record["receipt"])
+                self._finalize_failed_manual_initialization(
+                    record, prepared, receipt
+                )
+                return receipt
             return self._reconcile_record(record, prepared)
+
+    def _finalize_failed_manual_initialization(
+        self,
+        record: Mapping[str, Any],
+        prepared: PreparedOperationV1,
+        receipt: OperationReceiptV1,
+    ) -> None:
+        """Terminalize only a proven pre-iteration manual-evaluation orphan.
+
+        This is not replay or recovery authority.  It recognizes the narrow
+        state left when RUN_CREATED committed but the first iteration did not,
+        and preserves the already-terminal operation receipt.
+        """
+
+        if (
+            prepared.kind != "MANUAL_EVALUATION_START"
+            or receipt.status != "FAILED"
+        ):
+            return
+        if (
+            receipt.operation_id != prepared.operation_id
+            or receipt.kind != prepared.kind
+            or receipt.operation_digest != prepared.operation_digest
+        ):
+            raise ValueError("manual evaluation receipt identity mismatch")
+        pid = record.get("pid")
+        if type(pid) is int and pid > 1:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                pass
+            except PermissionError as exc:
+                raise ValueError(
+                    "failed manual evaluation worker identity is still live"
+                ) from exc
+            else:
+                raise ValueError(
+                    "failed manual evaluation worker identity is still live"
+                )
+        request = ManualEvaluationRequestV1.from_value(record["parameters"])
+        run_id = _manual_run_id(request)
+        if not self.paths.controller_db.exists():
+            return
+        with ControllerStore(self.paths.controller_db) as store:
+            try:
+                run = store.get_run(run_id)
+            except ValueError:
+                return
+            if (
+                run["status"] == "FAILED"
+                and run.get("stop_reason") == _MANUAL_INITIALIZATION_FAILURE
+            ):
+                return
+            snapshot = run.get("workflow_snapshot")
+            bundle = request.candidate
+            candidate_sha256 = hashlib.sha256(
+                bundle.files[0].content_bytes
+            ).hexdigest()
+            expected = {
+                "evidence_operation": "console-manual-evaluation-v1",
+                "console_operation_id": prepared.operation_id,
+                "candidate_artifact_id": str(bundle.artifact_id),
+                "candidate_sha256": candidate_sha256,
+            }
+            if not isinstance(snapshot, Mapping):
+                raise ValueError("manual evaluation orphan has no trusted snapshot")
+            material = dict(snapshot)
+            snapshot_digest = material.pop("snapshot_digest", None)
+            if (
+                run["status"] != "RUNNING"
+                or bool(run.get("stop_requested"))
+                or int(run.get("valid_candidates", -1)) != 0
+                or run.get("final_best_hash") is not None
+                or any(snapshot.get(key) != value for key, value in expected.items())
+                or snapshot_digest != canonical_sha256(material)
+                or run.get("resolved_config_digest") != snapshot_digest
+                or store.list_iterations(run_id)
+                or store.list_evaluation_attempts(run_id)
+            ):
+                raise ValueError(
+                    "manual evaluation failure is not a trusted pre-iteration orphan"
+                )
+            events = store.list_events(run_id)
+            if (
+                len(events) != 1
+                or events[0]["event"] != "RUN_CREATED"
+                or events[0]["iteration_id"] is not None
+            ):
+                raise ValueError(
+                    "manual evaluation orphan event ledger is not exact"
+                )
+            store.update_run_with_event(
+                run_id,
+                "RUN_FINISHED",
+                {
+                    "reason": "pre-iteration Console initialization failure",
+                    "console_operation_id": prepared.operation_id,
+                },
+                status="FAILED",
+                stop_reason=_MANUAL_INITIALIZATION_FAILURE,
+            )
 
     def _reconcile_record(
         self, record: dict[str, Any], prepared: PreparedOperationV1
