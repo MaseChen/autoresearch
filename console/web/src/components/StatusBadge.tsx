@@ -1,4 +1,5 @@
 import { Tag } from 'antd'
+import { statusLabel } from '../presentation'
 
 const colors: Record<string, string> = {
   RUNNING: 'blue',
@@ -25,7 +26,15 @@ export function StatusBadge({ value, reason }: { value?: string; reason?: string
   const suffix = selected.includes('UNKNOWN')
     ? ' · 禁止重放'
     : selected === 'UNAVAILABLE'
-      ? ` · ${reason?.trim() || 'REASON_REQUIRED'}`
+      ? ` · ${reason?.trim() || '原因待记录'}`
       : ''
-  return <Tag className={selected === 'UNAVAILABLE' ? 'status-unavailable' : undefined} color={colors[selected] ?? 'default'}>{selected}{suffix}</Tag>
+  return (
+    <Tag
+      className={selected === 'UNAVAILABLE' ? 'status-unavailable' : undefined}
+      color={colors[selected] ?? 'default'}
+      title={`原始状态：${selected}`}
+    >
+      {statusLabel(selected)}{suffix}
+    </Tag>
+  )
 }

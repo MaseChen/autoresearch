@@ -49,37 +49,54 @@ test.beforeEach(async ({ page }) => {
   }))
 })
 
-test('desktop shows create-observe-results information architecture', async ({ page }, testInfo) => {
+test('desktop presents a four-entry workflow instead of database pages', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop')
   await page.goto('/#bootstrap=test-bootstrap-token')
-  await expect(page.getByRole('heading', { name: '运行总览' })).toBeVisible()
-  await expect(page.getByText('创建任务 → 观察过程 → 查看结果')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '从任务目标出发，而不是从数据库出发' })).toBeVisible()
+  for (const item of ['工作台', '创建任务', '任务中心', '系统与门禁']) {
+    await expect(page.getByRole('menuitem', { name: item })).toBeVisible()
+  }
+  await expect(page.getByRole('menuitem')).toHaveCount(4)
   const results = await new AxeBuilder({ page }).analyze()
   expect(results.violations).toEqual([])
-  await page.getByText('浅色').click()
   await expect(page.locator('.console-layout')).toHaveClass(/theme-light/)
-  await expect(page.getByText('查看图表数据表')).toBeVisible()
+  await expect(page.getByText('查看无障碍数据表')).toBeVisible()
   const chart = page.getByRole('img', { name: /近期实验 aggregate score 折线图/ })
   await expect(chart).toHaveAttribute('aria-label', /1 个 UNAVAILABLE/)
   await expect(chart).not.toHaveAttribute('aria-label', /NaN/)
   await expect(page.locator('[aria-label*="NaN"]')).toHaveCount(0)
   await expect(page.locator('body')).not.toContainText('NaN')
-  await page.getByText('查看图表数据表').click()
+  await page.getByText('查看无障碍数据表').click()
   await expect(page.getByRole('cell', { name: 'UNAVAILABLE' })).toBeVisible()
+
+  await page.getByRole('menuitem', { name: '创建任务' }).click()
+  await expect(page.getByRole('heading', { name: '创建优化任务' })).toBeVisible()
+  await expect(page.getByText('Fused MoE I8 TN', { exact: true }).first()).toBeVisible()
+  await expect(page.getByRole('button', { name: /FlashInfer Ragged Prefill/ })).toBeDisabled()
+  await expect(page.getByRole('button', { name: /TileLang/ })).toBeDisabled()
+  await expect(page.getByText('计划执行链')).toBeVisible()
+
+  await page.getByRole('menuitem', { name: '任务中心' }).click()
+  await expect(page.getByRole('heading', { name: '任务中心' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '长期持续优化' })).toBeVisible()
+
+  await page.getByRole('menuitem', { name: '系统与门禁' }).click()
+  await expect(page.getByRole('heading', { name: '系统与门禁' })).toBeVisible()
+  await page.getByRole('tab', { name: '数据与诊断' }).click()
+  await expect(page.getByText('这里是唯一直接展示原始账本的页面')).toBeVisible()
 })
 
 test('tablet and mobile keep every write control disabled', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name === 'desktop')
   await page.goto('/#bootstrap=test-bootstrap-token')
   if (testInfo.project.name === 'mobile') {
-    await expect(page.getByRole('heading', { name: '运行总览' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: '运行健康状态' })).toBeVisible()
     await expect(page.getByText('手机模式仅显示健康状态；所有写操作和任务详情均已禁用。')).toBeVisible()
     await expect(page.locator('.ant-menu')).toHaveCount(0)
     await expect(page.locator('button:not([disabled])').filter({ hasText: /确认|执行|启动|冻结/ })).toHaveCount(0)
     return
   }
-  await page.locator('li[data-menu-id$="-create"]').click()
-  await expect(page.getByRole('button', { name: '下一步' })).toBeVisible()
-  await page.getByRole('button', { name: '下一步' }).click()
-  await expect(page.getByRole('button', { name: '冻结并预览' })).toBeDisabled()
+  await page.getByRole('menuitem', { name: '创建任务' }).click()
+  await expect(page.getByRole('heading', { name: '创建优化任务' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '冻结任务配置并预检' })).toBeDisabled()
 })

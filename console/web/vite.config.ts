@@ -32,6 +32,7 @@ export default defineConfig({
         'src/components/EChart.tsx',
         'src/operationDrafts.ts',
         'src/components/StatusBadge.tsx',
+        'src/presentation.ts',
       ],
       reporter: ['text', 'json-summary'],
       thresholds: {

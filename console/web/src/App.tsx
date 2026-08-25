@@ -8,20 +8,15 @@ import { canMutate } from './operationDrafts'
 const Dashboard = lazy(() => import('./pages/Dashboard').then((module) => ({ default: module.Dashboard })))
 const CreateTask = lazy(() => import('./pages/CreateTask').then((module) => ({ default: module.CreateTask })))
 const dataViews = () => import('./pages/DataViews')
-const TasksPage = lazy(() => dataViews().then((module) => ({ default: module.TasksPage })))
-const ExperimentsPage = lazy(() => dataViews().then((module) => ({ default: module.ExperimentsPage })))
-const CampaignsPage = lazy(() => dataViews().then((module) => ({ default: module.CampaignsPage })))
-const ResourcesPage = lazy(() => dataViews().then((module) => ({ default: module.ResourcesPage })))
-const SoakPage = lazy(() => dataViews().then((module) => ({ default: module.SoakPage })))
-const AuditPage = lazy(() => dataViews().then((module) => ({ default: module.AuditPage })))
-const SettingsPage = lazy(() => dataViews().then((module) => ({ default: module.SettingsPage })))
+const TaskCenterPage = lazy(() => dataViews().then((module) => ({ default: module.TaskCenterPage })))
+const SystemPage = lazy(() => dataViews().then((module) => ({ default: module.SystemPage })))
 
 const { Header, Sider, Content } = Layout
 const { Text } = Typography
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 const initialBootstrapToken = bootstrapTokenFromFragment()
 
-type Page = 'dashboard' | 'create' | 'tasks' | 'experiments' | 'campaigns' | 'resources' | 'soak' | 'audit' | 'settings'
+type Page = 'dashboard' | 'create' | 'tasks' | 'system'
 
 function ConsoleApp({ mode, setMode }: { mode: 'dark' | 'light'; setMode: (mode: 'dark' | 'light') => void }) {
   const [page, setPage] = useState<Page>('dashboard')
@@ -59,15 +54,10 @@ function ConsoleApp({ mode, setMode }: { mode: 'dark' | 'light'; setMode: (mode:
   const pageContent = useMemo(() => {
     if (!snapshot) return null
     const pages: Record<Page, React.ReactNode> = {
-      dashboard: <Dashboard snapshot={snapshot} />,
+      dashboard: <Dashboard snapshot={snapshot} onNavigate={setPage} />,
       create: <CreateTask canWrite={canWrite} runtimeIdentityDigest={snapshot.runtime_identity.runtime_identity_digest} />,
-      tasks: <TasksPage snapshot={snapshot} canWrite={canWrite} />,
-      experiments: <ExperimentsPage snapshot={snapshot} />,
-      campaigns: <CampaignsPage snapshot={snapshot} canWrite={canWrite} />,
-      resources: <ResourcesPage snapshot={snapshot} />,
-      soak: <SoakPage snapshot={snapshot} />,
-      audit: <AuditPage snapshot={snapshot} />,
-      settings: <SettingsPage />,
+      tasks: <TaskCenterPage snapshot={snapshot} canWrite={canWrite} />,
+      system: <SystemPage snapshot={snapshot} />,
     }
     return pages[page]
   }, [canWrite, page, snapshot])
@@ -83,9 +73,9 @@ function ConsoleApp({ mode, setMode }: { mode: 'dark' | 'light'; setMode: (mode:
         <Header className="topbar"><div className="brand"><span className="brand-mark">AR</span><h1>Autoresearch Console</h1></div></Header>
         <Content className="content">
           <section aria-labelledby="mobile-health-title">
-            <Typography.Title id="mobile-health-title" level={2}>运行总览</Typography.Title>
-            <Result status={snapshot.status === 'STABLE' ? 'success' : 'warning'} title={snapshot.status} subTitle="手机模式仅显示健康状态；所有写操作和任务详情均已禁用。" />
-            <Typography.Paragraph>活动 Run：{activeRuns} · 活动 Campaign：{activeCampaigns}</Typography.Paragraph>
+            <Typography.Title id="mobile-health-title" level={2}>运行健康状态</Typography.Title>
+            <Result status={snapshot.status === 'STABLE' ? 'success' : 'warning'} title={snapshot.status === 'STABLE' ? '系统稳定' : '数据正在变化'} subTitle="手机模式仅显示健康状态；所有写操作和任务详情均已禁用。" />
+            <Typography.Paragraph>活动单次任务：{activeRuns} · 活动长期任务：{activeCampaigns}</Typography.Paragraph>
           </section>
         </Content>
       </Layout>
@@ -96,25 +86,19 @@ function ConsoleApp({ mode, setMode }: { mode: 'dark' | 'light'; setMode: (mode:
     <Layout className={`console-layout theme-${mode}`}>
       <Header className="topbar">
         <div className="brand"><span className="brand-mark">AR</span><span><h1>Autoresearch Console</h1><small>可信算子研究控制台</small></span></div>
-        <div className="topbar-status"><span className={`live-dot ${streamStatus}`} />{streamStatus === 'live' ? 'LIVE' : 'STALE'}<Text code>{snapshot.runtime_identity.git_commit.slice(0, 10)}</Text><Segmented size="small" value={mode} onChange={(value) => setMode(value as 'dark' | 'light')} options={[{ label: '暗色', value: 'dark' }, { label: '浅色', value: 'light' }]} /></div>
+        <div className="topbar-status"><span className={`live-dot ${streamStatus}`} />{streamStatus === 'live' ? '实时' : '连接滞后'}<Text code>{snapshot.runtime_identity.git_commit.slice(0, 10)}</Text><Segmented size="small" value={mode} onChange={(value) => setMode(value as 'dark' | 'light')} options={[{ label: '暗色', value: 'dark' }, { label: '浅色', value: 'light' }]} /></div>
       </Header>
       <Layout>
-        <Sider width={220} breakpoint="lg" collapsedWidth={72} theme="dark">
+        <Sider width={208} breakpoint="lg" collapsedWidth={68} className="console-sider">
           <Menu
-            theme="dark"
             mode="inline"
             selectedKeys={[page]}
             onClick={({ key }) => setPage(key as Page)}
             items={[
-              { key: 'dashboard', label: '总览' },
+              { key: 'dashboard', label: '工作台' },
               { key: 'create', label: '创建任务' },
-              { key: 'tasks', label: '观察过程' },
-              { key: 'experiments', label: '实验与 History' },
-              { key: 'campaigns', label: 'Campaign' },
-              { key: 'resources', label: '资源与 Budget' },
-              { key: 'soak', label: 'Soak 门禁' },
-              { key: 'audit', label: '审计' },
-              { key: 'settings', label: '设置' },
+              { key: 'tasks', label: '任务中心' },
+              { key: 'system', label: '系统与门禁' },
             ]}
           />
         </Sider>
@@ -126,10 +110,10 @@ function ConsoleApp({ mode, setMode }: { mode: 'dark' | 'light'; setMode: (mode:
 
 export default function App() {
   const nonce = document.querySelector<HTMLMetaElement>('meta[name="csp-nonce"]')?.content
-  const [mode, setMode] = useState<'dark' | 'light'>('dark')
+  const [mode, setMode] = useState<'dark' | 'light'>('light')
   return (
     <QueryClientProvider client={queryClient}>
-      <ConfigProvider csp={nonce && nonce !== '__CSP_NONCE__' ? { nonce } : undefined} theme={{ algorithm: mode === 'dark' ? theme.darkAlgorithm : theme.defaultAlgorithm, token: { colorPrimary: '#087f70', borderRadius: 6, fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' } }}>
+      <ConfigProvider csp={nonce && nonce !== '__CSP_NONCE__' ? { nonce } : undefined} theme={{ algorithm: mode === 'dark' ? theme.darkAlgorithm : theme.defaultAlgorithm, token: { colorPrimary: '#2563eb', colorLink: '#174fb2', colorTextSecondary: mode === 'dark' ? '#b3c0d2' : '#58677c', colorTextDescription: mode === 'dark' ? '#b3c0d2' : '#58677c', borderRadius: 12, fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' } }}>
         <AntApp><ConsoleApp mode={mode} setMode={setMode} /></AntApp>
       </ConfigProvider>
     </QueryClientProvider>

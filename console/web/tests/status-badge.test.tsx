@@ -16,10 +16,11 @@ describe('StatusBadge', () => {
 
   it('uses safe defaults for missing and unfamiliar states', () => {
     const { rerender } = render(<StatusBadge />)
-    expect(screen.getByText(/REASON_REQUIRED/)).toBeInTheDocument()
+    expect(screen.getByText(/原因待记录/)).toBeInTheDocument()
     rerender(<StatusBadge value="CUSTOM_TERMINAL" />)
     expect(screen.getByText('CUSTOM_TERMINAL')).toBeInTheDocument()
     rerender(<StatusBadge value="SUCCEEDED" />)
-    expect(screen.getByText('SUCCEEDED')).toBeInTheDocument()
+    expect(screen.getByText('成功')).toBeInTheDocument()
+    expect(screen.getByTitle('原始状态：SUCCEEDED')).toBeInTheDocument()
   })
 })
