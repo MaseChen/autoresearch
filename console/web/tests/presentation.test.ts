@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatDuration, formatTime, numberValue, shortIdentity, stageLabel, statusLabel, taskDetail, taskSummaries } from '../src/presentation'
+import { formatDuration, formatTime, numberValue, scoreText, shortIdentity, stageLabel, statusLabel, taskDetail, taskNeedsAttention, taskSummaries } from '../src/presentation'
 import type { ConsoleSnapshot } from '../src/types'
 
 const snapshot = {
@@ -18,7 +18,7 @@ const snapshot = {
     ],
     experiments: [
       { id: 1, experiment_uid: 'exp-smoke', aggregate_score: 1.5, candidate_hash: 'c'.repeat(64) },
-      { id: 2, experiment_uid: 'exp-full', aggregate_score: 2.5, candidate_hash: 'c'.repeat(64) },
+      { id: 2, experiment_uid: 'exp-full', aggregate_score: 2.5, candidate_hash: 'c'.repeat(64), artifact_id: 'source-bundle-v1:full' },
     ],
     experiment_relations: [{ id: 1, source_experiment_uid: 'exp-smoke', target_experiment_uid: 'exp-full' }],
     resource_leases: [], budget_actions: [], soak_generations: [], soak_violations: [],
@@ -60,6 +60,8 @@ describe('Chinese presentation model', () => {
     expect(detail.bestScore).toBe(2.5)
     expect(detail.currentStage).toBe('完整评测')
     expect(detail.rounds[0].stage).toBe('重复确认')
+    expect(detail.rounds[0].bestArtifactId).toBe('source-bundle-v1:full')
+    expect(detail.scoreSeries).toEqual([{ iteration: 1, score: 2.5, experimentUid: 'exp-full' }])
     expect(detail.relations).toHaveLength(1)
     expect(detail.stages.find((stage) => stage.key === 'SMOKE')?.status).toBe('SUCCEEDED')
   })
@@ -72,6 +74,9 @@ describe('Chinese presentation model', () => {
     expect(numberValue(4)).toBe(4)
     expect(numberValue(Number.NaN)).toBe(0)
     expect(numberValue('4')).toBe(0)
+    expect(scoreText(null)).toBe('UNAVAILABLE')
+    expect(taskNeedsAttention('PAUSED_UNKNOWN_OUTCOME')).toBe(true)
+    expect(taskNeedsAttention('SUCCEEDED')).toBe(false)
   })
 
   it('covers benchmark and autonomous task labels with safe fallbacks', () => {
@@ -103,6 +108,7 @@ describe('Chinese presentation model', () => {
     expect(detail.bestScore).toBeNull()
     expect(detail.currentStage).toBe('等待开始')
     expect(detail.rounds[0]).toMatchObject({ index: 1, status: 'UNAVAILABLE', stage: '等待开始', candidateHash: '', bestScore: null })
+    expect(detail.scoreSeries).toEqual([])
     expect(detail.stages.every((stage) => stage.status === 'PENDING')).toBe(true)
     expect(detail.relations).toHaveLength(0)
     expect(detail.actualGpuMs).toBe(2_000)

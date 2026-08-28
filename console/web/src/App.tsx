@@ -55,7 +55,7 @@ function ConsoleApp({ mode, setMode }: { mode: 'dark' | 'light'; setMode: (mode:
     if (!snapshot) return null
     const pages: Record<Page, React.ReactNode> = {
       create: <CreateTask canWrite={canWrite} runtimeIdentityDigest={snapshot.runtime_identity.runtime_identity_digest} mode={mode} />,
-      runs: <RunRecordsPage snapshot={snapshot} canWrite={canWrite} selectedTaskId={selectedTaskId} onOpenTask={setSelectedTaskId} onBack={() => setSelectedTaskId(undefined)} onCreate={() => { setSelectedTaskId(undefined); setPage('create') }} />,
+      runs: <RunRecordsPage snapshot={snapshot} canWrite={canWrite} mode={mode} selectedTaskId={selectedTaskId} onOpenTask={setSelectedTaskId} onBack={() => setSelectedTaskId(undefined)} onCreate={() => { setSelectedTaskId(undefined); setPage('create') }} />,
       system: <SystemPage snapshot={snapshot} />,
     }
     return pages[page]

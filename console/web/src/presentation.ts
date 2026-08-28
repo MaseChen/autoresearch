@@ -58,6 +58,18 @@ export function formatDuration(milliseconds: unknown): string {
   return `${(value / 1000).toFixed(1)} 秒`
 }
 
+export function scoreText(value: number | null): string {
+  return value == null ? 'UNAVAILABLE' : value.toLocaleString('zh-CN', { maximumFractionDigits: 6 })
+}
+
+export function taskKindLabel(task: Pick<TaskSummary, 'kind'>): string {
+  return task.kind === 'LONG' ? '长期优化' : task.kind === 'BENCHMARK' ? '策略对照' : '短期任务'
+}
+
+export function taskNeedsAttention(status: string): boolean {
+  return status.includes('UNKNOWN') || status.includes('HARD') || status.includes('DATA_INTEGRITY')
+}
+
 export interface TaskSummary {
   id: string
   kind: 'LONG' | 'BENCHMARK' | 'RUN'
@@ -90,6 +102,13 @@ export interface OptimizationRoundView {
   attempts: ConsoleRow[]
   experiments: ConsoleRow[]
   bestScore: number | null
+  bestArtifactId: string
+}
+
+export interface ScorePointView {
+  iteration: number
+  score: number
+  experimentUid: string
 }
 
 export interface TaskDetailView {
@@ -102,6 +121,7 @@ export interface TaskDetailView {
   relations: ConsoleRow[]
   budgets: ConsoleRow[]
   rounds: OptimizationRoundView[]
+  scoreSeries: ScorePointView[]
   stages: EvaluationStageView[]
   candidateCount: number
   completedAttempts: number
@@ -184,10 +204,25 @@ export function taskDetail(snapshot: ConsoleSnapshot, task: TaskSummary): TaskDe
       error: String(iteration.error ?? ''), updatedAt: iteration.updated_at,
       attempts: roundAttempts, experiments: roundExperiments,
       bestScore: roundScores.length ? Math.max(...roundScores) : null,
+      bestArtifactId: String(
+        roundExperiments
+          .filter((row) => typeof row.aggregate_score === 'number' && Number.isFinite(row.aggregate_score))
+          .sort((left, right) => Number(right.aggregate_score) - Number(left.aggregate_score))[0]?.artifact_id ?? '',
+      ),
     }
   })
+  const scoreSeries = rounds
+    .filter((round): round is OptimizationRoundView & { bestScore: number } => round.bestScore !== null)
+    .map((round) => ({
+      iteration: round.index,
+      score: round.bestScore,
+      experimentUid: String(
+        round.experiments.find((row) => row.aggregate_score === round.bestScore)?.experiment_uid ?? '',
+      ),
+    }))
+    .sort((left, right) => left.iteration - right.iteration)
   return {
-    task, children, runs, iterations, attempts: sortedAttempts, experiments, relations, budgets, rounds, stages,
+    task, children, runs, iterations, attempts: sortedAttempts, experiments, relations, budgets, rounds, scoreSeries, stages,
     candidateCount: candidateHashes.size || numberValue(task.row.valid_candidates), completedAttempts,
     progress: currentStageIndex >= 0 ? Math.round((currentStageIndex + 1) / stageOrder.length * 100) : 0,
     bestScore: scores.length ? Math.max(...scores) : null,
