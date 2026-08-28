@@ -11,8 +11,8 @@
     "file": "assets/editor-BJ215w34.css",
     "src": "_editor-BJ215w34.css"
   },
-  "_editor.api-BRovRFdx.js": {
-    "file": "assets/editor.api-BRovRFdx.js",
+  "_editor.api-D7ok9xu0.js": {
+    "file": "assets/editor.api-D7ok9xu0.js",
     "name": "editor.api",
     "imports": [
       "_rolldown-runtime-QTnfLwEv.js",
@@ -68,7 +68,7 @@
     ]
   },
   "index.html": {
-    "file": "assets/index-CIk4wiWS.js",
+    "file": "assets/index-DO7D1dr8.js",
     "name": "index",
     "src": "index.html",
     "isEntry": true,
@@ -85,7 +85,7 @@
       "src/pages/DataViews.tsx"
     ],
     "css": [
-      "assets/index-w1xgLk-D.css"
+      "assets/index-CmIbfohw.css"
     ]
   },
   "node_modules/monaco-editor/esm/vs/editor/common/services/editorWebWorkerMain.js": {
@@ -93,16 +93,16 @@
     "src": "node_modules/monaco-editor/esm/vs/editor/common/services/editorWebWorkerMain.js"
   },
   "node_modules/monaco-editor/esm/vs/languages/definitions/python/python.js": {
-    "file": "assets/python-Dzx49z6q.js",
+    "file": "assets/python-CIMRth-p.js",
     "name": "python",
     "src": "node_modules/monaco-editor/esm/vs/languages/definitions/python/python.js",
     "isDynamicEntry": true,
     "imports": [
-      "_editor.api-BRovRFdx.js"
+      "_editor.api-D7ok9xu0.js"
     ]
   },
   "src/components/CodeEditor.tsx": {
-    "file": "assets/CodeEditor-Dncma5HD.js",
+    "file": "assets/CodeEditor-CVtYYX-7.js",
     "name": "CodeEditor",
     "src": "src/components/CodeEditor.tsx",
     "isDynamicEntry": true,
@@ -110,14 +110,14 @@
       "_rolldown-runtime-QTnfLwEv.js",
       "_jsx-runtime-CIxEorsV.js",
       "_preload-helper-Czpn1I53.js",
-      "_editor.api-BRovRFdx.js"
+      "_editor.api-D7ok9xu0.js"
     ],
     "dynamicImports": [
       "node_modules/monaco-editor/esm/vs/languages/definitions/python/python.js"
     ]
   },
   "src/pages/CreateTask.tsx": {
-    "file": "assets/CreateTask-42EjwY4L.js",
+    "file": "assets/CreateTask-DH5KHvEc.js",
     "name": "CreateTask",
     "src": "src/pages/CreateTask.tsx",
     "isDynamicEntry": true,

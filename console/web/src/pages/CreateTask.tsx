@@ -321,10 +321,26 @@ export function CreateTask({ canWrite, runtimeIdentityDigest, mode }: { canWrite
                   检查配置并继续
                 </Button>
               ) : (
-                <Space direction="vertical" className="confirmation-box">
+                <Space orientation="vertical" className="confirmation-box">
                   <Alert type="warning" showIcon title="请再次核对配置。确认后任务会在服务器上创建。" />
                   <Text code copyable>{prepared.operation_digest}</Text>
-                  <Input value={phrase} onChange={(event) => setPhrase(event.target.value)} placeholder={prepared.confirmation_phrase} />
+                  <div className="confirmation-phrase">
+                    <Text>请输入以下确认短语：</Text>
+                    <Text code copyable>{prepared.confirmation_phrase}</Text>
+                  </div>
+                  <Space.Compact block>
+                    <Input
+                      aria-label="确认短语"
+                      value={phrase}
+                      onChange={(event) => setPhrase(event.target.value)}
+                      placeholder="在此输入或粘贴上方短语"
+                      status={phrase && phrase !== prepared.confirmation_phrase ? 'error' : undefined}
+                    />
+                    <Button onClick={() => setPhrase(prepared.confirmation_phrase)}>填入确认短语</Button>
+                  </Space.Compact>
+                  {phrase && phrase !== prepared.confirmation_phrase && (
+                    <Text type="danger">确认短语必须与上方文字逐字一致。</Text>
+                  )}
                   <Button danger type="primary" size="large" block disabled={phrase !== prepared.confirmation_phrase || Boolean(message)} loading={busy} onClick={() => void confirm()}>
                     {kind === 'CAMPAIGN_CREATE' ? '创建长期优化任务' : '确认并启动任务'}
                   </Button>

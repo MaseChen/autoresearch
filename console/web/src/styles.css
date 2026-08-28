@@ -88,7 +88,31 @@ p, .ant-typography { text-wrap: pretty; }
 .code-editor-toolbar strong { color: #173153; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 .code-editor-toolbar span, .code-editor-status span { font-size: 12px; }
 .code-editor-readonly { margin-left: auto; }
-.code-editor-frame { min-height: 520px; background: #fff; }
+.code-editor-frame { position: relative; min-height: 520px; background: #fff; }
+.code-editor-frame .monaco-editor { text-rendering: auto; }
+.code-editor-frame .monaco-editor .view-line,
+.code-editor-frame .monaco-editor .margin-view-overlays .line-numbers,
+.code-editor-frame .monaco-editor textarea.inputarea.ime-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+  font-size: 14px !important;
+  font-weight: 400 !important;
+  line-height: 22px !important;
+}
+.code-editor-frame .monaco-editor textarea.inputarea.ime-input { box-sizing: content-box; }
+.theme-light .code-editor-frame .monaco-editor .cursor {
+  color: #174fb2 !important;
+  background-color: #174fb2 !important;
+  border-color: #174fb2 !important;
+  opacity: 1 !important;
+}
+.theme-light .code-editor-frame .monaco-editor .line-numbers.active-line-number { color: #0b3f91 !important; font-weight: 700 !important; opacity: 1 !important; }
+.theme-dark .code-editor-frame .monaco-editor .cursor {
+  color: #7fb3ff !important;
+  background-color: #7fb3ff !important;
+  border-color: #7fb3ff !important;
+  opacity: 1 !important;
+}
+.theme-dark .code-editor-frame .monaco-editor .line-numbers.active-line-number { color: #fff !important; font-weight: 700 !important; opacity: 1 !important; }
 .code-editor-status { min-height: 32px; justify-content: flex-end; border-top: 1px solid #dbe3ee; }
 .code-editor-loading { display: grid; min-height: 520px; place-items: center; color: #66758a; background: #fff; border: 1px solid #aebdd0; border-radius: 12px; }
 .inline-feedback { margin-top: 16px; }
@@ -113,6 +137,8 @@ p, .ant-typography { text-wrap: pretty; }
 .authority-grid small { color: #78879b; }
 .environment-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
 .confirmation-box { width: 100%; }
+.confirmation-phrase { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px; background: #fff7e6; border: 1px solid #ffd591; border-radius: 8px; }
+.confirmation-phrase code { font-weight: 700; }
 .confirm-panel { width: 100%; }
 .confirm-panel pre { overflow: auto; max-height: 260px; padding: 12px; background: #edf2f7; border-radius: 8px; }
 

@@ -1,5 +1,13 @@
-import Editor from '@monaco-editor/react'
+import Editor, { type OnMount } from '@monaco-editor/react'
 import '../monacoSetup'
+
+const layoutAfterMount: OnMount = (editor) => {
+  const layout = () => {
+    if (editor.getDomNode()) editor.layout()
+  }
+  requestAnimationFrame(layout)
+  void document.fonts?.ready.then(layout)
+}
 
 export function CodeEditor({
   value,
@@ -26,9 +34,10 @@ export function CodeEditor({
           height="520px"
           path="file:///candidate/kernel.py"
           language="python"
-          theme={theme === 'dark' ? 'vs-dark' : 'vs'}
+          theme={theme === 'dark' ? 'kernel-research-dark' : 'kernel-research-light'}
           value={value}
           onChange={(nextValue) => onChange(nextValue ?? '')}
+          onMount={layoutAfterMount}
           loading={<div className="code-editor-loading" role="status">正在加载代码编辑器…</div>}
           keepCurrentModel={false}
           options={{
@@ -37,11 +46,16 @@ export function CodeEditor({
             automaticLayout: true,
             bracketPairColorization: { enabled: true },
             contextmenu: true,
-            cursorBlinking: 'blink',
+            cursorBlinking: 'solid',
+            cursorSmoothCaretAnimation: 'off',
+            cursorStyle: 'line',
+            cursorWidth: 2,
             detectIndentation: false,
             folding: true,
             fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+            fontLigatures: false,
             fontSize: 14,
+            fontWeight: '400',
             glyphMargin: false,
             guides: { bracketPairs: true, indentation: true },
             hideCursorInOverviewRuler: true,
@@ -52,7 +66,11 @@ export function CodeEditor({
             minimap: { enabled: false },
             occurrencesHighlight: 'singleFile',
             overviewRulerLanes: 0,
-            padding: { top: 14, bottom: 14 },
+            // Monaco's textarea fallback is made visible during macOS IME
+            // composition. Non-zero editor padding can place that textarea
+            // above the rendered line in Safari/WebKit, so spacing belongs to
+            // the surrounding shell rather than the editor viewport.
+            padding: { top: 0, bottom: 0 },
             readOnly,
             renderLineHighlight: 'all',
             renderWhitespace: 'selection',
@@ -61,7 +79,7 @@ export function CodeEditor({
             smoothScrolling: false,
             stickyScroll: { enabled: false },
             tabSize: 4,
-            wordWrap: 'on',
+            wordWrap: 'off',
           }}
         />
       </div>
