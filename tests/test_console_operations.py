@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import sqlite3
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -448,7 +451,6 @@ class ConsoleWorkerAndFacadeTests(unittest.TestCase):
                 effect = outcome if isinstance(outcome, BaseException) else None
                 returned = None if effect is not None else outcome
                 with (
-                    mock.patch("resource.setrlimit"),
                     mock.patch.object(
                         worker_module.ConsolePaths,
                         "from_admin_manifest",
@@ -475,6 +477,122 @@ class ConsoleWorkerAndFacadeTests(unittest.TestCase):
                     )
                 record = operation_module._read_record(path)
                 self.assertEqual(record["receipt"]["status"], expected)
+
+    def test_worker_output_bound_does_not_limit_sqlite_or_inherited_children(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            stdout_path = root / "worker.stdout"
+            stderr_path = root / "worker.stderr"
+            database = root / "controller.sqlite3"
+            stdout_descriptor = os.open(stdout_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            stderr_descriptor = os.open(stderr_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            try:
+                with worker_module._bounded_output_descriptors(
+                    stdout_descriptor,
+                    stderr_descriptor,
+                    maximum=256,
+                ):
+                    os.write(stdout_descriptor, b"parent-out:" + b"x" * 512)
+                    completed = subprocess.run(
+                        [
+                            sys.executable,
+                            "-B",
+                            "-c",
+                            "import os,sys; os.write(int(sys.argv[1]), b'child-out:' + b'y' * 512)",
+                            str(stdout_descriptor),
+                        ],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        pass_fds=(stdout_descriptor,),
+                        timeout=30,
+                        check=False,
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    os.write(stderr_descriptor, b"parent-err:" + b"z" * 512)
+                    with closing(sqlite3.connect(database)) as connection, connection:
+                        self.assertEqual(
+                            connection.execute("PRAGMA journal_mode=WAL").fetchone()[0],
+                            "wal",
+                        )
+                        connection.execute("PRAGMA wal_autocheckpoint=0")
+                        connection.execute("CREATE TABLE payloads (value BLOB NOT NULL)")
+                        connection.executemany(
+                            "INSERT INTO payloads VALUES (zeroblob(2048))",
+                            [()] * 96,
+                        )
+                        connection.commit()
+                        self.assertGreater(
+                            database.with_name(database.name + "-wal").stat().st_size,
+                            worker_module.MAX_WORKER_OUTPUT_BYTES,
+                        )
+            finally:
+                os.close(stdout_descriptor)
+                os.close(stderr_descriptor)
+            for output in (stdout_path, stderr_path):
+                payload = output.read_bytes()
+                self.assertLessEqual(len(payload), 256)
+                self.assertTrue(payload.endswith(b"[console worker output truncated]\n"))
+
+    def test_worker_main_installs_output_bound_before_execution(self) -> None:
+        operation_id = str(uuid.uuid4())
+        bounded = mock.MagicMock()
+        bounded.__enter__.return_value = None
+        bounded.__exit__.return_value = False
+        with (
+            mock.patch.object(worker_module, "_bounded_process_output", return_value=bounded),
+            mock.patch.object(worker_module, "run_worker", return_value=7) as run_worker,
+        ):
+            self.assertEqual(
+                worker_module.main(
+                    [
+                        "--admin-manifest",
+                        str(self.paths.manifest_path),
+                        "--operation-id",
+                        operation_id,
+                    ]
+                ),
+                7,
+            )
+        run_worker.assert_called_once_with(self.paths.manifest_path, operation_id)
+        bounded.__enter__.assert_called_once_with()
+        bounded.__exit__.assert_called_once()
+
+    def test_output_drain_rejects_invalid_bounds_and_restores_failed_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            stdout_path = root / "worker.stdout"
+            stderr_path = root / "worker.stderr"
+            stdout_descriptor = os.open(stdout_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            stderr_descriptor = os.open(stderr_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            try:
+                with self.assertRaisesRegex(ValueError, "bound"):
+                    with worker_module._bounded_output_descriptors(
+                        stdout_descriptor,
+                        stderr_descriptor,
+                        maximum=1,
+                    ):
+                        self.fail("invalid output bound entered its body")
+                with (
+                    mock.patch.object(
+                        worker_module.threading.Thread,
+                        "start",
+                        side_effect=RuntimeError("thread unavailable"),
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "thread unavailable"),
+                ):
+                    with worker_module._bounded_output_descriptors(
+                        stdout_descriptor,
+                        stderr_descriptor,
+                    ):
+                        self.fail("failed output drain entered its body")
+                os.write(stdout_descriptor, b"restored stdout")
+                os.write(stderr_descriptor, b"restored stderr")
+            finally:
+                os.close(stdout_descriptor)
+                os.close(stderr_descriptor)
+            self.assertEqual(stdout_path.read_bytes(), b"restored stdout")
+            self.assertEqual(stderr_path.read_bytes(), b"restored stderr")
 
     def test_write_facade_uses_only_fixed_controller_and_campaign_calls(self) -> None:
         runtime_root = self.paths.runtime_root

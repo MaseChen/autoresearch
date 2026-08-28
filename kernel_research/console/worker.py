@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import os
 from pathlib import Path
-import resource
+import sys
+import threading
 import time
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 from ..autorun.admin import AdminManifest
 from ..autorun.controller import ResearchController
@@ -21,6 +23,118 @@ from .operations import (
 )
 from .protocol import ManualEvaluationRequestV1, OperationReceiptV1, PreparedOperationV1
 from .read_model import ConsolePaths, ConsoleReadModel
+
+
+MAX_WORKER_OUTPUT_BYTES = 64 * 1024
+_TRUNCATION_MARKER = b"\n[console worker output truncated]\n"
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("could not write bounded Console worker output")
+        view = view[written:]
+
+
+def _drain_output(read_descriptor: int, output_descriptor: int, maximum: int) -> None:
+    content_limit = maximum - len(_TRUNCATION_MARKER)
+    written = 0
+    truncated = False
+    try:
+        while True:
+            chunk = os.read(read_descriptor, 16 * 1024)
+            if not chunk:
+                break
+            remaining = max(0, content_limit - written)
+            if remaining:
+                selected = chunk[:remaining]
+                _write_all(output_descriptor, selected)
+                written += len(selected)
+            if len(chunk) > remaining and not truncated:
+                _write_all(output_descriptor, _TRUNCATION_MARKER)
+                truncated = True
+    except OSError:
+        # The audit stream is advisory. Never recurse through threading's
+        # exception hook into the stderr pipe that this thread may be draining.
+        pass
+    finally:
+        os.close(read_descriptor)
+        os.close(output_descriptor)
+
+
+def _install_output_drain(target: int, maximum: int) -> threading.Thread:
+    destination = os.dup(target)
+    read_descriptor = -1
+    write_descriptor = -1
+    installed = False
+    try:
+        read_descriptor, write_descriptor = os.pipe()
+        os.dup2(write_descriptor, target, inheritable=True)
+        installed = True
+        os.close(write_descriptor)
+        write_descriptor = -1
+        thread = threading.Thread(
+            target=_drain_output,
+            args=(read_descriptor, destination, maximum),
+            name=f"console-output-drain-{target}",
+            daemon=True,
+        )
+        thread.start()
+        return thread
+    except BaseException:
+        if installed:
+            os.dup2(destination, target, inheritable=True)
+        for descriptor in (read_descriptor, write_descriptor, destination):
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        raise
+
+
+@contextmanager
+def _bounded_output_descriptors(
+    stdout_descriptor: int,
+    stderr_descriptor: int,
+    *,
+    maximum: int = MAX_WORKER_OUTPUT_BYTES,
+) -> Iterator[None]:
+    """Bound inherited worker output without constraining scientific files."""
+
+    if type(maximum) is not int or maximum <= len(_TRUNCATION_MARKER):
+        raise ValueError("Console worker output bound is invalid")
+    targets = (stdout_descriptor, stderr_descriptor)
+    threads: list[threading.Thread] = []
+    installed: list[int] = []
+    try:
+        for target in targets:
+            thread = _install_output_drain(target, maximum)
+            threads.append(thread)
+            installed.append(target)
+        yield
+    finally:
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except (OSError, ValueError):
+                pass
+        null_descriptor = os.open(os.devnull, os.O_WRONLY)
+        try:
+            for target in installed:
+                os.dup2(null_descriptor, target, inheritable=True)
+        finally:
+            os.close(null_descriptor)
+        for thread in threads:
+            thread.join(timeout=5.0)
+
+
+@contextmanager
+def _bounded_process_output() -> Iterator[None]:
+    with _bounded_output_descriptors(sys.stdout.fileno(), sys.stderr.fileno()):
+        yield
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -83,9 +197,6 @@ def _wait_for_parent_publish(path: Path, pid: int) -> dict[str, Any]:
 
 
 def run_worker(manifest_path: Path, operation_id: str) -> int:
-    # Bound accidental Python diagnostics even if a future exception handler
-    # regresses. Domain/Docker diagnostics remain in their existing private CAS.
-    resource.setrlimit(resource.RLIMIT_FSIZE, (64 * 1024, 64 * 1024))
     paths = ConsolePaths.from_admin_manifest(manifest_path)
     model = ConsoleReadModel(paths)
     service = ConsoleOperationService(paths, model)
@@ -165,11 +276,12 @@ def run_worker(manifest_path: Path, operation_id: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    return run_worker(args.admin_manifest, args.operation_id)
+    with _bounded_process_output():
+        return run_worker(args.admin_manifest, args.operation_id)
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["main", "run_worker"]
+__all__ = ["MAX_WORKER_OUTPUT_BYTES", "main", "run_worker"]
