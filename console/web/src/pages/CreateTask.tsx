@@ -18,13 +18,13 @@ import {
   Typography,
   Upload,
 } from 'antd'
-import { lazy, Suspense, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { PreparedOperation, TaskKind } from '../types'
 import { confirmOperation, prepareOperation } from '../api'
 import { buildOperationParameters, defaultBudget, type TrustedProfile } from '../operationDrafts'
+import { CodeEditor } from '../components/CodeEditor'
 
 const { Paragraph, Text, Title } = Typography
-const CodeEditor = lazy(() => import('../components/CodeEditor').then((module) => ({ default: module.CodeEditor })))
 
 type TaskCycle = 'LONG' | 'SHORT'
 
@@ -272,9 +272,7 @@ export function CreateTask({ canWrite, runtimeIdentityDigest, mode }: { canWrite
                     </Upload>
                     <Text type={sourceBytes > 262_144 ? 'danger' : 'secondary'}> {sourceBytes.toLocaleString()} / 262,144 bytes</Text>
                   </Form.Item>
-                  <Suspense fallback={<div className="code-editor-loading" role="status">正在加载代码编辑器…</div>}>
-                    <CodeEditor value={source} onChange={setSource} readOnly={locked} theme={mode} />
-                  </Suspense>
+                  <CodeEditor value={source} onChange={setSource} readOnly={locked} theme={mode} />
                 </>
               )}
             </Form>

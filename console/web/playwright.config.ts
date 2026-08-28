@@ -13,15 +13,6 @@ export default defineConfig({
   projects: [
     { name: 'desktop', use: { ...devices['Desktop Chrome'], browserName: 'chromium', viewport: { width: 1440, height: 1000 } } },
     {
-      name: 'desktop-textarea-fallback',
-      use: {
-        ...devices['Desktop Chrome'],
-        browserName: 'chromium',
-        viewport: { width: 1440, height: 1000 },
-        launchOptions: { args: ['--disable-blink-features=EditContext'] },
-      },
-    },
-    {
       name: 'desktop-edge',
       use: {
         ...devices['Desktop Chrome'],

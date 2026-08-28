@@ -47,17 +47,12 @@ const snapshot = {
   },
 }
 
-test.beforeEach(async ({ page }, testInfo) => {
+test.beforeEach(async ({ page }) => {
   page.on('console', (message) => {
     if (message.type() === 'warning' || message.type() === 'error') {
       throw new Error(`browser console ${message.type()}: ${message.text()}`)
     }
   })
-  if (testInfo.project.name === 'desktop-textarea-fallback') {
-    await page.addInitScript(() => {
-      Reflect.deleteProperty(window, 'EditContext')
-    })
-  }
   await page.addInitScript((snapshotValue) => {
     class StableEventSource extends EventTarget {
       static readonly CONNECTING = 0
@@ -144,7 +139,7 @@ test('desktop follows create, run records, and full task detail workflow', async
   await expect(page.getByText('当前 Agent 协议尚未提供逐轮深度证据')).toBeVisible()
   await page.getByRole('button', { name: '查看源代码' }).click()
   await expect(page.getByRole('dialog', { name: '候选源代码' })).toBeVisible()
-  await expect(page.locator('.ant-modal .monaco-editor .view-lines')).toContainText('def run():')
+  await expect(page.locator('.ant-modal .code-editor-input')).toHaveValue(/def run\(\):/)
   await page.getByRole('button', { name: /关\s*闭/ }).click()
   await page.getByRole('button', { name: '返回运行记录' }).click()
   await expect(page.getByRole('heading', { name: '运行记录' })).toBeVisible()
@@ -157,43 +152,20 @@ test('desktop follows create, run records, and full task detail workflow', async
   await expect(page.getByText('执行步骤', { exact: true })).toBeVisible()
   await expect(page.getByText('编译与运行框架')).toBeVisible()
   const editor = page.getByRole('textbox', { name: 'kernel.py 代码编辑器' })
-  await page.locator('.monaco-editor .view-lines').click()
+  await editor.click()
   await page.keyboard.type('import triton')
   await page.keyboard.press('Enter')
   await page.keyboard.type('import numpy')
-  await expect(editor).toHaveAttribute('aria-roledescription', 'editor')
-  await expect(page.locator('.monaco-editor .view-lines')).toContainText('import triton')
-  await expect(page.locator('.monaco-editor')).toBeVisible()
-  const visibleCursor = page.locator('.monaco-editor .cursor').first()
-  await expect(visibleCursor).toBeVisible()
-  await expect(visibleCursor).toHaveCSS('background-color', 'rgb(23, 79, 178)')
-  const activeLineNumber = page.locator('.monaco-editor .margin-view-overlays .line-numbers.active-line-number')
-  await expect(activeLineNumber).toHaveCount(1)
-  await expect(activeLineNumber).toHaveText('2')
-  await expect(activeLineNumber).toHaveCSS('color', 'rgb(11, 63, 145)')
-  await expect(page.getByText('2 行')).toBeVisible()
+  await expect(editor).toBeFocused()
+  await expect(editor).toHaveValue('import triton\nimport numpy')
+  await expect(editor).toHaveCSS('caret-color', 'rgb(23, 79, 178)')
+  await expect(editor).toHaveCSS('font-family', /monospace/)
+  await expect(page.getByText('2 行', { exact: true })).toBeVisible()
+  await expect(page.getByText('第 2 行，第 13 列', { exact: true })).toBeVisible()
   await expect(page.getByText('空格: 4')).toBeVisible()
-  const lineTops = await page.locator('.monaco-editor .view-lines .view-line').evaluateAll((nodes) => nodes.slice(0, 2).map((node) => node.getBoundingClientRect().top))
-  const gutterTops = await page.locator('.monaco-editor .margin-view-overlays .line-numbers').evaluateAll((nodes) => nodes.filter((node) => ['1', '2'].includes(node.textContent?.trim() ?? '')).slice(0, 2).map((node) => node.getBoundingClientRect().top))
-  expect(lineTops).toHaveLength(2)
-  expect(gutterTops).toHaveLength(2)
-  expect(Math.abs(lineTops[0] - gutterTops[0])).toBeLessThan(2)
-  expect(Math.abs(lineTops[1] - gutterTops[1])).toBeLessThan(2)
-  const imeInput = page.locator('.monaco-editor textarea.inputarea')
-  if (testInfo.project.name === 'desktop-textarea-fallback') {
-    await imeInput.dispatchEvent('compositionstart', { data: '候选' })
-    await expect(imeInput).toHaveClass(/ime-input/)
-    await expect(imeInput).toHaveCSS('font-size', '14px')
-    await expect(imeInput).toHaveCSS('line-height', '22px')
-    await expect(imeInput).toHaveCSS('box-sizing', 'content-box')
-    const compositionTop = await imeInput.evaluate((node) => node.getBoundingClientRect().top)
-    const currentLineTop = await page.locator('.monaco-editor .view-lines .view-line').last().evaluate((node) => node.getBoundingClientRect().top)
-    expect(Math.abs(compositionTop - currentLineTop)).toBeLessThan(2)
-    await imeInput.dispatchEvent('compositionend', { data: '候选' })
-    await expect(imeInput).not.toHaveClass(/ime-input/)
-  } else {
-    await expect(page.locator('.monaco-editor .native-edit-context')).toHaveCount(1)
-  }
+  await page.keyboard.press('Tab')
+  await expect(editor).toHaveValue('import triton\nimport numpy    ')
+  await expect(page.getByText('第 2 行，第 17 列', { exact: true })).toBeVisible()
 
   await page.getByRole('button', { name: '检查配置并继续' }).click()
   await expect(page.getByText('请输入以下确认短语：')).toBeVisible()

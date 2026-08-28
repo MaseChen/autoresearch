@@ -1,12 +1,10 @@
-import Editor, { type OnMount } from '@monaco-editor/react'
-import '../monacoSetup'
+import { useRef, useState, type ChangeEvent, type KeyboardEvent, type SyntheticEvent } from 'react'
+import { applyTabEdit } from '../codeEditorModel'
 
-const layoutAfterMount: OnMount = (editor) => {
-  const layout = () => {
-    if (editor.getDomNode()) editor.layout()
-  }
-  requestAnimationFrame(layout)
-  void document.fonts?.ready.then(layout)
+function caretPosition(value: string, offset: number): { line: number; column: number } {
+  const prefix = value.slice(0, Math.max(0, Math.min(offset, value.length)))
+  const lines = prefix.split('\n')
+  return { line: lines.length, column: (lines.at(-1)?.length ?? 0) + 1 }
 }
 
 export function CodeEditor({
@@ -20,7 +18,31 @@ export function CodeEditor({
   readOnly?: boolean
   theme?: 'dark' | 'light'
 }) {
+  const editorRef = useRef<HTMLTextAreaElement>(null)
+  const [caret, setCaret] = useState({ line: 1, column: 1 })
   const lineCount = value.length === 0 ? 1 : value.split('\n').length
+
+  const updateCaret = (event: SyntheticEvent<HTMLTextAreaElement>) => {
+    setCaret(caretPosition(value, event.currentTarget.selectionStart))
+  }
+
+  const change = (event: ChangeEvent<HTMLTextAreaElement>) => {
+    const nextValue = event.currentTarget.value
+    onChange(nextValue)
+    setCaret(caretPosition(nextValue, event.currentTarget.selectionStart))
+  }
+
+  const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (readOnly || event.key !== 'Tab') return
+    event.preventDefault()
+    const result = applyTabEdit(value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd, event.shiftKey)
+    onChange(result.value)
+    setCaret(caretPosition(result.value, result.selectionStart))
+    requestAnimationFrame(() => {
+      editorRef.current?.focus()
+      editorRef.current?.setSelectionRange(result.selectionStart, result.selectionEnd)
+    })
+  }
 
   return (
     <section className="code-editor-shell" aria-label="kernel.py 编辑区域">
@@ -29,62 +51,26 @@ export function CodeEditor({
         <span>Python</span>
         {readOnly && <span className="code-editor-readonly">只读</span>}
       </header>
-      <div className="code-editor-frame">
-        <Editor
-          height="520px"
-          path="file:///candidate/kernel.py"
-          language="python"
-          theme={theme === 'dark' ? 'kernel-research-dark' : 'kernel-research-light'}
-          value={value}
-          onChange={(nextValue) => onChange(nextValue ?? '')}
-          onMount={layoutAfterMount}
-          loading={<div className="code-editor-loading" role="status">正在加载代码编辑器…</div>}
-          keepCurrentModel={false}
-          options={{
-            ariaLabel: 'kernel.py 代码编辑器',
-            accessibilitySupport: 'auto',
-            automaticLayout: true,
-            bracketPairColorization: { enabled: true },
-            contextmenu: true,
-            cursorBlinking: 'solid',
-            cursorSmoothCaretAnimation: 'off',
-            cursorStyle: 'line',
-            cursorWidth: 2,
-            detectIndentation: false,
-            folding: true,
-            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-            fontLigatures: false,
-            fontSize: 14,
-            fontWeight: '400',
-            glyphMargin: false,
-            guides: { bracketPairs: true, indentation: true },
-            hideCursorInOverviewRuler: true,
-            insertSpaces: true,
-            lineHeight: 22,
-            lineNumbers: 'on',
-            lineNumbersMinChars: 3,
-            minimap: { enabled: false },
-            occurrencesHighlight: 'singleFile',
-            overviewRulerLanes: 0,
-            // Monaco's textarea fallback is made visible during macOS IME
-            // composition. Non-zero editor padding can place that textarea
-            // above the rendered line in Safari/WebKit, so spacing belongs to
-            // the surrounding shell rather than the editor viewport.
-            padding: { top: 0, bottom: 0 },
-            readOnly,
-            renderLineHighlight: 'all',
-            renderWhitespace: 'selection',
-            scrollBeyondLastLine: false,
-            selectionHighlight: true,
-            smoothScrolling: false,
-            stickyScroll: { enabled: false },
-            tabSize: 4,
-            wordWrap: 'off',
-          }}
-        />
-      </div>
+      <textarea
+        ref={editorRef}
+        className="source-editor code-editor-input"
+        aria-label="kernel.py 代码编辑器"
+        data-theme={theme}
+        value={value}
+        onChange={change}
+        onKeyDown={keyDown}
+        onSelect={updateCaret}
+        onClick={updateCaret}
+        onKeyUp={updateCaret}
+        readOnly={readOnly}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        wrap="off"
+      />
       <footer className="code-editor-status" aria-label="编辑器状态">
         <span>{lineCount} 行</span>
+        <span>第 {caret.line} 行，第 {caret.column} 列</span>
         <span>空格: 4</span>
         <span>UTF-8</span>
       </footer>

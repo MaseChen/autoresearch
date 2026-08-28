@@ -29,6 +29,7 @@ export default defineConfig({
       include: [
         'src/api.ts',
         'src/chartAccessibility.ts',
+        'src/codeEditorModel.ts',
         'src/components/EChart.tsx',
         'src/components/CodeEditor.tsx',
         'src/components/DeepEvidencePanel.tsx',

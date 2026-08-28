@@ -3,13 +3,13 @@
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
   "name": "@kernel-research/console-web@1.0.0",
-  "documentNamespace": "https://github.com/masechen/autoresearch/sbom/console-v1/da7e745399b64f9551864140f4785a6010ce70cb80b2ab1611156e4d45f7895a",
+  "documentNamespace": "https://github.com/masechen/autoresearch/sbom/console-v1/bec6da531c98016d22631f913bb5b110fe83c4817575cd9b3ce34887171aa4bb",
   "creationInfo": {
     "created": "1970-01-01T00:00:00.000Z",
     "creators": [
       "Tool: npm/cli-11.17.0"
     ],
-    "comment": "Deterministic package-lock SHA-256: da7e745399b64f9551864140f4785a6010ce70cb80b2ab1611156e4d45f7895a"
+    "comment": "Deterministic package-lock SHA-256: bec6da531c98016d22631f913bb5b110fe83c4817575cd9b3ce34887171aa4bb"
   },
   "documentDescribes": [
     "SPDXRef-Package-kernel-research.console-web-1.0.0"
@@ -2100,52 +2100,6 @@
         {
           "algorithm": "SHA512",
           "checksumValue": "cf3351f9275048327373c8e869e3fc410a0242bf0db98c76748232b65d507811191c9f6e5ba85e6ecad881bcfc849c1441aa374d608cb667d5f0dbb5b7038b03"
-        }
-      ]
-    },
-    {
-      "name": "@monaco-editor/loader",
-      "SPDXID": "SPDXRef-Package-monaco-editor.loader-1.7.0",
-      "versionInfo": "1.7.0",
-      "packageFileName": "node_modules/@monaco-editor/loader",
-      "downloadLocation": "https://registry.npmjs.org/@monaco-editor/loader/-/loader-1.7.0.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/%40monaco-editor/loader@1.7.0"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "808c11d47ac9aebc7ebdfc8e858982674fc9716a86e646df1bbf9dddffc2d4b5e4d84bf301b1d2837310e653b6b0c968f62ce8019d38b21a217ca2d54fa72b54"
-        }
-      ]
-    },
-    {
-      "name": "@monaco-editor/react",
-      "SPDXID": "SPDXRef-Package-monaco-editor.react-4.7.0",
-      "versionInfo": "4.7.0",
-      "packageFileName": "node_modules/@monaco-editor/react",
-      "downloadLocation": "https://registry.npmjs.org/@monaco-editor/react/-/react-4.7.0.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/%40monaco-editor/react@4.7.0"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "732cd7402b4ee3bc9dcf1a50b42192406382f069376547815c50310fe0965d8168e4ea99c995289c59740f05254f201f4479ed05fc36a77c38b3d47aa1ed5e08"
         }
       ]
     },
@@ -5462,29 +5416,6 @@
       ]
     },
     {
-      "name": "@types/trusted-types",
-      "SPDXID": "SPDXRef-Package-types.trusted-types-2.0.7",
-      "versionInfo": "2.0.7",
-      "packageFileName": "node_modules/@types/trusted-types",
-      "downloadLocation": "https://registry.npmjs.org/@types/trusted-types/-/trusted-types-2.0.7.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/%40types/trusted-types@2.0.7"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "49c68f767d5d41cce06e5d101537933a65471542eddfde17260390368c95859eabdaf2e730b25f04f779dd2079d93ff71b7e95235fe0d8c65a5f47300ee5ec7f"
-        }
-      ]
-    },
-    {
       "name": "@typescript-eslint/eslint-plugin",
       "SPDXID": "SPDXRef-Package-typescript-eslint.eslint-plugin-8.67.0",
       "versionInfo": "8.67.0",
@@ -7344,29 +7275,6 @@
         {
           "algorithm": "SHA512",
           "checksumValue": "5fb049db2125b27389df4a59178b882037c1115805e17101c4bf41c61cba767ae6e61933aa6b161c64e21ea46221336133214bc808969dd2093fb675353b5e0e"
-        }
-      ]
-    },
-    {
-      "name": "dompurify",
-      "SPDXID": "SPDXRef-Package-dompurify-3.4.8",
-      "versionInfo": "3.4.8",
-      "packageFileName": "node_modules/dompurify",
-      "downloadLocation": "https://registry.npmjs.org/dompurify/-/dompurify-3.4.8.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "(MPL-2.0 OR Apache-2.0)",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/dompurify@3.4.8"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "c9bd5c12668eba6ef016f382490c727e0565bf90f8ed1737d22656a0ca5b0c85939c9ea0ac30d0caed8a149cc1da4eeed2932e25c435ce9847fff7c59f0dad8d"
         }
       ]
     },
@@ -9349,29 +9257,6 @@
       ]
     },
     {
-      "name": "marked",
-      "SPDXID": "SPDXRef-Package-marked-14.0.0",
-      "versionInfo": "14.0.0",
-      "packageFileName": "node_modules/marked",
-      "downloadLocation": "https://registry.npmjs.org/marked/-/marked-14.0.0.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/marked@14.0.0"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "b888f8f9f690f8c807830516d65d8fb0f82564b38b393d6e12bb74e9d00fb71da48ed78b0246ec77fd0589883f3064be8bb64a2dbef0d960a5c4793338ebabc9"
-        }
-      ]
-    },
-    {
       "name": "mdn-data",
       "SPDXID": "SPDXRef-Package-mdn-data-2.27.1",
       "versionInfo": "2.27.1",
@@ -9483,29 +9368,6 @@
         {
           "algorithm": "SHA512",
           "checksumValue": "b44047a839c8a0cff5ad7304d738246bd83a43695ca029311cbb9cece0c9e41c5b3f977873667970682d5c092ee7ddb4d02c7b762b874ce61f4810fc9fa9a6f0"
-        }
-      ]
-    },
-    {
-      "name": "monaco-editor",
-      "SPDXID": "SPDXRef-Package-monaco-editor-0.56.0",
-      "versionInfo": "0.56.0",
-      "packageFileName": "node_modules/monaco-editor",
-      "downloadLocation": "https://registry.npmjs.org/monaco-editor/-/monaco-editor-0.56.0.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/monaco-editor@0.56.0"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "b176e8466dc178178b9bddfc79a8b22cc7b43b1cdf5c8959bdbbf88abfe3560432d730e15a38269f2d16a0de397ee0ca842090b1831b049aeffc0ea377c68252"
         }
       ]
     },
@@ -10656,29 +10518,6 @@
         {
           "algorithm": "SHA512",
           "checksumValue": "d573091397d0a358c61fa63fede6e7c0f3811242049d3e10177d9de51d7e557757bde334201309b7ccdf6b15f53f7421570ad87bee7bebe8e400db524b69816f"
-        }
-      ]
-    },
-    {
-      "name": "state-local",
-      "SPDXID": "SPDXRef-Package-state-local-1.0.7",
-      "versionInfo": "1.0.7",
-      "packageFileName": "node_modules/state-local",
-      "downloadLocation": "https://registry.npmjs.org/state-local/-/state-local-1.0.7.tgz",
-      "filesAnalyzed": false,
-      "homepage": "NOASSERTION",
-      "licenseDeclared": "MIT",
-      "externalRefs": [
-        {
-          "referenceCategory": "PACKAGE-MANAGER",
-          "referenceType": "purl",
-          "referenceLocator": "pkg:npm/state-local@1.0.7"
-        }
-      ],
-      "checksums": [
-        {
-          "algorithm": "SHA512",
-          "checksumValue": "1d310730d89e6a4127a1edf7b21058719ecd5fcdc00948c2bbc738d22386119b27823f7346792a4bd8f5a6a40f5f0a1b07465c553936ed111bec2390d14479f7"
         }
       ]
     },
@@ -11978,11 +11817,6 @@
       "relationshipType": "DESCRIBES"
     },
     {
-      "spdxElementId": "SPDXRef-Package-monaco-editor.react-4.7.0",
-      "relatedSpdxElement": "SPDXRef-Package-kernel-research.console-web-1.0.0",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
       "spdxElementId": "SPDXRef-Package-tanstack.react-query-5.102.2",
       "relatedSpdxElement": "SPDXRef-Package-kernel-research.console-web-1.0.0",
       "relationshipType": "DEPENDENCY_OF"
@@ -11999,11 +11833,6 @@
     },
     {
       "spdxElementId": "SPDXRef-Package-echarts-6.1.0",
-      "relatedSpdxElement": "SPDXRef-Package-kernel-research.console-web-1.0.0",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-monaco-editor-0.56.0",
       "relatedSpdxElement": "SPDXRef-Package-kernel-research.console-web-1.0.0",
       "relationshipType": "DEPENDENCY_OF"
     },
@@ -12740,31 +12569,6 @@
     {
       "spdxElementId": "SPDXRef-Package-jridgewell.sourcemap-codec-1.5.5",
       "relatedSpdxElement": "SPDXRef-Package-jridgewell.trace-mapping-0.3.31",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-state-local-1.0.7",
-      "relatedSpdxElement": "SPDXRef-Package-monaco-editor.loader-1.7.0",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-monaco-editor-0.56.0",
-      "relatedSpdxElement": "SPDXRef-Package-monaco-editor.react-4.7.0",
-      "relationshipType": "PREREQUISITE_FOR"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-react-19.2.7",
-      "relatedSpdxElement": "SPDXRef-Package-monaco-editor.react-4.7.0",
-      "relationshipType": "PREREQUISITE_FOR"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-react-dom-19.2.7",
-      "relatedSpdxElement": "SPDXRef-Package-monaco-editor.react-4.7.0",
-      "relationshipType": "PREREQUISITE_FOR"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-monaco-editor.loader-1.7.0",
-      "relatedSpdxElement": "SPDXRef-Package-monaco-editor.react-4.7.0",
       "relationshipType": "DEPENDENCY_OF"
     },
     {
@@ -15388,11 +15192,6 @@
       "relationshipType": "DEPENDENCY_OF"
     },
     {
-      "spdxElementId": "SPDXRef-Package-types.trusted-types-2.0.7",
-      "relatedSpdxElement": "SPDXRef-Package-dompurify-3.4.8",
-      "relationshipType": "OPTIONAL_DEPENDENCY_OF"
-    },
-    {
       "spdxElementId": "SPDXRef-Package-tslib-2.3.0",
       "relatedSpdxElement": "SPDXRef-Package-echarts-6.1.0",
       "relationshipType": "DEPENDENCY_OF"
@@ -16095,16 +15894,6 @@
     {
       "spdxElementId": "SPDXRef-Package-brace-expansion-5.0.9",
       "relatedSpdxElement": "SPDXRef-Package-minimatch-10.2.6",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-dompurify-3.4.8",
-      "relatedSpdxElement": "SPDXRef-Package-monaco-editor-0.56.0",
-      "relationshipType": "DEPENDENCY_OF"
-    },
-    {
-      "spdxElementId": "SPDXRef-Package-marked-14.0.0",
-      "relatedSpdxElement": "SPDXRef-Package-monaco-editor-0.56.0",
       "relationshipType": "DEPENDENCY_OF"
     },
     {
