@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import io
 import os
@@ -14,18 +15,29 @@ import uuid
 from unittest import mock
 from types import SimpleNamespace
 
-from fastapi.testclient import TestClient
-
 from kernel_research.console.config import GatewayConfig
-from kernel_research.console.gateway import (
-    GatewayState,
-    SessionRegistry,
-    SnapshotEventBroker,
-    _paginate,
-    create_app,
-)
 from kernel_research.console import gateway_cli
 from kernel_research.console.transport import SSHAgentTransport
+
+_FASTAPI_AVAILABLE = importlib.util.find_spec("fastapi") is not None
+_CONSOLE_EXTRA_REQUIRED = "Mac Console Gateway tests require .[console]"
+if _FASTAPI_AVAILABLE:
+    from fastapi.testclient import TestClient
+
+    from kernel_research.console.gateway import (
+        GatewayState,
+        SessionRegistry,
+        SnapshotEventBroker,
+        _paginate,
+        create_app,
+    )
+else:
+    TestClient = None
+    GatewayState = None
+    SessionRegistry = None
+    SnapshotEventBroker = None
+    _paginate = None
+    create_app = None
 
 
 def _snapshot() -> dict[str, object]:
@@ -321,6 +333,7 @@ class ConsoleConfigAndTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "poll_interval"):
             GatewayConfig.load(path)
 
+    @unittest.skipUnless(_FASTAPI_AVAILABLE, _CONSOLE_EXTRA_REQUIRED)
     def test_snapshot_cache_fails_closed_on_runtime_identity_change(self) -> None:
         from kernel_research.console.gateway import SnapshotCache
 
@@ -340,6 +353,7 @@ class ConsoleConfigAndTransportTests(unittest.TestCase):
             cache.get(force=True)
 
 
+@unittest.skipUnless(_FASTAPI_AVAILABLE, _CONSOLE_EXTRA_REQUIRED)
 class ConsoleGatewayTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -546,6 +560,7 @@ class ConsoleGatewayTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
 
 
+@unittest.skipUnless(_FASTAPI_AVAILABLE, _CONSOLE_EXTRA_REQUIRED)
 class ConsoleGatewayCliTests(unittest.TestCase):
     def test_gateway_cli_binds_loopback_random_port_and_never_shells(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -606,6 +621,7 @@ class ConsoleGatewayCliTests(unittest.TestCase):
             gateway_cli.main(["--port", "65536", "--no-browser"])
 
 
+@unittest.skipUnless(_FASTAPI_AVAILABLE, _CONSOLE_EXTRA_REQUIRED)
 class ConsoleSharedSseTests(unittest.IsolatedAsyncioTestCase):
     async def test_tabs_share_one_sampler_and_receive_same_snapshot(self) -> None:
         cache = mock.MagicMock()
@@ -663,6 +679,7 @@ class ConsoleSharedSseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(broker._last_snapshot_event, "")
 
 
+@unittest.skipUnless(_FASTAPI_AVAILABLE, _CONSOLE_EXTRA_REQUIRED)
 class ConsoleKeysetPaginationTests(unittest.TestCase):
     def test_cursor_binds_section_runtime_and_high_water(self) -> None:
         snapshot = _snapshot()

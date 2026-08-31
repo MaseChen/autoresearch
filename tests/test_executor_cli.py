@@ -76,10 +76,17 @@ def _measured_result(candidate_us: float, baseline_us: float) -> dict:
     }
 
 
-def _case_phase_timeout_fixture(progress) -> None:
+def _case_phase_timeout_fixture(progress, ready) -> None:
     progress.put(
         {"phase": "case", "case_id": "fixture-case", "stage": "benchmark"}
     )
+    # ``multiprocessing.Queue.put`` may return before its feeder has made the
+    # event visible to the parent.  Flush this fixture's only progress event
+    # before declaring it ready so the test measures the case deadline instead
+    # of occasionally charging a loaded host's spawn latency to compilation.
+    progress.close()
+    progress.join_thread()
+    ready.set()
     time.sleep(60.0)
 
 
@@ -539,13 +546,18 @@ class IsolatedEvaluationTests(unittest.TestCase):
     def test_c500_watchdog_enforces_a_case_deadline_and_names_the_case(self) -> None:
         context = multiprocessing.get_context("spawn")
         progress = context.Queue(maxsize=4)
+        ready = context.Event()
         process = context.Process(
             target=_case_phase_timeout_fixture,
-            args=(progress,),
+            args=(progress, ready),
             name="kernel-research-watchdog-fixture",
         )
         process.start()
         try:
+            self.assertTrue(
+                ready.wait(timeout=30.0),
+                "watchdog fixture did not publish its case phase",
+            )
             with (
                 mock.patch(
                     "kernel_research.executor.DEFAULT_C500_COMPILE_TIMEOUT_SEC",
