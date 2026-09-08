@@ -25,6 +25,7 @@ def scoring_baseline_measurement_contract_snapshot() -> dict[str, object]:
         "anchor_channel_count": 2,
         "anchor_blocks_per_channel": 6,
         "phase_order": "all-case-anchors-before-performance-proof",
+        "case_memory_policy": "regenerate-and-release-each-case",
         "performance_pairing": "compiled-reference-vs-eager-reference",
         "performance_statistic": "ratio-of-channel-medians",
         "performance_role": "qualification-only-non-regression-proof",

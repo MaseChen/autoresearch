@@ -43,6 +43,10 @@ class ScoringMeasurementTests(unittest.TestCase):
             "all-case-anchors-before-performance-proof",
         )
         self.assertEqual(
+            first["case_memory_policy"],
+            "regenerate-and-release-each-case",
+        )
+        self.assertEqual(
             first["performance_role"],
             "qualification-only-non-regression-proof",
         )

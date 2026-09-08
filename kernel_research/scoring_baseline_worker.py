@@ -86,7 +86,6 @@ def run_scoring_baseline_probe(
         compiled_reference = compile_scoring_reference(torch_module)
         compiler_factory_seconds = time.perf_counter() - compile_started
         case_results: list[dict[str, Any]] = []
-        case_contexts: list[dict[str, Any]] = []
         for spec in cases:
             dataset = generate_case(spec)
             tensors = _copy_dataset_to_device(
@@ -133,30 +132,42 @@ def run_scoring_baseline_probe(
                 "anchor_measurement": anchor_measurement_value,
             }
             case_results.append(result)
-            case_contexts.append(
-                {
-                    "spec": spec,
-                    "dataset": dataset,
-                    "tensors": tensors,
-                    "snapshots": snapshots,
-                    "expected": expected,
-                    "arguments": arguments,
-                    "compiled_output": compiled_output,
-                    "result": result,
-                }
+            del (
+                arguments,
+                compiled_output,
+                expected,
+                snapshots,
+                tensors,
+                dataset,
             )
 
         # Keep the absolute-anchor phase free from the substantially slower
         # eager workload.  The eager channel proves only that full-graph
-        # compilation is a valid non-regressing baseline implementation.
-        for context in case_contexts:
-            spec = context["spec"]
-            arguments = context["arguments"]
+        # compilation is a valid non-regressing baseline implementation.  Each
+        # deterministic case is regenerated and released so the phase split
+        # cannot retain all full-case tensors inside the memory cgroup.
+        for spec, result in zip(cases, case_results, strict=True):
+            dataset = generate_case(spec)
+            tensors = _copy_dataset_to_device(
+                torch_module, dataset, str(health.environment["device"])
+            )
+            snapshots = _clone_readonly_inputs(tensors)
+            expected = _torch_reference(torch_module, tensors)
+            arguments = _selected_arguments(tensors)
+            compiled_output = compiled_reference(*arguments)
             eager_output = eager_reference(*arguments)
             _synchronize(torch_module)
-            eager_ratio = _matched_ratio(
-                torch_module, eager_output, context["expected"]
+            compiled_ratio = _matched_ratio(
+                torch_module, compiled_output, expected
             )
+            eager_ratio = _matched_ratio(
+                torch_module, eager_output, expected
+            )
+            if compiled_ratio < MIN_MATCHED_RATIO:
+                raise RuntimeError(
+                    "compiled scoring reference failed correctness during "
+                    f"performance proof for {spec.name}"
+                )
             if eager_ratio < MIN_MATCHED_RATIO:
                 raise RuntimeError(
                     f"eager scoring reference failed correctness for {spec.name}"
@@ -181,18 +192,26 @@ def run_scoring_baseline_probe(
                     f"compiled scoring reference is slower than eager for {spec.name}"
                 )
             unchanged, modified = _readonly_inputs_unchanged(
-                torch_module, context["tensors"], context["snapshots"]
+                torch_module, tensors, snapshots
             )
             if not unchanged:
                 raise RuntimeError(f"scoring reference modified input {modified}")
-            context["result"].update(
+            result.update(
                 {
                     "eager_matched_ratio": eager_ratio,
                     "compiled_to_eager_ratio": compiled_to_eager,
                     "performance_measurement": performance_measurement_value,
                 }
             )
-            del eager_output
+            del (
+                arguments,
+                compiled_output,
+                eager_output,
+                expected,
+                snapshots,
+                tensors,
+                dataset,
+            )
         environment = dict(health.environment)
         payload: dict[str, Any] = {
             "schema_version": SCORING_BASELINE_PROBE_SCHEMA_VERSION,

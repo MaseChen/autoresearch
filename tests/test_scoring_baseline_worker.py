@@ -113,6 +113,8 @@ class ScoringBaselineWorkerTests(unittest.TestCase):
         self.assertTrue(result["compiler_proof"]["fullgraph_fail_closed"])
         benchmark = started[-1]
         self.assertEqual(benchmark.call_count, 4)
+        self.assertEqual(started[1].call_count, 4)
+        self.assertEqual(started[7].call_count, 4)
         anchor_calls = benchmark.call_args_list[:2]
         performance_calls = benchmark.call_args_list[2:]
         self.assertTrue(
@@ -153,7 +155,9 @@ class ScoringBaselineWorkerTests(unittest.TestCase):
             ),
             (
                 "eager-correctness",
-                lambda mocks: setattr(mocks[4], "side_effect", (1.0, 0.98)),
+                lambda mocks: setattr(
+                    mocks[4], "side_effect", (1.0, 1.0, 0.98)
+                ),
                 (SimpleNamespace(name="case-a"),),
             ),
             (

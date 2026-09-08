@@ -102,6 +102,25 @@ SCORING_PRE_GPU_ERROR = (
     "scoring baseline evaluator produced invalid output: container did not emit "
     "one JSON object: Expecting value: line 1 column 1 (char 0)"
 )
+SCORING_OOM_SOURCE_COMMIT = "e099b2b415150c39c9e6d0cab7a9bded4256fafa"
+SCORING_OOM_OPERATION_ID = "score-baseline-16bf9ae5a89201250c2dbb20"
+SCORING_OOM_OPERATION_DIGEST = (
+    "sha256:16bf9ae5a89201250c2dbb207bef22557faaf967320fdddbe0fce9ea86b51849"
+)
+SCORING_OOM_MEASUREMENT_DIGEST = (
+    "sha256:3089ed4feee4e9a09c536ff360bf78d0845afaaf00e6dc1c0a7353e23502e4fe"
+)
+SCORING_OOM_FRAMEWORK_COMMIT = "58c8b7e36fbff4bb08c7636b391f72b33d0ef0da"
+SCORING_OOM_EVALUATOR_IMAGE = (
+    "registry.cn-shanghai.aliyuncs.com/kcr-3rd/kesci_kernel_lab@sha256:"
+    "5f1da890360acc5a81438d0e35a80079b34f30d1fa64fc954fef2e9a1ae45b64"
+)
+SCORING_OOM_ROOT_CAUSE_MANIFEST_SHA256 = (
+    "sha256:a810115e85395e073588f3d19982ee1e07ca1dac0125ce297b5cdebdcc00456b"
+)
+SCORING_OOM_ERROR = "scoring baseline evaluator had an untrusted GPU termination"
+SCORING_OOM_FAILURE_CLASS = "CONFIRMED_SCORING_CONTAINER_MEMORY_CGROUP_OOM"
+SCORING_ABANDONED_UNKNOWN_STATUS = "ABANDONED_UNKNOWN_OUTCOME"
 
 
 def _resolve_builtin_target(namespace: ResearchNamespace) -> TargetComponents:
@@ -1216,6 +1235,309 @@ class ResearchController:
                 f"{label} is unreadable: {exc}"
             ) from exc
 
+    def _verify_scoring_oom_source(
+        self, operation_dir: Path, *, state_name: str
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Re-prove the one archived exit-137 source without reclassifying it."""
+
+        if operation_dir.name != SCORING_OOM_OPERATION_ID:
+            raise ControllerDataIntegrityError(
+                "scoring OOM recovery operation identity is not exact"
+            )
+        intent = self._read_scoring_evidence(
+            operation_dir / "intent.json", label="scoring OOM source intent"
+        )
+        unknown = self._read_scoring_evidence(
+            operation_dir / state_name, label="scoring OOM source state"
+        )
+        receipt = self._read_scoring_evidence(
+            operation_dir / "probe-00.receipt.json",
+            label="scoring OOM source receipt",
+        )
+        material_keys = {
+            "schema_version",
+            "operation",
+            "expected_git_commit",
+            "framework_git_commit",
+            "scoring_framework_git_commit",
+            "evaluator_image",
+            "reference_source_sha256",
+            "timing_protocol",
+            "measurement_contract",
+            "probe_count",
+        }
+        intent_tail = {
+            "operation_id",
+            "operation_digest",
+            "status",
+            "active_probe_index",
+            "completed_probes",
+        }
+        if set(intent) != material_keys | intent_tail or set(unknown) != (
+            material_keys | intent_tail | {"error"}
+        ):
+            raise ControllerDataIntegrityError(
+                "scoring OOM source fields are not exact"
+            )
+        material = {key: intent[key] for key in material_keys}
+        expected_intent = {
+            **material,
+            "operation_id": SCORING_OOM_OPERATION_ID,
+            "operation_digest": SCORING_OOM_OPERATION_DIGEST,
+            "status": "RUNNING",
+            "active_probe_index": None,
+            "completed_probes": 0,
+        }
+        expected_unknown = {
+            **expected_intent,
+            "status": "UNKNOWN_OUTCOME",
+            "active_probe_index": 0,
+            "error": SCORING_OOM_ERROR,
+        }
+        measurement_contract = material.get("measurement_contract")
+        if (
+            intent != expected_intent
+            or unknown != expected_unknown
+            or canonical_sha256(material) != SCORING_OOM_OPERATION_DIGEST
+            or material["schema_version"] != 1
+            or material["operation"] != "score-baseline-qualify"
+            or material["expected_git_commit"] != SCORING_OOM_SOURCE_COMMIT
+            or material["scoring_framework_git_commit"]
+            != SCORING_OOM_SOURCE_COMMIT
+            or material["framework_git_commit"]
+            != SCORING_OOM_FRAMEWORK_COMMIT
+            or material["evaluator_image"] != SCORING_OOM_EVALUATOR_IMAGE
+            or material["reference_source_sha256"]
+            != scoring_reference_source_sha256()
+            or material["timing_protocol"] != device_event_protocol_snapshot()
+            or not isinstance(measurement_contract, Mapping)
+            or measurement_contract.get("digest")
+            != SCORING_OOM_MEASUREMENT_DIGEST
+            or material["probe_count"] != SCORING_BASELINE_QUALIFICATION_RUNS
+            or receipt
+            != {
+                "container_exit_code": 137,
+                "error": SCORING_OOM_ERROR,
+                "status": "UNKNOWN_OUTCOME",
+            }
+        ):
+            raise ControllerDataIntegrityError(
+                "scoring OOM source evidence is inconsistent"
+            )
+        for name in ("probe-00.stdout.json", "probe-00.stderr.txt"):
+            path = operation_dir / name
+            if path.is_symlink() or not path.is_file() or path.stat().st_size != 0:
+                raise ControllerDataIntegrityError(
+                    "scoring OOM raw output contract is not exact"
+                )
+        return material, unknown, receipt
+
+    def _verify_scoring_oom_recovery_commit(self) -> None:
+        """Allow only the direct reviewed child that fixes this incident."""
+
+        commit = self.config.expected_git_commit
+        if (
+            self.config.resolved_framework_git_commit
+            != SCORING_OOM_FRAMEWORK_COMMIT
+            or self.config.evaluator_image != SCORING_OOM_EVALUATOR_IMAGE
+        ):
+            raise ControllerDataIntegrityError(
+                "scoring OOM recovery runtime identity has drifted"
+            )
+        if _run_git(self.config.repository_dir, "rev-parse", "HEAD^") != (
+            SCORING_OOM_SOURCE_COMMIT
+        ):
+            raise ControllerDataIntegrityError(
+                "scoring OOM recovery must be the direct incident child"
+            )
+        changed = set(
+            _run_git(
+                self.config.repository_dir,
+                "diff",
+                "--name-only",
+                SCORING_OOM_SOURCE_COMMIT,
+                commit,
+                "--",
+            ).splitlines()
+        )
+        allowed = {
+            "docs/xpuoj-scoring-v2/IMPLEMENTATION.md",
+            "docs/xpuoj-scoring-v2/PROGRESS.md",
+            "docs/xpuoj-scoring-v2/RESEARCH.md",
+            "kernel_research/autorun/controller.py",
+            "kernel_research/cli.py",
+            "kernel_research/scoring_baseline_worker.py",
+            "kernel_research/scoring_measurement.py",
+            "tests/test_scoring_baseline_worker.py",
+            "tests/test_scoring_cli.py",
+            "tests/test_scoring_controller.py",
+            "tests/test_scoring_measurement.py",
+        }
+        required = {
+            "kernel_research/autorun/controller.py",
+            "kernel_research/cli.py",
+            "kernel_research/scoring_baseline_worker.py",
+            "kernel_research/scoring_measurement.py",
+        }
+        if not required <= changed or not changed <= allowed:
+            raise ControllerDataIntegrityError(
+                "scoring OOM recovery changed an unauthorized path"
+            )
+
+    @staticmethod
+    def _scoring_oom_recovery_intent(
+        *,
+        recovery_commit: str,
+        unknown: Mapping[str, Any],
+        receipt: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "command": "score-baseline-abandon-unknown-oom",
+            "source_operation_id": SCORING_OOM_OPERATION_ID,
+            "source_operation_digest": SCORING_OOM_OPERATION_DIGEST,
+            "source_unknown_digest": canonical_sha256(unknown),
+            "source_receipt_digest": canonical_sha256(receipt),
+            "root_cause_manifest_sha256": (
+                SCORING_OOM_ROOT_CAUSE_MANIFEST_SHA256
+            ),
+            "recovery_commit": recovery_commit,
+            "status": "RUNNING",
+            "replay_permitted": False,
+        }
+
+    @staticmethod
+    def _scoring_oom_final(
+        *,
+        material: Mapping[str, Any],
+        unknown: Mapping[str, Any],
+        receipt: Mapping[str, Any],
+        recovery_intent: Mapping[str, Any],
+        doctor: Mapping[str, Any],
+        recovery_commit: str,
+    ) -> dict[str, Any]:
+        return {
+            **material,
+            "operation_id": SCORING_OOM_OPERATION_ID,
+            "operation_digest": SCORING_OOM_OPERATION_DIGEST,
+            "status": SCORING_ABANDONED_UNKNOWN_STATUS,
+            "original_status": "UNKNOWN_OUTCOME",
+            "failure_classification": SCORING_OOM_FAILURE_CLASS,
+            "reason": "operator abandoned confirmed memory-cgroup OOM",
+            "source_unknown_digest": canonical_sha256(unknown),
+            "source_receipt_digest": canonical_sha256(receipt),
+            "root_cause_manifest_sha256": (
+                SCORING_OOM_ROOT_CAUSE_MANIFEST_SHA256
+            ),
+            "recovery_commit": recovery_commit,
+            "recovery_intent_digest": canonical_sha256(recovery_intent),
+            "doctor_evidence_digest": canonical_sha256(doctor),
+            "doctor_invoked": True,
+            "replay_permitted": False,
+            "qualification_effect": "none",
+            "deployment_effect": "none",
+        }
+
+    def _verify_scoring_oom_abandonment(
+        self, operation_dir: Path
+    ) -> dict[str, Any]:
+        expected_names = {
+            "intent.json",
+            "state.json",
+            "probe-00.receipt.json",
+            "probe-00.stdout.json",
+            "probe-00.stderr.txt",
+            "unknown.json",
+            "recovery-intent.json",
+            "recovery-doctor.json",
+            "final.json",
+        }
+        entries = list(operation_dir.iterdir())
+        if (
+            {entry.name for entry in entries} != expected_names
+            or any(entry.is_symlink() or not entry.is_file() for entry in entries)
+        ):
+            raise ControllerDataIntegrityError(
+                "scoring OOM abandonment file inventory is not exact"
+            )
+        material, unknown, receipt = self._verify_scoring_oom_source(
+            operation_dir, state_name="unknown.json"
+        )
+        recovery_intent = self._read_scoring_evidence(
+            operation_dir / "recovery-intent.json",
+            label="scoring OOM recovery intent",
+        )
+        doctor = self._read_scoring_evidence(
+            operation_dir / "recovery-doctor.json",
+            label="scoring OOM recovery doctor",
+        )
+        final = self._read_scoring_evidence(
+            operation_dir / "final.json", label="scoring OOM final evidence"
+        )
+        state = self._read_scoring_evidence(
+            operation_dir / "state.json", label="scoring OOM terminal state"
+        )
+        recovery_commit = final.get("recovery_commit")
+        if (
+            not isinstance(recovery_commit, str)
+            or re.fullmatch(r"[0-9a-f]{40}", recovery_commit) is None
+        ):
+            raise ControllerDataIntegrityError(
+                "scoring OOM recovery commit is invalid"
+            )
+        expected_recovery_intent = self._scoring_oom_recovery_intent(
+            recovery_commit=recovery_commit,
+            unknown=unknown,
+            receipt=receipt,
+        )
+        expected_final = self._scoring_oom_final(
+            material=material,
+            unknown=unknown,
+            receipt=receipt,
+            recovery_intent=recovery_intent,
+            doctor=doctor,
+            recovery_commit=recovery_commit,
+        )
+        doctor_identity = doctor.get("identity")
+        doctor_probe = doctor.get("c500_probe")
+        if (
+            recovery_intent != expected_recovery_intent
+            or final != expected_final
+            or state != expected_final
+            or doctor.get("status") != "SUCCESS"
+            or not isinstance(doctor_identity, Mapping)
+            or doctor_identity.get("git_commit") != recovery_commit
+            or not isinstance(doctor_probe, Mapping)
+            or doctor_probe.get("status") != "SUCCESS"
+            or not isinstance(doctor_probe.get("environment"), Mapping)
+            or doctor_probe["environment"].get("compile_probe_status")
+            != "PASSED"
+        ):
+            raise ControllerDataIntegrityError(
+                "scoring OOM abandonment evidence is inconsistent"
+            )
+        return final
+
+    @staticmethod
+    def _validate_scoring_oom_doctor(
+        doctor: Mapping[str, Any], *, recovery_commit: str
+    ) -> None:
+        doctor_identity = doctor.get("identity")
+        doctor_probe = doctor.get("c500_probe")
+        if (
+            doctor.get("status") != "SUCCESS"
+            or not isinstance(doctor_identity, Mapping)
+            or doctor_identity.get("git_commit") != recovery_commit
+            or not isinstance(doctor_probe, Mapping)
+            or doctor_probe.get("status") != "SUCCESS"
+            or not isinstance(doctor_probe.get("environment"), Mapping)
+            or doctor_probe["environment"].get("compile_probe_status")
+            != "PASSED"
+        ):
+            raise ControlledRuntimeError(
+                "scoring OOM recovery doctor failed; replay is forbidden"
+            )
+
     def _verify_scoring_baseline_final(
         self,
         *,
@@ -1425,6 +1747,7 @@ class ResearchController:
                 "UNKNOWN_OUTCOME",
                 "QUALIFIED",
                 "UNQUALIFIED",
+                SCORING_ABANDONED_UNKNOWN_STATUS,
             }:
                 raise ControllerDataIntegrityError(
                     "scoring baseline operation has an invalid status"
@@ -1433,6 +1756,8 @@ class ResearchController:
                 raise ControlledRuntimeError(
                     "a scoring baseline probe has an unresolved GPU outcome"
                 )
+            if status == SCORING_ABANDONED_UNKNOWN_STATUS:
+                self._verify_scoring_oom_abandonment(operation)
 
     def _assert_scoring_host_idle(self) -> None:
         self._assert_noise_resource_available()
@@ -1483,6 +1808,149 @@ class ResearchController:
                 "scoring baseline container inventory is unavailable"
             )
         return bool(completed.stdout.strip())
+
+    def finalize_scoring_unknown_oom(self) -> dict[str, Any]:
+        """Abandon the exact archived OOM after one fresh trusted doctor."""
+
+        self._prepare_runtime_dirs()
+        self._verify_repository()
+        self._verify_scoring_oom_recovery_commit()
+        root = self._scoring_baseline_root()
+        operation_dir = root / SCORING_OOM_OPERATION_ID
+        with gpu_lock(self.config.controller_dir / "gpu1.lock"):
+            self._assert_scoring_host_idle()
+            if operation_dir.is_symlink() or not operation_dir.is_dir():
+                raise ControllerDataIntegrityError(
+                    "scoring OOM operation directory is unavailable"
+                )
+            state = self._read_scoring_evidence(
+                operation_dir / "state.json", label="scoring OOM state"
+            )
+            if state.get("status") == SCORING_ABANDONED_UNKNOWN_STATUS:
+                final = self._verify_scoring_oom_abandonment(operation_dir)
+                return {**final, "idempotent": True}
+            base_names = {
+                "intent.json",
+                "state.json",
+                "probe-00.receipt.json",
+                "probe-00.stdout.json",
+                "probe-00.stderr.txt",
+            }
+            intent_names = base_names | {"unknown.json", "recovery-intent.json"}
+            doctor_names = intent_names | {"recovery-doctor.json"}
+            final_names = doctor_names | {"final.json"}
+            entries = list(operation_dir.iterdir())
+            names = {entry.name for entry in entries}
+            if names not in (
+                base_names,
+                intent_names,
+                doctor_names,
+                final_names,
+            ) or any(entry.is_symlink() or not entry.is_file() for entry in entries):
+                raise ControllerDataIntegrityError(
+                    "scoring OOM recovery has an incomplete prior attempt"
+                )
+            state_name = "state.json" if names == base_names else "unknown.json"
+            material, unknown, receipt = self._verify_scoring_oom_source(
+                operation_dir, state_name=state_name
+            )
+            if names != base_names:
+                current_state = self._read_scoring_evidence(
+                    operation_dir / "state.json", label="scoring OOM state"
+                )
+                if current_state != unknown:
+                    raise ControllerDataIntegrityError(
+                        "scoring OOM source state changed during recovery"
+                    )
+            source_container = (
+                f"kar-score-{SCORING_OOM_OPERATION_ID[-12:]}-00"
+            )
+            if self._scoring_container_present(source_container):
+                raise ControlledRuntimeError(
+                    "scoring OOM source container is still present"
+                )
+            recovery_commit = self.config.expected_git_commit
+            recovery_intent = self._scoring_oom_recovery_intent(
+                recovery_commit=recovery_commit,
+                unknown=unknown,
+                receipt=receipt,
+            )
+            if names == base_names:
+                _atomic_write_bytes(
+                    operation_dir / "unknown.json",
+                    (canonical_json_text(unknown) + "\n").encode("utf-8"),
+                )
+                _atomic_write_bytes(
+                    operation_dir / "recovery-intent.json",
+                    (canonical_json_text(recovery_intent) + "\n").encode("utf-8"),
+                )
+            else:
+                stored_intent = self._read_scoring_evidence(
+                    operation_dir / "recovery-intent.json",
+                    label="scoring OOM recovery intent",
+                )
+                if stored_intent != recovery_intent:
+                    raise ControllerDataIntegrityError(
+                        "scoring OOM recovery intent is inconsistent"
+                    )
+                recovery_intent = stored_intent
+            doctor_run_id = "score-baseline-oom-recovery"
+            if names in (base_names, intent_names):
+                if names == intent_names:
+                    raise ControlledRuntimeError(
+                        "scoring OOM recovery doctor completion is uncertain; "
+                        "replay is forbidden"
+                    )
+                doctor = self.doctor(
+                    require_secret=False,
+                    run_id=doctor_run_id,
+                )
+                _atomic_write_bytes(
+                    operation_dir / "recovery-doctor.json",
+                    (canonical_json_text(doctor) + "\n").encode("utf-8"),
+                )
+            else:
+                doctor = self._read_scoring_evidence(
+                    operation_dir / "recovery-doctor.json",
+                    label="scoring OOM recovery doctor",
+                )
+            self._validate_scoring_oom_doctor(
+                doctor, recovery_commit=recovery_commit
+            )
+            doctor_container = f"kar-doctor-{doctor_run_id}"
+            if self._scoring_container_present(doctor_container):
+                raise ControlledRuntimeError(
+                    "scoring OOM recovery doctor container is still present"
+                )
+            self._verify_repository()
+            self._assert_scoring_host_idle()
+            final = self._scoring_oom_final(
+                material=material,
+                unknown=unknown,
+                receipt=receipt,
+                recovery_intent=recovery_intent,
+                doctor=doctor,
+                recovery_commit=recovery_commit,
+            )
+            if names == final_names:
+                stored_final = self._read_scoring_evidence(
+                    operation_dir / "final.json", label="scoring OOM final evidence"
+                )
+                if stored_final != final:
+                    raise ControllerDataIntegrityError(
+                        "scoring OOM final evidence is inconsistent"
+                    )
+            else:
+                _atomic_write_bytes(
+                    operation_dir / "final.json",
+                    (canonical_json_text(final) + "\n").encode("utf-8"),
+                )
+            _atomic_write_bytes(
+                operation_dir / "state.json",
+                (canonical_json_text(final) + "\n").encode("utf-8"),
+            )
+            self._verify_scoring_oom_abandonment(operation_dir)
+            return {**final, "idempotent": False}
 
     def finalize_scoring_pre_gpu_failure(self) -> dict[str, Any]:
         """Terminalize the one proven argparse rejection without GPU replay."""

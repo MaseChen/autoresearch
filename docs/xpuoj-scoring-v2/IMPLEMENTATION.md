@@ -23,6 +23,10 @@
   cannot supply the score anchor.
 - All case anchors are measured before any eager performance comparison, and
   the exact phase order, raw-round validator, and thresholds are digest-bound.
+- The two phases regenerate and release one deterministic case at a time.  No
+  full-case tensor, reference output, or input snapshot may remain live while
+  another case is prepared; this memory policy is part of the measurement
+  contract digest.
 - Baseline qualification produces an immutable descriptor or fails closed.
 - The scoring worker runs from an exact Git-materialized scoring snapshot and
   echoes that commit into every probe, qualification, and baseline descriptor;
@@ -30,6 +34,12 @@
 - A fixed argparse rejection before worker dispatch may be terminalized only by
   the no-argument trusted finalizer after exact raw-evidence and zero-container
   checks. It never authorizes replay or changes a scientific database.
+- The archived `e099b2b` exit-137 incident has a separate no-argument recovery
+  command.  It accepts only the exact immutable operation and direct reviewed
+  recovery child, runs one fresh compile doctor, preserves the original UNKNOWN
+  object, records the confirmed memory-cgroup OOM classification, and forbids
+  replay.  A durable successful doctor may be resumed after interruption; an
+  uncertain or failed doctor may never be repeated by this command.
 
 ## Phase 3 success criteria
 

@@ -29,6 +29,11 @@ score or a measured hardware-efficiency score.
   absolute channel therefore self-pairs the compiled reference, completes all
   case anchors first, and keeps the eager comparison in a later proof-only
   phase.
+- Keeping all full-case host datasets, device tensors, snapshots, and outputs
+  alive across those two phases exceeded the evaluator's 24 GiB memory cgroup
+  in the first real run.  Phase ordering is retained, but each deterministic
+  case is now regenerated for the proof phase and released before the next
+  case.  This is a resource-correctness requirement, not a scoring change.
 - The current semantic reference may not compile as one full graph.  Any graph
   break, fallback, incorrect output, or unsupported W8A8 path must leave the
   scoring baseline unqualified rather than silently selecting another anchor.

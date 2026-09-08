@@ -114,6 +114,36 @@ class ScoringCliTests(unittest.TestCase):
                 ]
             )
 
+    def test_oom_abandonment_has_no_operation_or_evidence_parameters(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            [
+                "score",
+                "baseline-abandon-unknown-oom",
+                "--config",
+                "/trusted/config.json",
+            ]
+        )
+        self.assertEqual(args.score_command, "baseline-abandon-unknown-oom")
+        for untrusted in (
+            ("--operation-id", "untrusted"),
+            ("--evidence", "/untrusted/evidence.json"),
+        ):
+            with (
+                self.subTest(untrusted=untrusted),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                parser.parse_args(
+                    [
+                        "score",
+                        "baseline-abandon-unknown-oom",
+                        "--config",
+                        "/trusted/config.json",
+                        *untrusted,
+                    ]
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

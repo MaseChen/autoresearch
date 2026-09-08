@@ -105,6 +105,13 @@ def _score_baseline_finalize_pre_gpu(args: argparse.Namespace) -> int:
     return 0
 
 
+def _score_baseline_abandon_unknown_oom(args: argparse.Namespace) -> int:
+    controller = ResearchController(ControllerConfig.load(args.config))
+    payload = controller.finalize_scoring_unknown_oom()
+    _print_json(payload)
+    return 0
+
+
 def evaluate_and_record(
     candidate_path: str | Path,
     *,
@@ -488,6 +495,14 @@ def build_parser() -> argparse.ArgumentParser:
     score_baseline_finalize.add_argument("--config", required=True)
     score_baseline_finalize.set_defaults(
         handler=_score_baseline_finalize_pre_gpu
+    )
+    score_baseline_abandon_oom = score_commands.add_parser(
+        "baseline-abandon-unknown-oom",
+        help="abandon the exact archived scoring OOM after a trusted doctor",
+    )
+    score_baseline_abandon_oom.add_argument("--config", required=True)
+    score_baseline_abandon_oom.set_defaults(
+        handler=_score_baseline_abandon_unknown_oom
     )
 
     evaluate = subparsers.add_parser(

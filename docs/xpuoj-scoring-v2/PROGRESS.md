@@ -27,6 +27,10 @@
   compiled-versus-eager non-regression proof.
 - [x] Measure every case anchor before any eager performance workload and bind
   the raw-round validator, phase order, thresholds, and descriptor identity.
+- [x] Bound the two-phase worker to one regenerated case at a time and bind the
+  release policy into the measurement identity.
+- [x] Add an incident-specific, no-replay finalizer for the archived `e099b2b`
+  memory-cgroup OOM, including a fresh doctor and resumable durable evidence.
 
 First server qualification attempt (`65e5365`) stopped before Torch or GPU
 dispatch because the container correctly mounted the older scientific
@@ -35,8 +39,15 @@ was terminalized by the exact no-replay finalizer and archived without a GPU
 claim. A later ten-probe run showed that using the mixed compiled-versus-eager
 measurement as the absolute anchor allowed the much slower eager workload to
 confound the following case. The replacement protocol is intentionally a new,
-digest-bound operation identity. No qualification or activation claim follows
-from implementation or unit tests alone.
+digest-bound operation identity.  Its first server execution retained all four
+case datasets, device tensors, input snapshots, expected outputs, and compiled
+outputs across both phases.  The 24 GiB Docker memory cgroup killed probe 0
+with exit 137; the operation remains UNKNOWN and was independently archived as
+`CONFIRMED_SCORING_CONTAINER_MEMORY_CGROUP_OOM`.  The bounded replacement
+regenerates and releases each case, and the old operation must be abandoned by
+the exact trusted finalizer before a new qualification begins.  No
+qualification or activation claim follows from implementation or unit tests
+alone.
 
 ### Phase 3: Trusted integration
 
