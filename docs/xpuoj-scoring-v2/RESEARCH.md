@@ -24,6 +24,11 @@ score or a measured hardware-efficiency score.
   available XPU-OJ observations moved by only 0 to 0.25 displayed points.
 - Host wall-clock timing around individual synchronized launches can dominate
   short decode cases; device-event, batched, balanced measurements are needed.
+- A compiled-versus-eager pair has a useful qualification role but is a poor
+  source for an absolute anchor when eager is substantially slower.  The
+  absolute channel therefore self-pairs the compiled reference, completes all
+  case anchors first, and keeps the eager comparison in a later proof-only
+  phase.
 - The current semantic reference may not compile as one full graph.  Any graph
   break, fallback, incorrect output, or unsupported W8A8 path must leave the
   scoring baseline unqualified rather than silently selecting another anchor.

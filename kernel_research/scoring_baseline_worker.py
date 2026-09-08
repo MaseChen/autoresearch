@@ -18,11 +18,16 @@ from .device_timing import (
     device_event_protocol_snapshot,
 )
 from .platform.canonical import canonical_sha256
+from .scoring_measurement import (
+    MAX_COMPILED_TO_EAGER_RATIO,
+    MIN_SCORING_REFERENCE_MATCHED_RATIO,
+    scoring_baseline_measurement_contract_snapshot,
+    validate_device_event_measurement,
+)
 
 
 SCORING_BASELINE_PROBE_SCHEMA_VERSION = 1
-MIN_MATCHED_RATIO = 0.99
-MAX_COMPILED_TO_EAGER_RATIO = 1.01
+MIN_MATCHED_RATIO = MIN_SCORING_REFERENCE_MATCHED_RATIO
 
 
 def _selected_arguments(tensors: dict[str, Any]) -> tuple[Any, ...]:
@@ -81,6 +86,7 @@ def run_scoring_baseline_probe(
         compiled_reference = compile_scoring_reference(torch_module)
         compiler_factory_seconds = time.perf_counter() - compile_started
         case_results: list[dict[str, Any]] = []
+        case_contexts: list[dict[str, Any]] = []
         for spec in cases:
             dataset = generate_case(spec)
             tensors = _copy_dataset_to_device(
@@ -94,55 +100,99 @@ def run_scoring_baseline_probe(
             compiled_output = compiled_reference(*arguments)
             _synchronize(torch_module)
             first_invocation_seconds = time.perf_counter() - first_started
-            eager_output = eager_reference(*arguments)
-            _synchronize(torch_module)
             compiled_ratio = _matched_ratio(torch_module, compiled_output, expected)
-            eager_ratio = _matched_ratio(torch_module, eager_output, expected)
-            if compiled_ratio < MIN_MATCHED_RATIO or eager_ratio < MIN_MATCHED_RATIO:
+            if compiled_ratio < MIN_MATCHED_RATIO:
                 raise RuntimeError(
                     f"compiled scoring reference failed correctness for {spec.name}"
                 )
             if str(compiled_output.device) != str(tensors["a"].device):
                 raise RuntimeError("compiled scoring reference returned another device")
 
-            measurement = benchmark_device_event_interleaved(
+            anchor_measurement = benchmark_device_event_interleaved(
+                torch_module,
+                compiled_reference,
+                arguments,
+                compiled_reference,
+                arguments,
+            )
+            anchor_measurement_value = anchor_measurement.to_dict()
+            _, _, anchor_median_ms = validate_device_event_measurement(
+                anchor_measurement_value,
+                field="anchor_measurement",
+            )
+            unchanged, modified = _readonly_inputs_unchanged(
+                torch_module, tensors, snapshots
+            )
+            if not unchanged:
+                raise RuntimeError(f"scoring reference modified input {modified}")
+            result = {
+                "case_id": str(spec.name),
+                "matched_ratio": compiled_ratio,
+                "compiler_first_invocation_seconds": first_invocation_seconds,
+                "anchor_median_ms": anchor_median_ms,
+                "anchor_measurement": anchor_measurement_value,
+            }
+            case_results.append(result)
+            case_contexts.append(
+                {
+                    "spec": spec,
+                    "dataset": dataset,
+                    "tensors": tensors,
+                    "snapshots": snapshots,
+                    "expected": expected,
+                    "arguments": arguments,
+                    "compiled_output": compiled_output,
+                    "result": result,
+                }
+            )
+
+        # Keep the absolute-anchor phase free from the substantially slower
+        # eager workload.  The eager channel proves only that full-graph
+        # compilation is a valid non-regressing baseline implementation.
+        for context in case_contexts:
+            spec = context["spec"]
+            arguments = context["arguments"]
+            eager_output = eager_reference(*arguments)
+            _synchronize(torch_module)
+            eager_ratio = _matched_ratio(
+                torch_module, eager_output, context["expected"]
+            )
+            if eager_ratio < MIN_MATCHED_RATIO:
+                raise RuntimeError(
+                    f"eager scoring reference failed correctness for {spec.name}"
+                )
+            performance_measurement = benchmark_device_event_interleaved(
                 torch_module,
                 compiled_reference,
                 arguments,
                 eager_reference,
                 arguments,
             )
-            compiled_to_eager = (
-                measurement.candidate_median_ms / measurement.incumbent_median_ms
+            performance_measurement_value = performance_measurement.to_dict()
+            performance_candidate_ms, performance_incumbent_ms, _ = (
+                validate_device_event_measurement(
+                    performance_measurement_value,
+                    field="performance_measurement",
+                )
             )
+            compiled_to_eager = performance_candidate_ms / performance_incumbent_ms
             if compiled_to_eager > MAX_COMPILED_TO_EAGER_RATIO:
                 raise RuntimeError(
                     f"compiled scoring reference is slower than eager for {spec.name}"
                 )
             unchanged, modified = _readonly_inputs_unchanged(
-                torch_module, tensors, snapshots
+                torch_module, context["tensors"], context["snapshots"]
             )
             if not unchanged:
                 raise RuntimeError(f"scoring reference modified input {modified}")
-            case_results.append(
+            context["result"].update(
                 {
-                    "case_id": str(spec.name),
-                    "matched_ratio": compiled_ratio,
                     "eager_matched_ratio": eager_ratio,
-                    "compiler_first_invocation_seconds": first_invocation_seconds,
                     "compiled_to_eager_ratio": compiled_to_eager,
-                    "measurement": measurement.to_dict(),
+                    "performance_measurement": performance_measurement_value,
                 }
             )
-            del (
-                arguments,
-                compiled_output,
-                eager_output,
-                expected,
-                snapshots,
-                tensors,
-                dataset,
-            )
+            del eager_output
         environment = dict(health.environment)
         payload: dict[str, Any] = {
             "schema_version": SCORING_BASELINE_PROBE_SCHEMA_VERSION,
@@ -152,6 +202,9 @@ def run_scoring_baseline_probe(
             "scoring_framework_git_commit": scoring_framework_git_commit,
             "reference_source_sha256": scoring_reference_source_sha256(),
             "compiler_config": dict(SCORING_COMPILER_CONFIG),
+            "measurement_contract": (
+                scoring_baseline_measurement_contract_snapshot()
+            ),
             "compiler_factory_seconds": compiler_factory_seconds,
             "compiler_proof": {
                 "fullgraph_fail_closed": True,
@@ -174,6 +227,9 @@ def run_scoring_baseline_probe(
             "scoring_framework_git_commit": scoring_framework_git_commit,
             "reference_source_sha256": scoring_reference_source_sha256(),
             "compiler_config": dict(SCORING_COMPILER_CONFIG),
+            "measurement_contract": (
+                scoring_baseline_measurement_contract_snapshot()
+            ),
             "timing_protocol": device_event_protocol_snapshot(),
             "error": f"{type(exc).__name__}: {exc}",
             "traceback": traceback.format_exc(limit=20),

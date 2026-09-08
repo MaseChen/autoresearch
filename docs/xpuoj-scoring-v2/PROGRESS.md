@@ -1,6 +1,6 @@
 # XPU-OJ-Aligned Scoring V2 Progress
 
-## Status: Phase 2 - In Progress
+## Status: Phase 2 - Measurement protocol implemented; qualification required
 
 ## Phase progress
 
@@ -23,12 +23,20 @@
 - [x] Separate the scoring framework snapshot from the frozen scientific
   framework and bind its exact Git commit through worker and descriptor.
 - [x] Add a narrow trusted finalizer for the observed pre-GPU argparse failure.
+- [x] Separate the absolute compiled self-pair anchor from the
+  compiled-versus-eager non-regression proof.
+- [x] Measure every case anchor before any eager performance workload and bind
+  the raw-round validator, phase order, thresholds, and descriptor identity.
 
 First server qualification attempt (`65e5365`) stopped before Torch or GPU
 dispatch because the container correctly mounted the older scientific
-framework, which did not contain the new private probe command. The durable
-operation remains `UNKNOWN_OUTCOME` until the exact no-replay finalizer is run
-from a reviewed recovery checkout; it must not be rewritten by hand.
+framework, which did not contain the new private probe command. That operation
+was terminalized by the exact no-replay finalizer and archived without a GPU
+claim. A later ten-probe run showed that using the mixed compiled-versus-eager
+measurement as the absolute anchor allowed the much slower eager workload to
+confound the following case. The replacement protocol is intentionally a new,
+digest-bound operation identity. No qualification or activation claim follows
+from implementation or unit tests alone.
 
 ### Phase 3: Trusted integration
 

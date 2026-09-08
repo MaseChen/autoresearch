@@ -66,6 +66,7 @@ class ScoringIdentityTests(unittest.TestCase):
         first = ScoringBaselineDescriptor(
             environment_digest=DIGEST_A,
             evaluator_profile_digest=DIGEST_B,
+            measurement_contract_digest=DIGEST_C,
             scoring_framework_git_commit=COMMIT_A,
             reference_source_sha256=DIGEST_C,
             compiler_backend="inductor",
@@ -75,6 +76,7 @@ class ScoringIdentityTests(unittest.TestCase):
         second = ScoringBaselineDescriptor(
             environment_digest=DIGEST_A,
             evaluator_profile_digest=DIGEST_B,
+            measurement_contract_digest=DIGEST_C,
             scoring_framework_git_commit=COMMIT_A,
             reference_source_sha256=DIGEST_C,
             compiler_backend="inductor",
@@ -95,6 +97,7 @@ class ScoringIdentityTests(unittest.TestCase):
             ScoringBaselineDescriptor(
                 environment_digest="bad",
                 evaluator_profile_digest=DIGEST_B,
+                measurement_contract_digest=DIGEST_C,
                 scoring_framework_git_commit=COMMIT_A,
                 reference_source_sha256=DIGEST_C,
                 compiler_backend="inductor",
@@ -105,6 +108,7 @@ class ScoringIdentityTests(unittest.TestCase):
             ScoringBaselineDescriptor(
                 environment_digest=DIGEST_A,
                 evaluator_profile_digest=DIGEST_B,
+                measurement_contract_digest=DIGEST_C,
                 scoring_framework_git_commit=COMMIT_A,
                 reference_source_sha256=DIGEST_C,
                 compiler_backend="eager",
@@ -115,6 +119,7 @@ class ScoringIdentityTests(unittest.TestCase):
             ScoringBaselineDescriptor(
                 environment_digest=DIGEST_A,
                 evaluator_profile_digest=DIGEST_B,
+                measurement_contract_digest=DIGEST_C,
                 scoring_framework_git_commit="not-a-commit",
                 reference_source_sha256=DIGEST_C,
                 compiler_backend="inductor",

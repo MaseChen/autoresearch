@@ -18,6 +18,11 @@
 
 - Full-graph compiled reference is correctness-qualified without fallback.
 - Device-event protocol records balanced raw rounds and excludes compile time.
+- Absolute anchors use a compiled-reference self-pair in an anchor-only phase;
+  the compiled-versus-eager comparison is a separate qualification proof and
+  cannot supply the score anchor.
+- All case anchors are measured before any eager performance comparison, and
+  the exact phase order, raw-round validator, and thresholds are digest-bound.
 - Baseline qualification produces an immutable descriptor or fails closed.
 - The scoring worker runs from an exact Git-materialized scoring snapshot and
   echoes that commit into every probe, qualification, and baseline descriptor;

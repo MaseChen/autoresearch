@@ -8,16 +8,34 @@ from kernel_research.compiled_reference import (
     scoring_reference_source_sha256,
 )
 from kernel_research.device_timing import device_event_protocol_snapshot
+from kernel_research.device_timing import DeviceEventMeasurement, DeviceEventRound
 from kernel_research.scoring_qualification import (
     ScoringBaselineQualification,
     aggregate_scoring_baseline_probes,
     validate_anchor_drift,
+)
+from kernel_research.scoring_measurement import (
+    scoring_baseline_measurement_contract_snapshot,
 )
 
 
 DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
 SCORING_COMMIT = "c" * 40
+
+
+def measurement(candidate: float, incumbent: float) -> dict:
+    return DeviceEventMeasurement(
+        rounds=tuple(
+            DeviceEventRound(
+                round_index=index,
+                order="AB" if index % 2 == 0 else "BA",
+                candidate_latency_ms=candidate,
+                incumbent_latency_ms=incumbent,
+            )
+            for index in range(6)
+        )
+    ).to_dict()
 
 
 def probe(offset: float = 0.0) -> dict:
@@ -30,9 +48,11 @@ def probe(offset: float = 0.0) -> dict:
                 "eager_matched_ratio": 1.0,
                 "compiler_first_invocation_seconds": 1.0,
                 "compiled_to_eager_ratio": 0.9,
-                "measurement": {
-                    "candidate_median_ms": base + offset,
-                },
+                "anchor_median_ms": base + offset,
+                "anchor_measurement": measurement(
+                    base + offset, base + offset
+                ),
+                "performance_measurement": measurement(0.9, 1.0),
             }
         )
     return {
@@ -43,6 +63,7 @@ def probe(offset: float = 0.0) -> dict:
         "scoring_framework_git_commit": SCORING_COMMIT,
         "reference_source_sha256": scoring_reference_source_sha256(),
         "compiler_config": dict(SCORING_COMPILER_CONFIG),
+        "measurement_contract": scoring_baseline_measurement_contract_snapshot(),
         "timing_protocol": device_event_protocol_snapshot(),
         "environment_snapshot_digest": DIGEST_A,
         "cases": cases,
@@ -71,7 +92,10 @@ class ScoringQualificationTests(unittest.TestCase):
         )
         validate_anchor_drift(
             qualification,
-            {case: envelope["p50"] for case, envelope in qualification.case_envelopes_ms.items()},
+            {
+                case: envelope["p50"]
+                for case, envelope in qualification.case_envelopes_ms.items()
+            },
         )
 
     def test_serialized_qualification_rejects_tampered_derived_fields(self) -> None:
@@ -111,6 +135,45 @@ class ScoringQualificationTests(unittest.TestCase):
         tampered = copy.deepcopy(probes)
         tampered[-1]["environment_snapshot_digest"] = DIGEST_B
         with self.assertRaisesRegex(ValueError, "identity drift"):
+            aggregate_scoring_baseline_probes(
+                tampered,
+                environment_digest=DIGEST_A,
+                evaluator_profile_digest=DIGEST_B,
+                scoring_framework_git_commit=SCORING_COMMIT,
+            )
+        tampered = copy.deepcopy(probes)
+        tampered[-1]["measurement_contract"]["anchor_pairing"] = "eager"
+        with self.assertRaisesRegex(ValueError, "measurement contract"):
+            aggregate_scoring_baseline_probes(
+                tampered,
+                environment_digest=DIGEST_A,
+                evaluator_profile_digest=DIGEST_B,
+                scoring_framework_git_commit=SCORING_COMMIT,
+            )
+        tampered = copy.deepcopy(probes)
+        tampered[-1]["cases"][0]["anchor_median_ms"] = 2.0
+        with self.assertRaisesRegex(ValueError, "anchor median"):
+            aggregate_scoring_baseline_probes(
+                tampered,
+                environment_digest=DIGEST_A,
+                evaluator_profile_digest=DIGEST_B,
+                scoring_framework_git_commit=SCORING_COMMIT,
+            )
+        tampered = copy.deepcopy(probes)
+        tampered[-1]["cases"][0]["performance_measurement"] = measurement(
+            1.02, 1.0
+        )
+        tampered[-1]["cases"][0]["compiled_to_eager_ratio"] = 1.02
+        with self.assertRaisesRegex(ValueError, "compiled-to-eager"):
+            aggregate_scoring_baseline_probes(
+                tampered,
+                environment_digest=DIGEST_A,
+                evaluator_profile_digest=DIGEST_B,
+                scoring_framework_git_commit=SCORING_COMMIT,
+            )
+        tampered = copy.deepcopy(probes)
+        tampered[-1]["cases"][0]["matched_ratio"] = 0.98
+        with self.assertRaisesRegex(ValueError, "correctness proof"):
             aggregate_scoring_baseline_probes(
                 tampered,
                 environment_digest=DIGEST_A,

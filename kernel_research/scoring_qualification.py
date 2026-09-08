@@ -15,6 +15,12 @@ from .platform.canonical import (
     canonical_sha256,
     require_sha256_digest,
 )
+from .scoring_measurement import (
+    MAX_COMPILED_TO_EAGER_RATIO,
+    MIN_SCORING_REFERENCE_MATCHED_RATIO,
+    scoring_baseline_measurement_contract_snapshot,
+    validate_device_event_measurement,
+)
 
 
 SCORING_BASELINE_QUALIFICATION_RUNS = 10
@@ -171,6 +177,9 @@ def aggregate_scoring_baseline_probes(
     if len(probes) != SCORING_BASELINE_QUALIFICATION_RUNS:
         raise ValueError("exactly ten scoring baseline probes are required")
     expected_timing = device_event_protocol_snapshot()
+    expected_measurement_contract = (
+        scoring_baseline_measurement_contract_snapshot()
+    )
     identity: tuple[object, ...] | None = None
     case_samples: dict[str, list[float]] = {}
     probe_digests: list[str] = []
@@ -179,10 +188,17 @@ def aggregate_scoring_baseline_probes(
     for index, probe in enumerate(probes):
         if probe.get("status") != "QUALIFIED":
             raise ValueError(f"scoring baseline probe {index} is not qualified")
-        if probe.get("schema_version") != 1 or probe.get("command") != "score-baseline-probe":
+        if (
+            probe.get("schema_version") != 1
+            or probe.get("command") != "score-baseline-probe"
+        ):
             raise ValueError(f"scoring baseline probe {index} has invalid identity")
         if probe.get("timing_protocol") != expected_timing:
             raise ValueError(f"scoring baseline probe {index} changed timing protocol")
+        if probe.get("measurement_contract") != expected_measurement_contract:
+            raise ValueError(
+                f"scoring baseline probe {index} changed measurement contract"
+            )
         cases = probe.get("cases")
         if not isinstance(cases, Sequence) or isinstance(cases, (str, bytes)):
             raise ValueError(f"scoring baseline probe {index} has invalid cases")
@@ -191,6 +207,7 @@ def aggregate_scoring_baseline_probes(
             probe.get("scoring_framework_git_commit"),
             probe.get("reference_source_sha256"),
             canonical_sha256(probe.get("compiler_config")),
+            canonical_sha256(probe.get("measurement_contract")),
             probe.get("environment_snapshot_digest"),
             tuple(case.get("case_id") for case in cases if isinstance(case, Mapping)),
         )
@@ -211,13 +228,52 @@ def aggregate_scoring_baseline_probes(
             raise ValueError("scoring baseline probe identity drift")
         probe_digests.append(canonical_sha256(probe))
         for case in cases:
-            if not isinstance(case, Mapping):
-                raise ValueError("probe case must be an object")
+            if not isinstance(case, Mapping) or set(case) != {
+                "case_id",
+                "matched_ratio",
+                "eager_matched_ratio",
+                "compiler_first_invocation_seconds",
+                "compiled_to_eager_ratio",
+                "anchor_median_ms",
+                "anchor_measurement",
+                "performance_measurement",
+            }:
+                raise ValueError("probe case fields are not exact")
             case_id = case.get("case_id")
-            measurement = case.get("measurement")
-            if not isinstance(case_id, str) or not isinstance(measurement, Mapping):
+            if not isinstance(case_id, str) or not case_id:
                 raise ValueError("probe case identity is invalid")
-            latency = measurement.get("candidate_median_ms")
+            for ratio_name in ("matched_ratio", "eager_matched_ratio"):
+                ratio = case.get(ratio_name)
+                if (
+                    isinstance(ratio, bool)
+                    or not isinstance(ratio, (int, float))
+                    or not math.isfinite(float(ratio))
+                    or not MIN_SCORING_REFERENCE_MATCHED_RATIO
+                    <= float(ratio)
+                    <= 1.0
+                ):
+                    raise ValueError("probe correctness proof is invalid")
+            first_invocation_seconds = case.get(
+                "compiler_first_invocation_seconds"
+            )
+            if (
+                isinstance(first_invocation_seconds, bool)
+                or not isinstance(first_invocation_seconds, (int, float))
+                or not math.isfinite(float(first_invocation_seconds))
+                or float(first_invocation_seconds) <= 0.0
+            ):
+                raise ValueError("probe compilation proof is invalid")
+            _, _, derived_anchor = validate_device_event_measurement(
+                case.get("anchor_measurement"),
+                field=f"probe[{index}].{case_id}.anchor_measurement",
+            )
+            performance_candidate, performance_incumbent, _ = (
+                validate_device_event_measurement(
+                    case.get("performance_measurement"),
+                    field=f"probe[{index}].{case_id}.performance_measurement",
+                )
+            )
+            latency = case.get("anchor_median_ms")
             if (
                 isinstance(latency, bool)
                 or not isinstance(latency, (int, float))
@@ -225,8 +281,33 @@ def aggregate_scoring_baseline_probes(
                 or float(latency) <= 0.0
             ):
                 raise ValueError("probe candidate latency is invalid")
+            if not math.isclose(
+                float(latency),
+                derived_anchor,
+                rel_tol=1.0e-12,
+                abs_tol=1.0e-12,
+            ):
+                raise ValueError("probe anchor median is inconsistent")
+            compiled_to_eager = case.get("compiled_to_eager_ratio")
+            if (
+                isinstance(compiled_to_eager, bool)
+                or not isinstance(compiled_to_eager, (int, float))
+                or not math.isclose(
+                    float(compiled_to_eager),
+                    performance_candidate / performance_incumbent,
+                    rel_tol=1.0e-12,
+                    abs_tol=1.0e-12,
+                )
+                or not 0.0
+                < float(compiled_to_eager)
+                <= MAX_COMPILED_TO_EAGER_RATIO
+            ):
+                raise ValueError("probe compiled-to-eager ratio is inconsistent")
             case_samples.setdefault(case_id, []).append(float(latency))
-    if any(len(values) != SCORING_BASELINE_QUALIFICATION_RUNS for values in case_samples.values()):
+    if any(
+        len(values) != SCORING_BASELINE_QUALIFICATION_RUNS
+        for values in case_samples.values()
+    ):
         raise ValueError("probe case set is incomplete")
 
     baselines: dict[str, float] = {}
@@ -251,6 +332,9 @@ def aggregate_scoring_baseline_probes(
     descriptor = ScoringBaselineDescriptor(
         environment_digest=environment_digest,
         evaluator_profile_digest=evaluator_profile_digest,
+        measurement_contract_digest=str(
+            expected_measurement_contract["digest"]
+        ),
         scoring_framework_git_commit=scoring_framework_git_commit,
         reference_source_sha256=reference_digest,
         compiler_backend="inductor",

@@ -14,7 +14,14 @@ from kernel_research.compiled_reference import (
     SCORING_COMPILER_CONFIG,
     scoring_reference_source_sha256,
 )
-from kernel_research.device_timing import device_event_protocol_snapshot
+from kernel_research.device_timing import (
+    DeviceEventMeasurement,
+    DeviceEventRound,
+    device_event_protocol_snapshot,
+)
+from kernel_research.scoring_measurement import (
+    scoring_baseline_measurement_contract_snapshot,
+)
 from kernel_research.platform.canonical import canonical_sha256
 
 
@@ -28,6 +35,8 @@ def rewrite_unknown_as_legacy_operation(operation: Path) -> Path:
     state = json.loads(state_path.read_text(encoding="utf-8"))
     intent.pop("scoring_framework_git_commit")
     state.pop("scoring_framework_git_commit")
+    intent.pop("measurement_contract")
+    state.pop("measurement_contract")
     material = {
         key: value
         for key, value in intent.items()
@@ -82,6 +91,20 @@ def make_config(root: Path) -> ControllerConfig:
     )
 
 
+def measurement(candidate: float, incumbent: float) -> dict:
+    return DeviceEventMeasurement(
+        rounds=tuple(
+            DeviceEventRound(
+                round_index=index,
+                order="AB" if index % 2 == 0 else "BA",
+                candidate_latency_ms=candidate,
+                incumbent_latency_ms=incumbent,
+            )
+            for index in range(6)
+        )
+    ).to_dict()
+
+
 def probe(index: int) -> dict:
     offset = index * 0.0001
     cases = []
@@ -89,9 +112,15 @@ def probe(index: int) -> dict:
         cases.append(
             {
                 "case_id": case_id,
-                "measurement": {
-                    "candidate_median_ms": base + offset,
-                },
+                "matched_ratio": 1.0,
+                "eager_matched_ratio": 1.0,
+                "compiler_first_invocation_seconds": 1.0,
+                "compiled_to_eager_ratio": 0.5,
+                "anchor_median_ms": base + offset,
+                "anchor_measurement": measurement(
+                    base + offset, base + offset
+                ),
+                "performance_measurement": measurement(1.0, 2.0),
             }
         )
     environment = {"device": "cuda:0", "version": "test"}
@@ -105,6 +134,7 @@ def probe(index: int) -> dict:
         "scoring_framework_git_commit": "d" * 40,
         "reference_source_sha256": scoring_reference_source_sha256(),
         "compiler_config": dict(SCORING_COMPILER_CONFIG),
+        "measurement_contract": scoring_baseline_measurement_contract_snapshot(),
         "timing_protocol": device_event_protocol_snapshot(),
         "environment": environment,
         "environment_snapshot_digest": canonical_sha256(environment),
@@ -266,7 +296,9 @@ class ScoringControllerTests(unittest.TestCase):
                 if target == "receipt":
                     receipt = operation / "probe-00.receipt.json"
                     payload = json.loads(receipt.read_text(encoding="utf-8"))
-                    payload["cases"][0]["measurement"]["candidate_median_ms"] = 2.0
+                    payload["cases"][0]["anchor_measurement"][
+                        "candidate_median_ms"
+                    ] = 2.0
                     receipt.write_text(json.dumps(payload), encoding="utf-8")
                     expected = "receipt digest mismatch"
                 else:

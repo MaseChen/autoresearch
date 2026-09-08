@@ -40,6 +40,9 @@ from ..scoring_qualification import (
     ScoringBaselineQualification,
     aggregate_scoring_baseline_probes,
 )
+from ..scoring_measurement import (
+    scoring_baseline_measurement_contract_snapshot,
+)
 from ..platform.artifacts import ArtifactId
 from ..platform.canonical import (
     canonical_json_text,
@@ -497,6 +500,9 @@ class DockerEvaluator:
                 "dynamic": False,
                 "mode": "default",
             },
+            "measurement_contract": (
+                scoring_baseline_measurement_contract_snapshot()
+            ),
             "timing_protocol": device_event_protocol_snapshot(),
         }
         if any(payload.get(key) != value for key, value in expected.items()):
@@ -1565,8 +1571,20 @@ class ResearchController:
                 "timing_protocol",
                 "probe_count",
             }
-            optional_material_keys = {"scoring_framework_git_commit"}
+            optional_material_keys = {
+                "scoring_framework_git_commit",
+                "measurement_contract",
+            }
             present_optional = optional_material_keys & set(intent)
+            allowed_optional_sets = {
+                frozenset(),
+                frozenset({"scoring_framework_git_commit"}),
+                frozenset(optional_material_keys),
+            }
+            if frozenset(present_optional) not in allowed_optional_sets:
+                raise ControllerDataIntegrityError(
+                    "pre-GPU scoring intent has an invalid generation"
+                )
             material_keys |= present_optional
             intent_tail = {
                 "operation_id",
@@ -1616,6 +1634,11 @@ class ResearchController:
                     "scoring_framework_git_commit" in material
                     and material["scoring_framework_git_commit"]
                     != self.config.expected_git_commit
+                )
+                or (
+                    "measurement_contract" in material
+                    and material["measurement_contract"]
+                    != scoring_baseline_measurement_contract_snapshot()
                 )
                 or material["evaluator_image"] != self.config.evaluator_image
                 or material["reference_source_sha256"]
@@ -1762,6 +1785,9 @@ class ResearchController:
             "evaluator_image": self.config.evaluator_image,
             "reference_source_sha256": scoring_reference_source_sha256(),
             "timing_protocol": device_event_protocol_snapshot(),
+            "measurement_contract": (
+                scoring_baseline_measurement_contract_snapshot()
+            ),
             "probe_count": SCORING_BASELINE_QUALIFICATION_RUNS,
         }
         operation_digest = canonical_sha256(operation_material)

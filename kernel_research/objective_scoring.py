@@ -282,6 +282,7 @@ class ScoringBaselineDescriptor:
 
     environment_digest: str
     evaluator_profile_digest: str
+    measurement_contract_digest: str
     scoring_framework_git_commit: str
     reference_source_sha256: str
     compiler_backend: str
@@ -298,6 +299,10 @@ class ScoringBaselineDescriptor:
         require_sha256_digest(self.environment_digest, field="environment_digest")
         require_sha256_digest(
             self.evaluator_profile_digest, field="evaluator_profile_digest"
+        )
+        require_sha256_digest(
+            self.measurement_contract_digest,
+            field="measurement_contract_digest",
         )
         if (
             not isinstance(self.scoring_framework_git_commit, str)
@@ -339,6 +344,7 @@ class ScoringBaselineDescriptor:
             "protocol_id": self.protocol_id,
             "environment_digest": self.environment_digest,
             "evaluator_profile_digest": self.evaluator_profile_digest,
+            "measurement_contract_digest": self.measurement_contract_digest,
             "scoring_framework_git_commit": self.scoring_framework_git_commit,
             "reference_source_sha256": self.reference_source_sha256,
             "compiler_backend": self.compiler_backend,
@@ -361,6 +367,7 @@ class ScoringBaselineDescriptor:
             "protocol_id",
             "environment_digest",
             "evaluator_profile_digest",
+            "measurement_contract_digest",
             "scoring_framework_git_commit",
             "reference_source_sha256",
             "compiler_backend",
@@ -380,6 +387,9 @@ class ScoringBaselineDescriptor:
             environment_digest=value["environment_digest"],  # type: ignore[arg-type]
             evaluator_profile_digest=value[
                 "evaluator_profile_digest"
+            ],  # type: ignore[arg-type]
+            measurement_contract_digest=value[
+                "measurement_contract_digest"
             ],  # type: ignore[arg-type]
             scoring_framework_git_commit=value[
                 "scoring_framework_git_commit"
