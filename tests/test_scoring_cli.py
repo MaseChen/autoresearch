@@ -80,6 +80,10 @@ class ScoringCliTests(unittest.TestCase):
             "KERNEL_RESEARCH_SCORING_FRAMEWORK_COMMIT=" + "c" * 40,
             argv,
         )
+        self.assertIn(
+            "TORCHINDUCTOR_CACHE_DIR=/evaluator-cache/torchinductor",
+            argv,
+        )
         self.assertTrue(
             any("/framework/" + "c" * 40 in str(value) for value in argv)
         )

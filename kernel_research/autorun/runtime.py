@@ -491,6 +491,8 @@ def scoring_baseline_probe_argv(
             "KERNEL_RESEARCH_SCORING_FRAMEWORK_COMMIT="
             f"{config.expected_git_commit}"
         ),
+        "--env",
+        "TORCHINDUCTOR_CACHE_DIR=/evaluator-cache/torchinductor",
     ]
     argv.extend(
         [

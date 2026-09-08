@@ -38,9 +38,16 @@ def make_scoring_reference(torch: Any) -> Callable[..., Any]:
         for tile in range(tile_count):
             row_start = tile * EXPERT_TILE_ROWS
             row_end = row_start + EXPERT_TILE_ROWS
-            expert = expert_ids[tile]
+            # Keep the expert selection inside the tensor graph.  Indexing a
+            # Python container with a zero-dimensional device tensor asks
+            # Dynamo for ``aten._local_scalar_dense`` and therefore violates
+            # the fail-closed fullgraph contract.
+            expert_index = expert_ids[tile : tile + 1].to(dtype=torch.int64)
             a_tile = a[row_start:row_end].contiguous()
-            b_tile = b_col_major[expert].transpose(0, 1).contiguous()
+            b_tile = torch.index_select(
+                b_col_major, 0, expert_index
+            )[0].transpose(0, 1).contiguous()
+            scale_b_tile = torch.index_select(scale_b, 0, expert_index)[0]
             if hasattr(torch, "_int_mm"):
                 accumulator = torch._int_mm(a_tile, b_tile)
             else:
@@ -50,7 +57,7 @@ def make_scoring_reference(torch: Any) -> Callable[..., Any]:
             scaled = (
                 accumulator.to(torch.float32)
                 * scale_a[row_start:row_end, None]
-                * scale_b[expert, None, :]
+                * scale_b_tile[None, :]
                 * moe_weights[row_start:row_end, None]
             )
             blocks.append(scaled.to(torch.bfloat16))
