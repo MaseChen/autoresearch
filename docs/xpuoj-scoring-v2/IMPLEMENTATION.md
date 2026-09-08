@@ -40,6 +40,11 @@
   object, records the confirmed memory-cgroup OOM classification, and forbids
   replay.  A durable successful doctor may be resumed after interruption; an
   uncertain or failed doctor may never be repeated by this command.
+- If recovery itself is rejected before Docker, its exact output and return
+  code are preserved as a distinct known pre-Docker failure.  A follow-up
+  recovery commit may issue one new durable retry intent and use only the
+  Controller's existing standalone `preflight` doctor authorization; it may
+  not overwrite the first intent or reinterpret the original UNKNOWN result.
 
 ## Phase 3 success criteria
 

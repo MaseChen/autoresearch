@@ -10,10 +10,12 @@ from unittest import mock
 from kernel_research.autorun.controller import (
     SCORING_ABANDONED_UNKNOWN_STATUS,
     SCORING_OOM_ERROR,
+    SCORING_OOM_FIRST_RECOVERY_COMMIT,
     SCORING_OOM_MEASUREMENT_DIGEST,
     SCORING_OOM_OPERATION_DIGEST,
     SCORING_OOM_OPERATION_ID,
     SCORING_OOM_SOURCE_COMMIT,
+    SCORING_OOM_PRE_DOCTOR_ERROR,
     ResearchController,
 )
 from kernel_research.autorun.models import ControllerConfig
@@ -351,7 +353,7 @@ class ScoringControllerTests(unittest.TestCase):
             self.assertTrue(repeated["idempotent"])
             doctor.assert_called_once_with(
                 require_secret=False,
-                run_id="score-baseline-oom-recovery",
+                run_id="preflight",
             )
             self.assertEqual(runner.calls, 0)
             unknown = json.loads(
@@ -513,6 +515,173 @@ class ScoringControllerTests(unittest.TestCase):
             doctor.assert_not_called()
             self.assertEqual(material["operation"], "score-baseline-qualify")
 
+    def test_first_recovery_pre_docker_failure_is_preserved_then_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recovery_commit = "f" * 40
+            controller = self.controller(
+                root,
+                ProbeRunner(),
+                expected_git_commit=recovery_commit,
+                framework_git_commit=PRODUCTION_FRAMEWORK_COMMIT,
+                evaluator_image=PRODUCTION_EVALUATOR,
+            )
+            operation = write_oom_incident(controller)
+            _, unknown, receipt = controller._verify_scoring_oom_source(
+                operation, state_name="state.json"
+            )
+            initial_intent = controller._scoring_oom_recovery_intent(
+                recovery_commit=SCORING_OOM_FIRST_RECOVERY_COMMIT,
+                unknown=unknown,
+                receipt=receipt,
+            )
+            (operation / "unknown.json").write_text(
+                json.dumps(unknown, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            (operation / "recovery-intent.json").write_text(
+                json.dumps(initial_intent, sort_keys=True, separators=(",", ":"))
+                + "\n",
+                encoding="utf-8",
+            )
+            pre_doctor = controller._scoring_oom_pre_doctor_failure()
+            with (
+                mock.patch.object(
+                    controller, "_verify_scoring_oom_recovery_commit"
+                ),
+                mock.patch.object(controller, "_assert_scoring_host_idle"),
+                mock.patch.object(
+                    controller, "_scoring_container_present", return_value=False
+                ),
+                mock.patch.object(
+                    controller,
+                    "_verify_scoring_oom_pre_doctor_failure",
+                    return_value=pre_doctor,
+                ) as verify_failure,
+                mock.patch.object(
+                    controller,
+                    "doctor",
+                    return_value=self.recovery_doctor(recovery_commit),
+                ) as doctor,
+            ):
+                final = controller.finalize_scoring_unknown_oom()
+                repeated = controller.finalize_scoring_unknown_oom()
+            self.assertEqual(final["status"], SCORING_ABANDONED_UNKNOWN_STATUS)
+            self.assertFalse(final["idempotent"])
+            self.assertTrue(repeated["idempotent"])
+            self.assertEqual(
+                final["initial_recovery_intent_digest"],
+                canonical_sha256(initial_intent),
+            )
+            self.assertEqual(
+                final["pre_doctor_failure_digest"],
+                canonical_sha256(pre_doctor),
+            )
+            stored_initial = json.loads(
+                (operation / "recovery-intent.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(stored_initial, initial_intent)
+            self.assertTrue((operation / "recovery-retry-intent.json").is_file())
+            verify_failure.assert_called_once_with()
+            doctor.assert_called_once_with(
+                require_secret=False,
+                run_id="preflight",
+            )
+
+    def test_pre_docker_failure_evidence_requires_exact_bytes(self) -> None:
+        expected_output = (
+            f"error: {SCORING_OOM_PRE_DOCTOR_ERROR}\n".encode("utf-8")
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = Path(temporary).resolve()
+            (evidence / "oom-abandonment.json").write_bytes(expected_output)
+            (evidence / "oom-abandonment.rc").write_bytes(
+                b"FINALIZER_RC=2\n"
+            )
+            runtime = evidence / "runtime"
+            runtime.mkdir()
+            with mock.patch(
+                "kernel_research.autorun.controller."
+                "SCORING_OOM_PRE_DOCTOR_EVIDENCE_DIR",
+                evidence,
+            ):
+                controller = self.controller(runtime, ProbeRunner())
+                self.assertEqual(
+                    controller._verify_scoring_oom_pre_doctor_failure(),
+                    controller._scoring_oom_pre_doctor_failure(),
+                )
+        for target in ("output", "returncode"):
+            with (
+                self.subTest(target=target),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                evidence = Path(temporary).resolve()
+                (evidence / "oom-abandonment.json").write_bytes(expected_output)
+                (evidence / "oom-abandonment.rc").write_bytes(
+                    b"FINALIZER_RC=2\n"
+                )
+                if target == "output":
+                    (evidence / "oom-abandonment.json").write_bytes(b"changed\n")
+                else:
+                    (evidence / "oom-abandonment.rc").write_bytes(
+                        b"FINALIZER_RC=0\n"
+                    )
+                runtime = evidence / "runtime"
+                runtime.mkdir()
+                with (
+                    mock.patch(
+                        "kernel_research.autorun.controller."
+                        "SCORING_OOM_PRE_DOCTOR_EVIDENCE_DIR",
+                        evidence,
+                    ),
+                    self.assertRaisesRegex(Exception, "is inconsistent"),
+                ):
+                    controller = self.controller(runtime, ProbeRunner())
+                    controller._verify_scoring_oom_pre_doctor_failure()
+
+    def test_existing_current_recovery_intent_never_replays_doctor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recovery_commit = "f" * 40
+            controller = self.controller(
+                root,
+                ProbeRunner(),
+                expected_git_commit=recovery_commit,
+                framework_git_commit=PRODUCTION_FRAMEWORK_COMMIT,
+                evaluator_image=PRODUCTION_EVALUATOR,
+            )
+            operation = write_oom_incident(controller)
+            _, unknown, receipt = controller._verify_scoring_oom_source(
+                operation, state_name="state.json"
+            )
+            current_intent = controller._scoring_oom_recovery_intent(
+                recovery_commit=recovery_commit,
+                unknown=unknown,
+                receipt=receipt,
+            )
+            for name, value in (
+                ("unknown.json", unknown),
+                ("recovery-intent.json", current_intent),
+            ):
+                (operation / name).write_text(
+                    json.dumps(value, sort_keys=True, separators=(",", ":"))
+                    + "\n",
+                    encoding="utf-8",
+                )
+            with (
+                mock.patch.object(
+                    controller, "_verify_scoring_oom_recovery_commit"
+                ),
+                mock.patch.object(controller, "_assert_scoring_host_idle"),
+                mock.patch.object(
+                    controller, "_scoring_container_present", return_value=False
+                ),
+                mock.patch.object(controller, "doctor") as doctor,
+                self.assertRaisesRegex(Exception, "completion is uncertain"),
+            ):
+                controller.finalize_scoring_unknown_oom()
+            doctor.assert_not_called()
+
     def test_oom_recovery_commit_requires_exact_parent_and_path_set(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -528,13 +697,22 @@ class ScoringControllerTests(unittest.TestCase):
                     "kernel_research.autorun.controller._run_git",
                     return_value="0" * 40,
                 ),
-                self.assertRaisesRegex(Exception, "direct incident child"),
+                self.assertRaisesRegex(Exception, "direct follow-up child"),
+            ):
+                controller._verify_scoring_oom_recovery_commit()
+            with mock.patch(
+                "kernel_research.autorun.controller._run_git",
+                side_effect=(
+                    SCORING_OOM_FIRST_RECOVERY_COMMIT,
+                    "kernel_research/autorun/controller.py\n"
+                    "tests/test_scoring_controller.py",
+                ),
             ):
                 controller._verify_scoring_oom_recovery_commit()
             with (
                 mock.patch(
                     "kernel_research.autorun.controller._run_git",
-                    side_effect=(SCORING_OOM_SOURCE_COMMIT, "kernel.py"),
+                    side_effect=(SCORING_OOM_FIRST_RECOVERY_COMMIT, "kernel.py"),
                 ),
                 self.assertRaisesRegex(Exception, "unauthorized path"),
             ):

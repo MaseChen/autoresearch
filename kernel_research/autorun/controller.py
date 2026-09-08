@@ -121,6 +121,18 @@ SCORING_OOM_ROOT_CAUSE_MANIFEST_SHA256 = (
 SCORING_OOM_ERROR = "scoring baseline evaluator had an untrusted GPU termination"
 SCORING_OOM_FAILURE_CLASS = "CONFIRMED_SCORING_CONTAINER_MEMORY_CGROUP_OOM"
 SCORING_ABANDONED_UNKNOWN_STATUS = "ABANDONED_UNKNOWN_OUTCOME"
+SCORING_OOM_FIRST_RECOVERY_COMMIT = (
+    "2afb46fb981d4d75b09ab7bd8750d7e1067ee279"
+)
+SCORING_OOM_PRE_DOCTOR_FAILURE_CLASS = (
+    "KNOWN_PRE_DOCKER_RUN_AUTHORIZATION_REJECTION"
+)
+SCORING_OOM_PRE_DOCTOR_EVIDENCE_DIR = Path(
+    "/home/mx/autoresearch-evidence/xpuoj-scoring-2afb46f-deployment-v1"
+)
+SCORING_OOM_PRE_DOCTOR_ERROR = (
+    "unknown run id: score-baseline-oom-recovery"
+)
 
 
 def _resolve_builtin_target(namespace: ResearchNamespace) -> TargetComponents:
@@ -1345,17 +1357,17 @@ class ResearchController:
                 "scoring OOM recovery runtime identity has drifted"
             )
         if _run_git(self.config.repository_dir, "rev-parse", "HEAD^") != (
-            SCORING_OOM_SOURCE_COMMIT
+            SCORING_OOM_FIRST_RECOVERY_COMMIT
         ):
             raise ControllerDataIntegrityError(
-                "scoring OOM recovery must be the direct incident child"
+                "scoring OOM recovery must be the direct follow-up child"
             )
         changed = set(
             _run_git(
                 self.config.repository_dir,
                 "diff",
                 "--name-only",
-                SCORING_OOM_SOURCE_COMMIT,
+                SCORING_OOM_FIRST_RECOVERY_COMMIT,
                 commit,
                 "--",
             ).splitlines()
@@ -1365,19 +1377,11 @@ class ResearchController:
             "docs/xpuoj-scoring-v2/PROGRESS.md",
             "docs/xpuoj-scoring-v2/RESEARCH.md",
             "kernel_research/autorun/controller.py",
-            "kernel_research/cli.py",
-            "kernel_research/scoring_baseline_worker.py",
-            "kernel_research/scoring_measurement.py",
-            "tests/test_scoring_baseline_worker.py",
-            "tests/test_scoring_cli.py",
             "tests/test_scoring_controller.py",
-            "tests/test_scoring_measurement.py",
         }
         required = {
             "kernel_research/autorun/controller.py",
-            "kernel_research/cli.py",
-            "kernel_research/scoring_baseline_worker.py",
-            "kernel_research/scoring_measurement.py",
+            "tests/test_scoring_controller.py",
         }
         if not required <= changed or not changed <= allowed:
             raise ControllerDataIntegrityError(
@@ -1407,6 +1411,81 @@ class ResearchController:
         }
 
     @staticmethod
+    def _scoring_oom_pre_doctor_failure() -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "classification": SCORING_OOM_PRE_DOCTOR_FAILURE_CLASS,
+            "first_recovery_commit": SCORING_OOM_FIRST_RECOVERY_COMMIT,
+            "command": "score-baseline-abandon-unknown-oom",
+            "error": SCORING_OOM_PRE_DOCTOR_ERROR,
+            "combined_output_sha256": (
+                "sha256:"
+                "a91045dddfc893b1050b8a7a0d22d0eeabe9d303050d45dbc982ccdf0f4d3805"
+            ),
+            "returncode_evidence_sha256": (
+                "sha256:"
+                "a5df71cf6472b8e3f9fc0b1406cc68e3e395f0353826a2e71a8f43d4992bff0f"
+            ),
+            "returncode": 2,
+            "doctor_container_started": False,
+            "gpu_action_started": False,
+            "replay_permitted": False,
+        }
+
+    def _verify_scoring_oom_pre_doctor_failure(self) -> dict[str, Any]:
+        root = SCORING_OOM_PRE_DOCTOR_EVIDENCE_DIR
+        try:
+            if root.is_symlink() or not root.is_dir() or root.resolve() != root:
+                raise ValueError("evidence directory is not canonical")
+            combined = root / "oom-abandonment.json"
+            returncode = root / "oom-abandonment.rc"
+            if any(
+                path.is_symlink() or not path.is_file()
+                for path in (combined, returncode)
+            ):
+                raise ValueError("evidence files are not regular")
+            combined_bytes = combined.read_bytes()
+            returncode_bytes = returncode.read_bytes()
+        except (OSError, ValueError) as exc:
+            raise ControllerDataIntegrityError(
+                f"scoring OOM pre-doctor failure evidence is unavailable: {exc}"
+            ) from exc
+        if (
+            combined_bytes
+            != b"error: unknown run id: score-baseline-oom-recovery\n"
+            or returncode_bytes != b"FINALIZER_RC=2\n"
+            or hashlib.sha256(combined_bytes).hexdigest()
+            != "a91045dddfc893b1050b8a7a0d22d0eeabe9d303050d45dbc982ccdf0f4d3805"
+            or hashlib.sha256(returncode_bytes).hexdigest()
+            != "a5df71cf6472b8e3f9fc0b1406cc68e3e395f0353826a2e71a8f43d4992bff0f"
+        ):
+            raise ControllerDataIntegrityError(
+                "scoring OOM pre-doctor failure evidence is inconsistent"
+            )
+        return self._scoring_oom_pre_doctor_failure()
+
+    @staticmethod
+    def _scoring_oom_retry_intent(
+        *,
+        recovery_commit: str,
+        initial_recovery_intent: Mapping[str, Any],
+        pre_doctor_failure: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "command": "score-baseline-abandon-unknown-oom-retry",
+            "source_operation_id": SCORING_OOM_OPERATION_ID,
+            "source_operation_digest": SCORING_OOM_OPERATION_DIGEST,
+            "initial_recovery_intent_digest": canonical_sha256(
+                initial_recovery_intent
+            ),
+            "pre_doctor_failure_digest": canonical_sha256(pre_doctor_failure),
+            "recovery_commit": recovery_commit,
+            "status": "RUNNING",
+            "replay_permitted": False,
+        }
+
+    @staticmethod
     def _scoring_oom_final(
         *,
         material: Mapping[str, Any],
@@ -1415,8 +1494,11 @@ class ResearchController:
         recovery_intent: Mapping[str, Any],
         doctor: Mapping[str, Any],
         recovery_commit: str,
+        doctor_run_id: str,
+        initial_recovery_intent: Mapping[str, Any] | None = None,
+        pre_doctor_failure: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return {
+        final = {
             **material,
             "operation_id": SCORING_OOM_OPERATION_ID,
             "operation_digest": SCORING_OOM_OPERATION_DIGEST,
@@ -1433,15 +1515,30 @@ class ResearchController:
             "recovery_intent_digest": canonical_sha256(recovery_intent),
             "doctor_evidence_digest": canonical_sha256(doctor),
             "doctor_invoked": True,
+            "doctor_run_id": doctor_run_id,
             "replay_permitted": False,
             "qualification_effect": "none",
             "deployment_effect": "none",
         }
+        if initial_recovery_intent is not None or pre_doctor_failure is not None:
+            if initial_recovery_intent is None or pre_doctor_failure is None:
+                raise ValueError("scoring OOM retry evidence must be complete")
+            final.update(
+                {
+                    "initial_recovery_intent_digest": canonical_sha256(
+                        initial_recovery_intent
+                    ),
+                    "pre_doctor_failure_digest": canonical_sha256(
+                        pre_doctor_failure
+                    ),
+                }
+            )
+        return final
 
     def _verify_scoring_oom_abandonment(
         self, operation_dir: Path
     ) -> dict[str, Any]:
-        expected_names = {
+        standard_names = {
             "intent.json",
             "state.json",
             "probe-00.receipt.json",
@@ -1452,9 +1549,13 @@ class ResearchController:
             "recovery-doctor.json",
             "final.json",
         }
+        retry_names = standard_names | {
+            "recovery-pre-doctor-failure.json",
+            "recovery-retry-intent.json",
+        }
         entries = list(operation_dir.iterdir())
         if (
-            {entry.name for entry in entries} != expected_names
+            {entry.name for entry in entries} not in (standard_names, retry_names)
             or any(entry.is_symlink() or not entry.is_file() for entry in entries)
         ):
             raise ControllerDataIntegrityError(
@@ -1485,37 +1586,75 @@ class ResearchController:
             raise ControllerDataIntegrityError(
                 "scoring OOM recovery commit is invalid"
             )
-        expected_recovery_intent = self._scoring_oom_recovery_intent(
-            recovery_commit=recovery_commit,
-            unknown=unknown,
-            receipt=receipt,
-        )
+        is_retry = {entry.name for entry in entries} == retry_names
+        initial_recovery_intent: Mapping[str, Any] | None = None
+        pre_doctor_failure: Mapping[str, Any] | None = None
+        active_recovery_intent = recovery_intent
+        if is_retry:
+            expected_initial_intent = self._scoring_oom_recovery_intent(
+                recovery_commit=SCORING_OOM_FIRST_RECOVERY_COMMIT,
+                unknown=unknown,
+                receipt=receipt,
+            )
+            pre_doctor_failure = self._read_scoring_evidence(
+                operation_dir / "recovery-pre-doctor-failure.json",
+                label="scoring OOM pre-doctor failure",
+            )
+            retry_intent = self._read_scoring_evidence(
+                operation_dir / "recovery-retry-intent.json",
+                label="scoring OOM retry intent",
+            )
+            expected_retry_intent = self._scoring_oom_retry_intent(
+                recovery_commit=recovery_commit,
+                initial_recovery_intent=recovery_intent,
+                pre_doctor_failure=pre_doctor_failure,
+            )
+            if (
+                recovery_intent != expected_initial_intent
+                or pre_doctor_failure != self._scoring_oom_pre_doctor_failure()
+                or retry_intent != expected_retry_intent
+            ):
+                raise ControllerDataIntegrityError(
+                    "scoring OOM retry evidence is inconsistent"
+                )
+            initial_recovery_intent = recovery_intent
+            active_recovery_intent = retry_intent
+        else:
+            expected_recovery_intent = self._scoring_oom_recovery_intent(
+                recovery_commit=recovery_commit,
+                unknown=unknown,
+                receipt=receipt,
+            )
+            if recovery_intent != expected_recovery_intent:
+                raise ControllerDataIntegrityError(
+                    "scoring OOM recovery intent is inconsistent"
+                )
         expected_final = self._scoring_oom_final(
             material=material,
             unknown=unknown,
             receipt=receipt,
-            recovery_intent=recovery_intent,
+            recovery_intent=active_recovery_intent,
             doctor=doctor,
             recovery_commit=recovery_commit,
+            doctor_run_id="preflight",
+            initial_recovery_intent=initial_recovery_intent,
+            pre_doctor_failure=pre_doctor_failure,
         )
-        doctor_identity = doctor.get("identity")
-        doctor_probe = doctor.get("c500_probe")
         if (
-            recovery_intent != expected_recovery_intent
-            or final != expected_final
+            final != expected_final
             or state != expected_final
-            or doctor.get("status") != "SUCCESS"
-            or not isinstance(doctor_identity, Mapping)
-            or doctor_identity.get("git_commit") != recovery_commit
-            or not isinstance(doctor_probe, Mapping)
-            or doctor_probe.get("status") != "SUCCESS"
-            or not isinstance(doctor_probe.get("environment"), Mapping)
-            or doctor_probe["environment"].get("compile_probe_status")
-            != "PASSED"
         ):
             raise ControllerDataIntegrityError(
                 "scoring OOM abandonment evidence is inconsistent"
             )
+        try:
+            self._validate_scoring_oom_doctor(
+                doctor, recovery_commit=recovery_commit
+            )
+        except ControlledRuntimeError as exc:
+            raise ControllerDataIntegrityError(
+                "scoring OOM abandonment doctor evidence is inconsistent"
+            ) from exc
         return final
 
     @staticmethod
@@ -1839,6 +1978,16 @@ class ResearchController:
             intent_names = base_names | {"unknown.json", "recovery-intent.json"}
             doctor_names = intent_names | {"recovery-doctor.json"}
             final_names = doctor_names | {"final.json"}
+            pre_failure_names = intent_names | {
+                "recovery-pre-doctor-failure.json"
+            }
+            retry_intent_names = pre_failure_names | {
+                "recovery-retry-intent.json"
+            }
+            retry_doctor_names = retry_intent_names | {
+                "recovery-doctor.json"
+            }
+            retry_final_names = retry_doctor_names | {"final.json"}
             entries = list(operation_dir.iterdir())
             names = {entry.name for entry in entries}
             if names not in (
@@ -1846,6 +1995,10 @@ class ResearchController:
                 intent_names,
                 doctor_names,
                 final_names,
+                pre_failure_names,
+                retry_intent_names,
+                retry_doctor_names,
+                retry_final_names,
             ) or any(entry.is_symlink() or not entry.is_file() for entry in entries):
                 raise ControllerDataIntegrityError(
                     "scoring OOM recovery has an incomplete prior attempt"
@@ -1870,10 +2023,20 @@ class ResearchController:
                     "scoring OOM source container is still present"
                 )
             recovery_commit = self.config.expected_git_commit
-            recovery_intent = self._scoring_oom_recovery_intent(
+            current_recovery_intent = self._scoring_oom_recovery_intent(
                 recovery_commit=recovery_commit,
                 unknown=unknown,
                 receipt=receipt,
+            )
+            initial_recovery_intent: Mapping[str, Any] | None = None
+            pre_doctor_failure: Mapping[str, Any] | None = None
+            active_recovery_intent: Mapping[str, Any]
+            doctor_authorized_now = False
+            is_retry = names in (
+                pre_failure_names,
+                retry_intent_names,
+                retry_doctor_names,
+                retry_final_names,
             )
             if names == base_names:
                 _atomic_write_bytes(
@@ -1882,21 +2045,88 @@ class ResearchController:
                 )
                 _atomic_write_bytes(
                     operation_dir / "recovery-intent.json",
-                    (canonical_json_text(recovery_intent) + "\n").encode("utf-8"),
+                    (canonical_json_text(current_recovery_intent) + "\n").encode(
+                        "utf-8"
+                    ),
                 )
+                active_recovery_intent = current_recovery_intent
+                doctor_authorized_now = True
             else:
                 stored_intent = self._read_scoring_evidence(
                     operation_dir / "recovery-intent.json",
                     label="scoring OOM recovery intent",
                 )
-                if stored_intent != recovery_intent:
+                first_recovery_intent = self._scoring_oom_recovery_intent(
+                    recovery_commit=SCORING_OOM_FIRST_RECOVERY_COMMIT,
+                    unknown=unknown,
+                    receipt=receipt,
+                )
+                if stored_intent == current_recovery_intent:
+                    if is_retry:
+                        raise ControllerDataIntegrityError(
+                            "scoring OOM retry unexpectedly replaced the initial intent"
+                        )
+                    active_recovery_intent = stored_intent
+                elif stored_intent == first_recovery_intent:
+                    is_retry = True
+                    initial_recovery_intent = stored_intent
+                    failure_path = (
+                        operation_dir / "recovery-pre-doctor-failure.json"
+                    )
+                    if names == intent_names:
+                        pre_doctor_failure = (
+                            self._verify_scoring_oom_pre_doctor_failure()
+                        )
+                        _atomic_write_bytes(
+                            failure_path,
+                            (
+                                canonical_json_text(pre_doctor_failure) + "\n"
+                            ).encode("utf-8"),
+                        )
+                    else:
+                        pre_doctor_failure = self._read_scoring_evidence(
+                            failure_path,
+                            label="scoring OOM pre-doctor failure",
+                        )
+                        if (
+                            pre_doctor_failure
+                            != self._scoring_oom_pre_doctor_failure()
+                        ):
+                            raise ControllerDataIntegrityError(
+                                "scoring OOM pre-doctor failure is inconsistent"
+                            )
+                    retry_intent = self._scoring_oom_retry_intent(
+                        recovery_commit=recovery_commit,
+                        initial_recovery_intent=initial_recovery_intent,
+                        pre_doctor_failure=pre_doctor_failure,
+                    )
+                    retry_path = operation_dir / "recovery-retry-intent.json"
+                    if names in (intent_names, pre_failure_names):
+                        _atomic_write_bytes(
+                            retry_path,
+                            (canonical_json_text(retry_intent) + "\n").encode(
+                                "utf-8"
+                            ),
+                        )
+                        doctor_authorized_now = True
+                    else:
+                        stored_retry = self._read_scoring_evidence(
+                            retry_path, label="scoring OOM retry intent"
+                        )
+                        if stored_retry != retry_intent:
+                            raise ControllerDataIntegrityError(
+                                "scoring OOM retry intent is inconsistent"
+                            )
+                        retry_intent = stored_retry
+                    active_recovery_intent = retry_intent
+                else:
                     raise ControllerDataIntegrityError(
                         "scoring OOM recovery intent is inconsistent"
                     )
-                recovery_intent = stored_intent
-            doctor_run_id = "score-baseline-oom-recovery"
-            if names in (base_names, intent_names):
-                if names == intent_names:
+            doctor_run_id = "preflight"
+            doctor_path = operation_dir / "recovery-doctor.json"
+            if not doctor_path.exists():
+                if not doctor_authorized_now:
                     raise ControlledRuntimeError(
                         "scoring OOM recovery doctor completion is uncertain; "
                         "replay is forbidden"
@@ -1906,12 +2136,12 @@ class ResearchController:
                     run_id=doctor_run_id,
                 )
                 _atomic_write_bytes(
-                    operation_dir / "recovery-doctor.json",
+                    doctor_path,
                     (canonical_json_text(doctor) + "\n").encode("utf-8"),
                 )
             else:
                 doctor = self._read_scoring_evidence(
-                    operation_dir / "recovery-doctor.json",
+                    doctor_path,
                     label="scoring OOM recovery doctor",
                 )
             self._validate_scoring_oom_doctor(
@@ -1928,13 +2158,17 @@ class ResearchController:
                 material=material,
                 unknown=unknown,
                 receipt=receipt,
-                recovery_intent=recovery_intent,
+                recovery_intent=active_recovery_intent,
                 doctor=doctor,
                 recovery_commit=recovery_commit,
+                doctor_run_id=doctor_run_id,
+                initial_recovery_intent=initial_recovery_intent,
+                pre_doctor_failure=pre_doctor_failure,
             )
-            if names == final_names:
+            final_path = operation_dir / "final.json"
+            if final_path.exists():
                 stored_final = self._read_scoring_evidence(
-                    operation_dir / "final.json", label="scoring OOM final evidence"
+                    final_path, label="scoring OOM final evidence"
                 )
                 if stored_final != final:
                     raise ControllerDataIntegrityError(
@@ -1942,7 +2176,7 @@ class ResearchController:
                     )
             else:
                 _atomic_write_bytes(
-                    operation_dir / "final.json",
+                    final_path,
                     (canonical_json_text(final) + "\n").encode("utf-8"),
                 )
             _atomic_write_bytes(

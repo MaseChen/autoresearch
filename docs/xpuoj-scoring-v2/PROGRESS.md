@@ -49,6 +49,13 @@ the exact trusted finalizer before a new qualification begins.  No
 qualification or activation claim follows from implementation or unit tests
 alone.
 
+The first finalizer deployment used a non-existent Controller Run ID for its
+fresh doctor.  The normal doctor authorization rejected it before Docker with
+`unknown run id`; no doctor or scoring GPU action started.  That immutable
+failure and return code remain attached to the operation.  The follow-up uses
+the existing standalone `preflight` doctor identity and records a separate
+retry intent, without replacing the first recovery intent.
+
 ### Phase 3: Trusted integration
 
 - [ ] Add shadow report to evaluator and scientific evidence.
