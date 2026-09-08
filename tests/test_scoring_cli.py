@@ -10,7 +10,13 @@ from contextlib import redirect_stderr
 
 from kernel_research import cli
 from kernel_research.autorun.models import ControllerConfig
-from kernel_research.autorun.runtime import scoring_baseline_probe_argv
+from kernel_research.autorun.runtime import (
+    scoring_baseline_probe_argv,
+    scoring_candidate_probe_argv,
+)
+from kernel_research.scoring_candidate_measurement import (
+    scoring_candidate_measurement_contract_snapshot,
+)
 
 
 class ScoringCliTests(unittest.TestCase):
@@ -56,7 +62,93 @@ class ScoringCliTests(unittest.TestCase):
         self.assertEqual(json.loads(stdout.getvalue()), payload)
         probe.assert_called_once_with(scoring_framework_git_commit="d" * 40)
 
-    def test_runtime_argv_uses_fixed_image_entrypoint_and_command(self) -> None:
+    def test_candidate_probe_is_argument_free_and_uses_fixed_mounts(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(["score-candidate-probe"])
+        self.assertEqual(args.command, "score-candidate-probe")
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(["score-candidate-probe", "--candidate", "/tmp/x"])
+
+        config = self._runtime_config()
+        contract = scoring_candidate_measurement_contract_snapshot()
+        argv = scoring_candidate_probe_argv(
+            config,
+            name="kar-score-candidate",
+            run_id="candidate-operation",
+            cache_dir=Path("/cache"),
+            candidate_path=Path("/trusted/candidate.py"),
+            incumbent_path=Path("/trusted/incumbent.py"),
+            candidate_hash="a" * 64,
+            incumbent_hash="b" * 64,
+            scoring_profile_digest="sha256:" + "e" * 64,
+            measurement_contract_digest=str(contract["digest"]),
+        )
+        self.assertEqual(argv[-3:], ["-m", "kernel_research", "score-candidate-probe"])
+        self.assertIn(
+            "type=bind,src=/trusted/candidate.py,dst=/candidate/kernel.py,readonly",
+            argv,
+        )
+        self.assertIn(
+            "type=bind,src=/trusted/incumbent.py,dst=/baseline/kernel.py,readonly",
+            argv,
+        )
+        self.assertNotIn("--candidate", argv)
+        self.assertNotIn("--baseline", argv)
+        self.assertIn("KERNEL_RESEARCH_SCORING_CANDIDATE_HASH=" + "a" * 64, argv)
+
+    def test_candidate_probe_reads_only_exact_host_identity(self) -> None:
+        payload = {
+            "status": "QUALIFIED",
+            "gpu_state": "COMPLETED",
+            "completion_trusted": True,
+            "cases": [],
+        }
+        environment = {
+            "KERNEL_RESEARCH_SCORING_FRAMEWORK_COMMIT": "d" * 40,
+            "KERNEL_RESEARCH_SCORING_CANDIDATE_HASH": "a" * 64,
+            "KERNEL_RESEARCH_SCORING_INCUMBENT_HASH": "b" * 64,
+            "KERNEL_RESEARCH_SCORING_PROFILE_DIGEST": "sha256:" + "e" * 64,
+            "KERNEL_RESEARCH_SCORING_CANDIDATE_CONTRACT_DIGEST": (
+                "sha256:" + "f" * 64
+            ),
+        }
+        with (
+            mock.patch(
+                "kernel_research.scoring_candidate_worker.run_scoring_candidate_probe",
+                return_value=payload,
+            ) as probe,
+            mock.patch.dict(os.environ, environment, clear=True),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            self.assertEqual(cli.main(["score-candidate-probe"]), 0)
+        self.assertEqual(json.loads(stdout.getvalue()), payload)
+        probe.assert_called_once_with(
+            candidate_path="/candidate/kernel.py",
+            incumbent_path="/baseline/kernel.py",
+            expected_candidate_hash="a" * 64,
+            expected_incumbent_hash="b" * 64,
+            scoring_framework_git_commit="d" * 40,
+            scoring_profile_digest="sha256:" + "e" * 64,
+            expected_measurement_contract_digest="sha256:" + "f" * 64,
+        )
+
+    def test_candidate_probe_uses_distinct_unknown_exit(self) -> None:
+        with (
+            mock.patch(
+                "kernel_research.scoring_candidate_worker.run_scoring_candidate_probe",
+                return_value={
+                    "status": "UNKNOWN_OUTCOME",
+                    "gpu_state": "STARTED",
+                    "completion_trusted": False,
+                },
+            ),
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            self.assertEqual(cli.main(["score-candidate-probe"]), 3)
+
+    @staticmethod
+    def _runtime_config():
         config = mock.create_autospec(ControllerConfig, instance=True)
         config.docker_binary = "/usr/bin/docker"
         config.container_uid = 1000
@@ -69,6 +161,10 @@ class ScoringCliTests(unittest.TestCase):
         config.expected_git_commit = "c" * 40
         config.gpu_devices = ()
         config.evaluator_image = "registry/image@sha256:" + "b" * 64
+        return config
+
+    def test_runtime_argv_uses_fixed_image_entrypoint_and_command(self) -> None:
+        config = self._runtime_config()
         argv = scoring_baseline_probe_argv(
             config,
             name="kar-score-baseline",

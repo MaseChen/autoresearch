@@ -1,6 +1,6 @@
 # XPU-OJ-Aligned Scoring V2 Progress
 
-## Status: Phase 2 - V1 pilot sealed; score-aligned V2 validation required
+## Status: Phase 3 - trusted shadow integration under local acceptance
 
 ## Phase progress
 
@@ -35,6 +35,14 @@
 - [x] Preserve its `UNQUALIFIED / relative_mad_exceeded` result without replay.
 - [x] Bind score-aligned case and aggregate stability rules into measurement
   contract V2 and reaggregate receipts during idempotent verification.
+- [x] Complete the independent V2 ten-probe qualification on the production
+  C500 host. The qualified operation is
+  `score-baseline-d7423c19f914afc877afc77b`; qualification digest is
+  `sha256:47bf2fbd525703d1bf5a76544a1d49f7920888a8ce0e43235a82ab70d34ac3f8`.
+- [x] Seal the qualification evidence at
+  `/home/mx/autoresearch-evidence/xpuoj-scoring-60e128e-qualification-v2-validation-v1`
+  with manifest SHA-256
+  `4511014045b0172a40a68e156a7ce45efbb5c109199998f06148c1d6d2bced11`.
 
 First server qualification attempt (`65e5365`) stopped before Torch or GPU
 dispatch because the container correctly mounted the older scientific
@@ -72,9 +80,20 @@ commit and independent ten-probe validation are required.
 
 ### Phase 3: Trusted integration
 
-- [ ] Add shadow report to evaluator and scientific evidence.
-- [ ] Project proxy and safety channels into writer feedback and Console.
-- [ ] Add checkpoint/recovery and legacy compatibility tests.
+- [x] Freeze the exact qualified baseline in a shadow-only activation profile.
+- [x] Add an independent candidate device-event measurement contract and
+  evaluator-side worker.
+- [x] Refuse to create an absolute score from the legacy host timer.
+- [x] Add durable per-evaluation candidate measurement intent, receipt, final
+  evidence and no-replay UNKNOWN semantics.
+- [x] Add shadow report to newly recorded scientific evidence without changing
+  raw evaluator output or promotion authority.
+- [x] Project bounded, case-free proxy and safety channels into writer feedback
+  and Console while retaining full private/scientific evidence.
+- [x] Add checkpoint/recovery and legacy compatibility coverage.
+- [ ] Complete final full-suite/coverage/frontend release gates and commit.
+- [ ] Deploy the Phase 3 control commit and run one same-hash acceptance
+  evaluation before beginning the 20-run null calibration.
 
 ### Phase 4: Qualification and activation
 

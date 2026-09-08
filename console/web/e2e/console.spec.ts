@@ -14,6 +14,7 @@ const snapshot = {
     namespace_id: `sha256:${'3'.repeat(64)}`,
     execution_environment_digest: `sha256:${'4'.repeat(64)}`,
     profiler_activation_profile_digest: `sha256:${'5'.repeat(64)}`,
+    scoring_shadow_profile_digest: `sha256:${'6'.repeat(64)}`,
     controller_schema_version: 3,
     history_schema_version: 3,
     campaign_schema_version: 1,
@@ -50,6 +51,7 @@ test('desktop shows create-observe-results information architecture', async ({ p
   test.skip(testInfo.project.name !== 'desktop')
   await page.goto('/#bootstrap=test-bootstrap-token')
   await expect(page.getByRole('heading', { name: '运行总览' })).toBeVisible()
+  await expect(page.locator('body')).not.toContainText('NaN')
   await expect(page.getByText('创建任务 → 观察过程 → 查看结果')).toBeVisible()
   const results = await new AxeBuilder({ page }).analyze()
   expect(results.violations).toEqual([])

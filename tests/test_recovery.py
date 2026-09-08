@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 
 from kernel_research.autorun.controller import ResearchController
@@ -17,7 +18,11 @@ from kernel_research.history import HistoryStore
 from kernel_research.platform.artifacts import ArtifactId
 from kernel_research.platform.identity import BaselineRef, ExperimentIdentity
 from kernel_research.platform.profiles import LEGACY_RESEARCH_NAMESPACE
-from kernel_research.recovery import restore_checkpoint, verify_checkpoint
+from kernel_research.recovery import (
+    _verify_checkpoint_scoring_operation,
+    restore_checkpoint,
+    verify_checkpoint,
+)
 
 from test_autorun import FakeEvaluator, SEED, SEED_HASH, _baseline, _config
 
@@ -125,6 +130,91 @@ def _refresh_database(
 
 
 class CheckpointRecoveryTests(unittest.TestCase):
+    def test_scoring_operation_receipt_chain_is_checkpoint_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            operation_dir = (
+                root / "run/results/001/full_primary.scoring-shadow"
+            )
+            operation_dir.mkdir(parents=True)
+            semantic = {
+                "schema_version": 1,
+                "operation": "score-candidate-shadow",
+                "run_id": "run-1",
+                "iteration_id": 7,
+                "iteration_index": 1,
+                "experiment_uid": "uid-1",
+                "stage": "full_primary",
+                "candidate_hash": "a" * 64,
+            }
+            digest = "sha256:" + hashlib.sha256(
+                json.dumps(
+                    semantic, sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest()
+            operation_id = "score-candidate-" + digest[7:31]
+            container = f"kar-score-candidate-{operation_id[-12:]}"
+            result = {"status": "QUALIFIED", "value": 1}
+            result_digest = "sha256:" + hashlib.sha256(
+                json.dumps(result, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            intent = {
+                **semantic,
+                "container_name": container,
+                "operation_id": operation_id,
+                "operation_digest": digest,
+                "status": "INTENT",
+            }
+            final = {
+                **semantic,
+                "container_name": container,
+                "operation_id": operation_id,
+                "operation_digest": digest,
+                "status": "QUALIFIED",
+                "result_digest": result_digest,
+                "result": result,
+            }
+            for name, value in (
+                ("intent.json", intent),
+                ("receipt.json", final),
+                ("final.json", final),
+                ("state.json", final),
+            ):
+                (operation_dir / name).write_text(
+                    json.dumps(value, sort_keys=True, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+            report = {
+                "candidate_operation_id": operation_id,
+                "candidate_operation_digest": digest,
+                "candidate_operation_result_digest": result_digest,
+                "candidate_measurement": result,
+            }
+            identity = SimpleNamespace(
+                run_id="run-1",
+                iteration=1,
+                stage="full_primary",
+                experiment_uid="uid-1",
+            )
+            _verify_checkpoint_scoring_operation(
+                root,
+                identity=identity,
+                candidate_hash="a" * 64,
+                result={"objective_scoring": report},
+            )
+            receipt = dict(final)
+            receipt["result_digest"] = "sha256:" + "0" * 64
+            (operation_dir / "receipt.json").write_text(
+                json.dumps(receipt), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "terminal evidence"):
+                _verify_checkpoint_scoring_operation(
+                    root,
+                    identity=identity,
+                    candidate_hash="a" * 64,
+                    result={"objective_scoring": report},
+                )
+
     def _checkpoint(self, root: Path) -> Path:
         config = _config(root)
         _baseline(config.state_dir)

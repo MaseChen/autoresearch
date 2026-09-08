@@ -9,6 +9,7 @@ export interface RuntimeIdentity {
   namespace_id: string
   execution_environment_digest: string
   profiler_activation_profile_digest: string
+  scoring_shadow_profile_digest: string
   controller_schema_version: number
   history_schema_version: number
   campaign_schema_version: number

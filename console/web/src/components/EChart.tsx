@@ -2,7 +2,6 @@ import { useEffect, useRef } from 'react'
 import * as echarts from 'echarts/core'
 import { BarChart, BoxplotChart, HeatmapChart, LineChart } from 'echarts/charts'
 import {
-  AriaComponent,
   DatasetComponent,
   GridComponent,
   LegendComponent,
@@ -12,7 +11,6 @@ import { CanvasRenderer } from 'echarts/renderers'
 import type { EChartsCoreOption } from 'echarts/core'
 
 echarts.use([
-  AriaComponent,
   BarChart,
   BoxplotChart,
   CanvasRenderer,
@@ -30,7 +28,9 @@ export function EChart({ option, label }: { option: EChartsCoreOption; label: st
   useEffect(() => {
     if (!element.current) return
     const chart = echarts.init(element.current, undefined, { renderer: 'canvas' })
-    chart.setOption({ ...option, aria: { enabled: true } })
+    // ECharts' generated numeric narration renders null samples as "NaN".
+    // The caller owns the bounded human-readable summary and data table.
+    chart.setOption({ ...option, aria: { enabled: false } })
     const observer = new ResizeObserver(() => chart.resize())
     observer.observe(element.current)
     return () => {

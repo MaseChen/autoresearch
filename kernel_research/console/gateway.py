@@ -22,9 +22,11 @@ from fastapi.staticfiles import StaticFiles
 
 from .protocol import strict_json_loads
 from .protocol import (
+    AGENT_PROTOCOL_DIGEST,
     DraftV1,
     OperationReceiptV1,
     PreparedOperationV1,
+    RuntimeIdentityV1,
 )
 from .local_store import ConsoleLocalStore
 from .transport import AgentTransport
@@ -256,14 +258,15 @@ class SnapshotCache:
             snapshot = payload.get("snapshot")
             if not isinstance(snapshot, dict):
                 raise RuntimeError("remote snapshot is missing")
-            identity = snapshot.get("runtime_identity")
-            digest = (
-                identity.get("runtime_identity_digest")
-                if isinstance(identity, dict)
-                else None
-            )
-            if not isinstance(digest, str):
-                raise RuntimeError("remote snapshot has no runtime identity")
+            try:
+                identity = RuntimeIdentityV1.from_value(
+                    snapshot.get("runtime_identity")
+                )
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("remote snapshot runtime identity is invalid") from exc
+            if identity.agent_protocol_digest != AGENT_PROTOCOL_DIGEST:
+                raise RuntimeError("remote snapshot agent protocol is not trusted")
+            digest = identity.digest
             if self._runtime_identity_digest is None:
                 self._runtime_identity_digest = digest
             elif self._runtime_identity_digest != digest:
@@ -305,14 +308,11 @@ class SnapshotEventBroker:
         return event_id, f"id: {event_id}\nevent: snapshot\ndata: {payload}\n\n"
 
     def _verify_runtime_identity(self, snapshot: Mapping[str, Any]) -> None:
-        identity = snapshot.get("runtime_identity")
-        digest = (
-            identity.get("runtime_identity_digest")
-            if isinstance(identity, dict)
-            else None
-        )
-        if not isinstance(digest, str):
-            raise RuntimeError("subscription snapshot has no runtime identity")
+        try:
+            identity = RuntimeIdentityV1.from_value(snapshot.get("runtime_identity"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("subscription snapshot runtime identity is invalid") from exc
+        digest = identity.digest
         if self._runtime_identity_digest is None:
             self._runtime_identity_digest = digest
         elif self._runtime_identity_digest != digest:

@@ -56,7 +56,29 @@
 
 ## Phase 3 success criteria
 
-- Every new result carries explicit objective and paired-safety evidence.
+- A full, correctness-qualified candidate is measured by a separate fixed
+  evaluator command using the same accelerator device-event protocol as the
+  compiled scoring baseline.  Legacy host `p50_us` is never substituted into
+  the absolute score channel.
+- Candidate objective anchors are self-paired; incumbent safety is measured in
+  a second candidate-versus-deployment-incumbent phase. Cases are regenerated
+  and released between phases and this contract is digest-bound.
+- Every probe has a durable intent before Docker, private bounded raw output,
+  an exact receipt and a digest-bound terminal result. Timeout, fatal markers,
+  invalid output, interruption or a missing completion is `UNKNOWN_OUTCOME`
+  and cannot be replayed.
+- Candidate measurement identity binds the exact qualified execution
+  environment and the worker implementation source SHA-256, rather than only
+  accepting a self-hashed runtime echo.
+- A pre-Docker authorization failure is terminalized as known
+  `LAUNCH_REJECTED`; an interruption after the `LAUNCHING` boundary remains
+  UNKNOWN. The latter preserves the exact active container and fences the
+  shared GPU lock until a separately reviewed recovery exists.
+- Terminal receipt recovery is no-replay, and both History and checkpoint
+  verification bind the operation ID, semantic operation digest and result
+  digest to the scientific report.
+- Every new result carries explicit objective and paired-safety evidence, or a
+  fixed `UNAVAILABLE` reason. A known unqualified probe remains non-scoring.
 - Legacy History is not reinterpreted; missing values remain unavailable.
 - Writer and Console labels say proxy, not official OJ score.
 

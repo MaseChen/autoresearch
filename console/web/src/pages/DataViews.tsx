@@ -41,7 +41,25 @@ export function TasksPage({ snapshot, canWrite = false }: { snapshot: ConsoleSna
 }
 
 export function ExperimentsPage({ snapshot }: { snapshot: ConsoleSnapshot }) {
-  return <section><Title level={2}>实验与 History</Title><Card><GenericTable rows={snapshot.data.experiments} identity="experiment_uid" /></Card></section>
+  return <section><Title level={2}>实验与 History</Title><Card title="XPU-OJ 对齐评分（shadow-only）"><Table
+    size="small"
+    scroll={{ x: true }}
+    rowKey={(row) => String(row.experiment_uid)}
+    dataSource={snapshot.data.experiments}
+    pagination={{ pageSize: 20, hideOnSinglePage: true }}
+    columns={[
+      { title: 'Experiment', dataIndex: 'id' },
+      { title: '状态', dataIndex: 'status', render: (value: string) => <StatusBadge value={value} /> },
+      { title: 'Suite', dataIndex: 'suite' },
+      { title: '候选', dataIndex: 'candidate_hash', render: (value: string) => <Text code copyable>{value}</Text> },
+      { title: 'XPU-OJ proxy 状态', dataIndex: 'xpuoj_proxy_status', render: (value: string, row) => <StatusBadge value={value} reason={String(row.xpuoj_proxy_reason ?? '')} /> },
+      { title: 'TH0 proxy', dataIndex: 'xpuoj_proxy_score', render: (value: unknown) => value == null ? 'UNAVAILABLE' : Number(value).toFixed(4) },
+      { title: '配对 speedup', dataIndex: 'xpuoj_proxy_paired_speedup', render: (value: unknown) => value == null ? 'UNAVAILABLE' : `${Number(value).toFixed(4)}×` },
+      { title: '最坏 case 回退', dataIndex: 'xpuoj_proxy_worst_case_regression', render: (value: unknown) => value == null ? 'UNAVAILABLE' : `${(Number(value) * 100).toFixed(2)}%` },
+      { title: 'Promotion authority', dataIndex: 'xpuoj_proxy_promotion_authority', render: () => 'false' },
+      { title: 'Legacy aggregate', dataIndex: 'aggregate_score', render: (value: unknown) => value == null ? 'UNAVAILABLE' : String(value) },
+    ]}
+  /></Card><Card title="完整 History 身份" className="section-card"><GenericTable rows={snapshot.data.experiments} identity="experiment_uid" /></Card></section>
 }
 
 export function CampaignsPage({ snapshot, canWrite = false }: { snapshot: ConsoleSnapshot; canWrite?: boolean }) {

@@ -24,6 +24,7 @@ from kernel_research.platform.profiles import (
     LEGACY_RESEARCH_NAMESPACE,
 )
 from kernel_research.platform.proposal import CandidateBundle
+from kernel_research.recovery import verify_checkpoint
 
 from test_autorun import (
     FakeEvaluator,
@@ -225,6 +226,24 @@ class ConsoleManualEvaluationTests(unittest.TestCase):
                 [item.identity["stage"] for item in records],
                 ["smoke", "quick", "full_primary", "confirmation"],
             )
+            self.assertEqual(
+                [
+                    item.result["objective_scoring"]["status"]
+                    for item in records
+                ],
+                ["UNAVAILABLE"] * 4,
+            )
+            self.assertEqual(
+                [
+                    item.result["objective_scoring"]["reason"]
+                    for item in records
+                ],
+                ["SCORING_BASELINE_ENVIRONMENT_MISMATCH"] * 4,
+            )
+            for item in records:
+                self.assertFalse(
+                    item.result["objective_scoring"]["promotion_authority"]
+                )
             self.assertTrue(records[-1].promotable)
             self.assertEqual(
                 records[-1].baseline_experiment_uid,
@@ -238,7 +257,46 @@ class ConsoleManualEvaluationTests(unittest.TestCase):
                     "console-manual-evaluation-v1",
                 )
                 self.assertEqual(snapshot["console_operation_id"], operation_id)
+                self.assertEqual(
+                    snapshot["objective_scoring_unavailable_reason"],
+                    "SCORING_BASELINE_ENVIRONMENT_MISMATCH",
+                )
+                self.assertNotIn("objective_scoring_profile", snapshot)
                 self.assertEqual(store.list_proposal_attempts(result["run_id"]), [])
+
+            raw_full = json.loads(
+                (
+                    config.controller_dir
+                    / "runs"
+                    / result["run_id"]
+                    / "results"
+                    / "001"
+                    / "full_primary.validated.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertNotIn("objective_scoring", raw_full)
+
+            checkpoint = controller.checkpoint(result["run_id"])
+            verified = verify_checkpoint(checkpoint["path"])
+            self.assertEqual(verified["run_id"], result["run_id"])
+            checkpoint_history = sqlite3.connect(
+                Path(checkpoint["path"]) / "history.sqlite3"
+            )
+            try:
+                stored_results = [
+                    json.loads(row[0])
+                    for row in checkpoint_history.execute(
+                        "SELECT result_json FROM experiments "
+                        "WHERE candidate_hash = ? ORDER BY id",
+                        (hashlib.sha256(candidate_source.encode("utf-8")).hexdigest(),),
+                    )
+                ]
+            finally:
+                checkpoint_history.close()
+            self.assertEqual(len(stored_results), 4)
+            self.assertTrue(
+                all("objective_scoring" in item for item in stored_results)
+            )
 
             before_replay = list(evaluator.stages)
             with mock.patch.object(controller, "_best", return_value=baseline):

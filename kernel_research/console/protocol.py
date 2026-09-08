@@ -433,6 +433,7 @@ class RuntimeIdentityV1:
     namespace_id: str
     execution_environment_digest: str
     profiler_activation_profile_digest: str
+    scoring_shadow_profile_digest: str
     controller_schema_version: int
     history_schema_version: int
     campaign_schema_version: int
@@ -449,6 +450,7 @@ class RuntimeIdentityV1:
             "namespace_id",
             "execution_environment_digest",
             "profiler_activation_profile_digest",
+            "scoring_shadow_profile_digest",
             "agent_protocol_digest",
         ):
             _digest(getattr(self, name), name)
@@ -472,6 +474,7 @@ class RuntimeIdentityV1:
             "profiler_activation_profile_digest": (
                 self.profiler_activation_profile_digest
             ),
+            "scoring_shadow_profile_digest": self.scoring_shadow_profile_digest,
             "controller_schema_version": self.controller_schema_version,
             "history_schema_version": self.history_schema_version,
             "campaign_schema_version": self.campaign_schema_version,
@@ -486,6 +489,50 @@ class RuntimeIdentityV1:
         value = self.material()
         value["runtime_identity_digest"] = self.digest
         return value
+
+    @classmethod
+    def from_value(cls, value: object) -> "RuntimeIdentityV1":
+        material_fields = frozenset(
+            {
+                "schema_version",
+                "git_commit",
+                "expected_git_commit",
+                "config_digest",
+                "deployment_evidence_digest",
+                "namespace_id",
+                "execution_environment_digest",
+                "profiler_activation_profile_digest",
+                "scoring_shadow_profile_digest",
+                "controller_schema_version",
+                "history_schema_version",
+                "campaign_schema_version",
+                "agent_protocol_digest",
+            }
+        )
+        obj = _strict_object(
+            value,
+            name="runtime identity",
+            required=material_fields | {"runtime_identity_digest"},
+        )
+        if obj["schema_version"] != CONSOLE_PROTOCOL_VERSION or type(
+            obj["schema_version"]
+        ) is not int:
+            raise ValueError("runtime identity schema_version must be 1")
+        identity = cls(
+            **{
+                name: obj[name]
+                for name in material_fields
+                if name != "schema_version"
+            }
+        )
+        if identity.agent_protocol_digest != AGENT_PROTOCOL_DIGEST:
+            raise ValueError("runtime identity agent protocol digest is not trusted")
+        supplied_digest = _digest(
+            obj["runtime_identity_digest"], "runtime_identity_digest"
+        )
+        if supplied_digest != identity.digest:
+            raise ValueError("runtime identity digest does not match its material")
+        return identity
 
 
 @dataclass(frozen=True)
@@ -631,6 +678,20 @@ AGENT_PROTOCOL_DIGEST = canonical_sha256(
         "operation_contracts": (
             "prepare-confirm-reconcile-v1",
             "candidate-bundle-v2",
+        ),
+        "runtime_identity_fields": (
+            "git_commit",
+            "expected_git_commit",
+            "config_digest",
+            "deployment_evidence_digest",
+            "namespace_id",
+            "execution_environment_digest",
+            "profiler_activation_profile_digest",
+            "scoring_shadow_profile_digest",
+            "controller_schema_version",
+            "history_schema_version",
+            "campaign_schema_version",
+            "agent_protocol_digest",
         ),
     }
 )

@@ -17,16 +17,34 @@ export function Dashboard({ snapshot }: { snapshot: ConsoleSnapshot }) {
   ).length
   const option = useMemo(() => ({
     tooltip: {},
+    legend: { data: ['XPU-OJ TH0 proxy (shadow)', 'Legacy aggregate score'] },
     xAxis: { type: 'category', data: data.experiments.slice(0, 12).reverse().map((row) => row.id) },
-    yAxis: { type: 'value', name: 'aggregate score' },
-    series: [{
-      type: 'line',
-      data: data.experiments.slice(0, 12).reverse().map((row) => row.aggregate_score ?? null),
-      symbolSize: 8,
-    }],
+    yAxis: [
+      { type: 'value', name: 'TH0 proxy', position: 'left' },
+      { type: 'value', name: 'Legacy aggregate', position: 'right' },
+    ],
+    series: [
+      {
+        name: 'XPU-OJ TH0 proxy (shadow)',
+        type: 'line',
+        yAxisIndex: 0,
+        data: data.experiments.slice(0, 12).reverse().map((row) => row.xpuoj_proxy_score ?? null),
+        symbolSize: 8,
+      },
+      {
+        name: 'Legacy aggregate score',
+        type: 'line',
+        yAxisIndex: 1,
+        data: data.experiments.slice(0, 12).reverse().map((row) => row.aggregate_score ?? null),
+        symbolSize: 6,
+      },
+    ],
   }), [data.experiments])
   const chartRows = data.experiments.slice(0, 12).reverse().map((row) => ({
     id: row.id,
+    xpuoj_proxy_status: row.xpuoj_proxy_status,
+    xpuoj_proxy_score: row.xpuoj_proxy_score,
+    xpuoj_proxy_reason: row.xpuoj_proxy_reason,
     aggregate_score: row.aggregate_score,
     status: row.status,
   }))
@@ -51,8 +69,9 @@ export function Dashboard({ snapshot }: { snapshot: ConsoleSnapshot }) {
       </Row>
       <Row gutter={[16, 16]}>
         <Col xs={24} xl={15}>
-          <Card title="近期科学评分">
-            <Suspense fallback={<div className="chart" aria-label="正在加载图表" />}><EChart option={option} label="近期实验 aggregate score 折线图" /></Suspense>
+          <Card title="近期科学评分（shadow）">
+            <Alert type="info" showIcon title="XPU-OJ TH0 proxy 仅为当前 MetaX 环境下的影子指标，不是官方 OJ 分数，也没有 promotion authority。" />
+            <Suspense fallback={<div className="chart" aria-label="正在加载图表" />}><EChart option={option} label="近期实验 XPU-OJ TH0 proxy 与 legacy aggregate score 折线图；UNAVAILABLE 点不按零值绘制" /></Suspense>
             <details className="chart-data">
               <summary>查看图表数据表</summary>
               <Table
@@ -62,6 +81,9 @@ export function Dashboard({ snapshot }: { snapshot: ConsoleSnapshot }) {
                 pagination={false}
                 columns={[
                   { title: 'Experiment ID', dataIndex: 'id' },
+                  { title: 'XPU-OJ proxy status', dataIndex: 'xpuoj_proxy_status', render: (value: string) => <StatusBadge value={value} /> },
+                  { title: 'XPU-OJ proxy', dataIndex: 'xpuoj_proxy_score', render: (value: unknown) => value == null ? 'UNAVAILABLE' : Number(value).toFixed(4) },
+                  { title: 'reason', dataIndex: 'xpuoj_proxy_reason', render: (value: unknown) => value == null ? '—' : String(value) },
                   { title: 'aggregate score', dataIndex: 'aggregate_score', render: (value: unknown) => value == null ? 'UNAVAILABLE' : String(value) },
                   { title: 'status', dataIndex: 'status', render: (value: string) => <StatusBadge value={value} /> },
                 ]}
@@ -75,6 +97,7 @@ export function Dashboard({ snapshot }: { snapshot: ConsoleSnapshot }) {
               <Descriptions.Item label="Git"><Text code copyable>{snapshot.runtime_identity.git_commit}</Text></Descriptions.Item>
               <Descriptions.Item label="Namespace"><Text code copyable>{snapshot.runtime_identity.namespace_id}</Text></Descriptions.Item>
               <Descriptions.Item label="Environment"><Text code copyable>{snapshot.runtime_identity.execution_environment_digest}</Text></Descriptions.Item>
+              <Descriptions.Item label="Scoring shadow"><Text code copyable>{snapshot.runtime_identity.scoring_shadow_profile_digest}</Text></Descriptions.Item>
               <Descriptions.Item label="Agent"><Text code copyable>{snapshot.runtime_identity.agent_protocol_digest}</Text></Descriptions.Item>
             </Descriptions>
           </Card>

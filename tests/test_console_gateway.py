@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 from kernel_research.console.config import GatewayConfig
 from kernel_research.console import gateway_cli
+from kernel_research.console.protocol import AGENT_PROTOCOL_DIGEST, RuntimeIdentityV1
 from kernel_research.console.transport import SSHAgentTransport
 
 _FASTAPI_AVAILABLE = importlib.util.find_spec("fastapi") is not None
@@ -40,25 +41,25 @@ else:
     create_app = None
 
 
-def _snapshot() -> dict[str, object]:
+def _snapshot(*, commit: str = "a" * 40) -> dict[str, object]:
+    identity = RuntimeIdentityV1(
+        git_commit=commit,
+        expected_git_commit=commit,
+        config_digest="sha256:" + "1" * 64,
+        deployment_evidence_digest="sha256:" + "2" * 64,
+        namespace_id="sha256:" + "3" * 64,
+        execution_environment_digest="sha256:" + "4" * 64,
+        profiler_activation_profile_digest="sha256:" + "5" * 64,
+        scoring_shadow_profile_digest="sha256:" + "6" * 64,
+        controller_schema_version=3,
+        history_schema_version=3,
+        campaign_schema_version=1,
+        agent_protocol_digest=AGENT_PROTOCOL_DIGEST,
+    )
     return {
         "schema_version": 1,
         "status": "STABLE",
-        "runtime_identity": {
-            "schema_version": 1,
-            "git_commit": "a" * 40,
-            "expected_git_commit": "a" * 40,
-            "config_digest": "sha256:" + "1" * 64,
-            "deployment_evidence_digest": "sha256:" + "2" * 64,
-            "namespace_id": "sha256:" + "3" * 64,
-            "execution_environment_digest": "sha256:" + "4" * 64,
-            "profiler_activation_profile_digest": "sha256:" + "5" * 64,
-            "controller_schema_version": 3,
-            "history_schema_version": 3,
-            "campaign_schema_version": 1,
-            "agent_protocol_digest": "sha256:" + "6" * 64,
-            "runtime_identity_digest": "sha256:" + "7" * 64,
-        },
+        "runtime_identity": identity.to_dict(),
         "cursor": {"controller_event_id": 1},
         "observed_at": "2026-08-24T00:00:00Z",
         "source_digests": {},
@@ -340,9 +341,7 @@ class ConsoleConfigAndTransportTests(unittest.TestCase):
         transport = _FakeTransport()
         cache = SnapshotCache(transport, ttl_seconds=0)
         self.assertEqual(cache.get()["status"], "STABLE")
-        changed = _snapshot()
-        changed["runtime_identity"] = dict(changed["runtime_identity"])
-        changed["runtime_identity"]["runtime_identity_digest"] = "sha256:" + "9" * 64
+        changed = _snapshot(commit="b" * 40)
 
         def changed_call(operation: str, payload: dict[str, object]) -> dict[str, object]:
             del operation, payload
@@ -351,6 +350,25 @@ class ConsoleConfigAndTransportTests(unittest.TestCase):
         transport.call = changed_call  # type: ignore[method-assign]
         with self.assertRaisesRegex(RuntimeError, "restart handshake"):
             cache.get(force=True)
+
+    @unittest.skipUnless(_FASTAPI_AVAILABLE, _CONSOLE_EXTRA_REQUIRED)
+    def test_snapshot_cache_rejects_tampered_identity_and_protocol(self) -> None:
+        from kernel_research.console.gateway import SnapshotCache
+
+        for field, value in (
+            ("runtime_identity_digest", "sha256:" + "9" * 64),
+            ("agent_protocol_digest", "sha256:" + "8" * 64),
+        ):
+            with self.subTest(field=field):
+                snapshot = _snapshot()
+                snapshot["runtime_identity"] = dict(snapshot["runtime_identity"])
+                snapshot["runtime_identity"][field] = value
+                transport = _FakeTransport()
+                transport.call = lambda operation, payload, snapshot=snapshot: {  # type: ignore[method-assign]
+                    "snapshot": snapshot
+                }
+                with self.assertRaisesRegex(RuntimeError, "identity is invalid"):
+                    SnapshotCache(transport, ttl_seconds=0).get(force=True)
 
 
 @unittest.skipUnless(_FASTAPI_AVAILABLE, _CONSOLE_EXTRA_REQUIRED)
@@ -424,7 +442,7 @@ class ConsoleGatewayTests(unittest.TestCase):
         body = {
             "schema_version": 1,
             "operation_id": operation_id,
-            "runtime_identity_digest": "sha256:" + "7" * 64,
+            "runtime_identity_digest": _snapshot()["runtime_identity"]["runtime_identity_digest"],
             "parameters": {"profile": "pro", "proposal_only": False},
         }
         self.assertEqual(self.client.post(url, json=body).status_code, 403)
@@ -552,7 +570,7 @@ class ConsoleGatewayTests(unittest.TestCase):
                 json={
                     "schema_version": 1,
                     "operation_id": str(uuid.uuid4()),
-                    "runtime_identity_digest": "sha256:" + "7" * 64,
+                    "runtime_identity_digest": _snapshot()["runtime_identity"]["runtime_identity_digest"],
                     "parameters": {"profile": "pro", "proposal_only": False},
                 },
                 headers=self._mutation_headers(csrf),
@@ -671,9 +689,7 @@ class ConsoleSharedSseTests(unittest.IsolatedAsyncioTestCase):
         cache = mock.MagicMock()
         broker = SnapshotEventBroker(cache, poll_interval_ms=1000)
         broker._verify_runtime_identity(_snapshot())
-        changed = _snapshot()
-        changed["runtime_identity"] = dict(changed["runtime_identity"])
-        changed["runtime_identity"]["runtime_identity_digest"] = "sha256:" + "9" * 64
+        changed = _snapshot(commit="b" * 40)
         with self.assertRaisesRegex(RuntimeError, "identity changed"):
             broker._verify_runtime_identity(changed)
         self.assertEqual(broker._last_snapshot_event, "")

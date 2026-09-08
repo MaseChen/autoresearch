@@ -33,6 +33,7 @@ from ..evaluation import (
 )
 from ..history import ExperimentRecord, HistoryStore
 from ..noise import SQLITE_MAX_INT, trusted_noise_baseline_source
+from ..objective_scoring import XPUOJ_TH0_PROXY_PROTOCOL_ID
 from ..compiled_reference import scoring_reference_source_sha256
 from ..device_timing import device_event_protocol_snapshot
 from ..scoring_qualification import (
@@ -42,6 +43,16 @@ from ..scoring_qualification import (
 )
 from ..scoring_measurement import (
     scoring_baseline_measurement_contract_snapshot,
+)
+from ..scoring_candidate_measurement import (
+    SCORING_CANDIDATE_WORKER_REVISION,
+    scoring_candidate_measurement_contract_snapshot,
+)
+from ..scoring_shadow import (
+    project_scoring_shadow_report,
+    require_scoring_shadow_profile,
+    scoring_shadow_profile_snapshot,
+    unavailable_scoring_shadow_report,
 )
 from ..platform.artifacts import ArtifactId
 from ..platform.canonical import (
@@ -83,6 +94,7 @@ from .runtime import (
     evaluator_doctor_argv,
     parse_json_output,
     scoring_baseline_probe_argv,
+    scoring_candidate_probe_argv,
 )
 from .states import RunStatus, Stage, TERMINAL_RUN_STATUSES
 from .store import ControllerStore
@@ -554,6 +566,148 @@ class DockerEvaluator:
             }
         return {**payload, "container_exit_code": command.returncode}
 
+    def scoring_candidate_probe(
+        self,
+        *,
+        operation_id: str,
+        result_dir: Path,
+        candidate_path: Path,
+        incumbent_path: Path,
+        candidate_hash: str,
+        incumbent_hash: str,
+        scoring_profile: Mapping[str, object],
+    ) -> dict[str, Any]:
+        """Run one fixed shadow candidate probe and retain bounded diagnostics."""
+
+        profile = require_scoring_shadow_profile(scoring_profile)
+        contract = scoring_candidate_measurement_contract_snapshot()
+        cache_identity = canonical_sha256(
+            {
+                "candidate_hash": candidate_hash,
+                "incumbent_hash": incumbent_hash,
+                "scoring_profile_digest": profile["digest"],
+                "measurement_contract_digest": contract["digest"],
+            }
+        ).removeprefix("sha256:")
+        cache_dir = self._cache_dir(
+            candidate_hash=cache_identity,
+            purpose="xpuoj-scoring-candidate",
+        )
+        timeout = float(self.config.evaluator_timeout_sec)
+        if self.before_container_start is not None:
+            self.before_container_start(operation_id, "scoring-candidate", timeout)
+        name = f"kar-score-candidate-{operation_id[-12:]}"
+        command = self.runner.run(
+            scoring_candidate_probe_argv(
+                self.config,
+                name=name,
+                run_id=operation_id,
+                cache_dir=cache_dir,
+                candidate_path=candidate_path,
+                incumbent_path=incumbent_path,
+                candidate_hash=candidate_hash,
+                incumbent_hash=incumbent_hash,
+                scoring_profile_digest=str(profile["digest"]),
+                measurement_contract_digest=str(contract["digest"]),
+            ),
+            input_text=None,
+            timeout_sec=timeout,
+            max_output_bytes=EVALUATOR_OUTPUT_LIMIT_BYTES,
+            container_name=name,
+            docker_binary=self.config.docker_binary,
+        )
+        result_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(
+            result_dir / "candidate-probe.stdout.json",
+            command.stdout.encode("utf-8"),
+        )
+        _atomic_write_bytes(
+            result_dir / "candidate-probe.stderr.txt",
+            command.stderr.encode("utf-8"),
+        )
+        combined = (command.stdout + "\n" + command.stderr).lower()
+        if command.timed_out:
+            return {
+                "status": "UNKNOWN_OUTCOME",
+                "error": "scoring candidate evaluator timed out",
+                "container_exit_code": command.returncode,
+            }
+        if command.output_limited:
+            return {
+                "status": "UNKNOWN_OUTCOME",
+                "error": "scoring candidate evaluator output exceeded limit",
+                "container_exit_code": command.returncode,
+            }
+        if command.returncode in {137, -9} or any(
+            marker in combined for marker in FATAL_GPU_MARKERS
+        ):
+            return {
+                "status": "UNKNOWN_OUTCOME",
+                "error": "scoring candidate evaluator had an untrusted GPU termination",
+                "container_exit_code": command.returncode,
+            }
+        try:
+            payload = parse_json_output(command.stdout)
+        except ValueError as exc:
+            return {
+                "status": "UNKNOWN_OUTCOME",
+                "error": f"scoring candidate evaluator produced invalid output: {exc}",
+                "container_exit_code": command.returncode,
+            }
+        expected = {
+            "schema_version": 1,
+            "command": "score-candidate-probe",
+            "protocol_id": XPUOJ_TH0_PROXY_PROTOCOL_ID,
+            "worker_revision": SCORING_CANDIDATE_WORKER_REVISION,
+            "scoring_framework_git_commit": self.config.expected_git_commit,
+            "scoring_profile_digest": profile["digest"],
+            "candidate_hash": candidate_hash,
+            "incumbent_hash": incumbent_hash,
+            "measurement_contract": contract,
+            "timing_protocol": device_event_protocol_snapshot(),
+        }
+        if any(payload.get(key) != value for key, value in expected.items()):
+            return {
+                "status": "UNKNOWN_OUTCOME",
+                "error": "scoring candidate evaluator identity echo mismatch",
+                "container_exit_code": command.returncode,
+            }
+        status = payload.get("status")
+        gpu_state = payload.get("gpu_state")
+        completion_trusted = payload.get("completion_trusted")
+        trusted_exit = (
+            status == "QUALIFIED"
+            and command.returncode == 0
+            and gpu_state == "COMPLETED"
+            and completion_trusted is True
+        ) or (
+            status == "UNQUALIFIED"
+            and command.returncode == 2
+            and gpu_state in {"NOT_STARTED", "COMPLETED"}
+            and completion_trusted is True
+        ) or (
+            status == "UNKNOWN_OUTCOME"
+            and command.returncode == 3
+            and gpu_state == "STARTED"
+            and completion_trusted is False
+        )
+        if not trusted_exit:
+            return {
+                "status": "UNKNOWN_OUTCOME",
+                "error": "scoring candidate evaluator status/exit mismatch",
+                "container_exit_code": command.returncode,
+            }
+        if status == "UNKNOWN_OUTCOME":
+            return {
+                **payload,
+                "error": str(
+                    payload.get("error")
+                    or "candidate worker reported an untrusted in-flight outcome"
+                ),
+                "container_exit_code": command.returncode,
+            }
+        return {**payload, "container_exit_code": command.returncode}
+
     def evaluate(
         self,
         *,
@@ -691,6 +845,33 @@ def gpu_lock(path: Path) -> Iterator[None]:
             raise ControlledRuntimeError(
                 "GPU1 controller lock is already held"
             ) from exc
+        runs_root = path.parent / "runs"
+        if runs_root.exists():
+            if runs_root.is_symlink() or not runs_root.is_dir():
+                raise ControllerDataIntegrityError(
+                    "Controller runs root is invalid before GPU lock admission"
+                )
+            for state_path in sorted(
+                runs_root.glob("*/results/*/*.scoring-shadow/state.json")
+            ):
+                if state_path.is_symlink() or not state_path.is_file():
+                    raise ControllerDataIntegrityError(
+                        "scoring candidate state path is invalid before GPU admission"
+                    )
+                try:
+                    state = _strict_json_object_bytes(
+                        state_path.read_bytes(),
+                        label="scoring candidate GPU fence",
+                        max_bytes=EVALUATOR_OUTPUT_LIMIT_BYTES,
+                    )
+                except (OSError, ValueError) as exc:
+                    raise ControllerDataIntegrityError(
+                        f"scoring candidate GPU fence cannot be verified: {exc}"
+                    ) from exc
+                if state.get("status") in {"LAUNCHING", "UNKNOWN_OUTCOME"}:
+                    raise ControlledRuntimeError(
+                        "GPU1 is fenced by an unresolved scoring candidate outcome"
+                    )
         os.ftruncate(descriptor, 0)
         os.write(descriptor, f"{os.getpid()}\n".encode("ascii"))
         yield
@@ -1035,6 +1216,7 @@ class ResearchController:
         self._preflight_run_overrides: dict[str, Mapping[str, Any]] = {}
         self._campaign_resume_doctor_overrides: dict[str, dict[str, Any]] = {}
         self._scoring_baseline_context: dict[str, Any] | None = None
+        self._scoring_candidate_context: dict[str, Any] | None = None
         self.evaluator = evaluator or DockerEvaluator(
             config,
             controller_dir=config.controller_dir,
@@ -1186,6 +1368,13 @@ class ResearchController:
         if action == "scoring-baseline":
             self._authorize_scoring_baseline_probe(
                 scoring_context,
+                operation_id=run_id,
+                configured_timeout=configured_timeout,
+            )
+            return
+        if action == "scoring-candidate":
+            self._authorize_scoring_candidate_probe(
+                self._scoring_candidate_context,
                 operation_id=run_id,
                 configured_timeout=configured_timeout,
             )
@@ -1923,7 +2112,38 @@ class ResearchController:
             if status == SCORING_ABANDONED_UNKNOWN_STATUS:
                 self._verify_scoring_oom_abandonment(operation)
 
+    def _assert_no_unresolved_scoring_candidates(self) -> None:
+        """Fence GPU work while any candidate score lacks trusted completion."""
+
+        runs_root = self.config.controller_dir / "runs"
+        if not runs_root.exists():
+            return
+        if runs_root.is_symlink() or not runs_root.is_dir():
+            raise ControllerDataIntegrityError("Controller runs root is invalid")
+        for state_path in sorted(
+            runs_root.glob("*/results/*/*.scoring-shadow/state.json")
+        ):
+            if state_path.is_symlink() or not state_path.is_file():
+                raise ControllerDataIntegrityError(
+                    "scoring candidate state path is invalid"
+                )
+            try:
+                state = _strict_json_object_bytes(
+                    state_path.read_bytes(),
+                    label="scoring candidate state",
+                    max_bytes=EVALUATOR_OUTPUT_LIMIT_BYTES,
+                )
+            except (OSError, ValueError) as exc:
+                raise ControllerDataIntegrityError(
+                    f"scoring candidate state cannot be verified: {exc}"
+                ) from exc
+            if state.get("status") in {"LAUNCHING", "UNKNOWN_OUTCOME"}:
+                raise ControlledRuntimeError(
+                    "a scoring candidate probe has an unresolved GPU outcome"
+                )
+
     def _assert_scoring_host_idle(self) -> None:
+        self._assert_no_unresolved_scoring_candidates()
         self._assert_noise_resource_available()
         with ControllerStore(self.controller_db) as store:
             running = store.connection.execute(
@@ -2455,7 +2675,7 @@ class ResearchController:
         configured_timeout: float,
     ) -> None:
         if (
-            context is None
+            not isinstance(context, dict)
             or context.get("operation_id") != operation_id
             or context.get("status") != "RUNNING"
             or type(context.get("probe_index")) is not int
@@ -2485,6 +2705,94 @@ class ResearchController:
             )
         self._assert_scoring_host_idle()
         self._verify_repository()
+
+    def _authorize_scoring_candidate_probe(
+        self,
+        context: Mapping[str, Any] | None,
+        *,
+        operation_id: str,
+        configured_timeout: float,
+    ) -> None:
+        """Re-prove a per-evaluation shadow intent immediately before Docker."""
+
+        if (
+            context is None
+            or context.get("operation_id") != operation_id
+            or context.get("status") != "PREPARING"
+            or context.get("launch_started") is not False
+            or configured_timeout != float(self.config.evaluator_timeout_sec)
+        ):
+            raise ControllerDataIntegrityError(
+                "scoring candidate Docker launch has no exact active intent"
+            )
+        state_path = Path(str(context.get("state_path", "")))
+        candidate_path = Path(str(context.get("candidate_path", "")))
+        incumbent_path = Path(str(context.get("incumbent_path", "")))
+        try:
+            state = _strict_json_object_bytes(
+                state_path.read_bytes(),
+                label="scoring candidate intent",
+                max_bytes=EVALUATOR_OUTPUT_LIMIT_BYTES,
+            )
+        except (OSError, ValueError) as exc:
+            raise ControllerDataIntegrityError(
+                f"scoring candidate intent cannot be re-read: {exc}"
+            ) from exc
+        if (
+            state.get("status") != "PREPARING"
+            or state.get("operation_id") != operation_id
+            or state != context.get("state")
+            or _sha256_file(candidate_path) != context.get("candidate_hash")
+            or _sha256_file(incumbent_path) != context.get("incumbent_hash")
+        ):
+            raise ControllerDataIntegrityError(
+                "scoring candidate durable intent changed before Docker"
+            )
+        with ControllerStore(self.controller_db) as store:
+            run = store.get_run(str(context["run_id"]))
+            attempt = store.get_evaluation_attempt_by_uid(
+                str(context["experiment_uid"])
+            )
+        if (
+            run.get("status") != RunStatus.RUNNING.value
+            or bool(run.get("stop_requested"))
+            or attempt is None
+            or attempt.get("status") != "RUNNING"
+            or attempt.get("stage") != context.get("stage")
+        ):
+            raise ControllerDataIntegrityError(
+                "scoring candidate Run or evaluation attempt is no longer active"
+            )
+        self._assert_no_unresolved_scoring_baseline()
+        self._assert_no_unresolved_scoring_candidates()
+        self._authorize_external_action(
+            str(context["run_id"]),
+            action="evaluator",
+            configured_timeout=configured_timeout,
+            run_override=run,
+        )
+        self._verify_repository(
+            allowed_best_hashes={str(context["incumbent_hash"])}
+        )
+        launching = {**state, "status": "LAUNCHING"}
+        _atomic_write_bytes(
+            state_path,
+            (canonical_json_text(launching) + "\n").encode("utf-8"),
+        )
+        with ControllerStore(self.controller_db) as store:
+            store.update_iteration_with_event(
+                int(context["iteration_id"]),
+                "SCORING_CANDIDATE_LAUNCHING",
+                {
+                    "operation_id": operation_id,
+                    "container": str(context["container_name"]),
+                    "experiment_uid": str(context["experiment_uid"]),
+                },
+                active_container=str(context["container_name"]),
+            )
+        context["status"] = "LAUNCHING"
+        context["state"] = launching
+        context["launch_started"] = True
 
     def qualify_scoring_baseline(self) -> dict[str, Any]:
         """Run ten private, non-promotable scoring-baseline probes."""
@@ -3072,6 +3380,8 @@ class ResearchController:
     ) -> None:
         """Fail before launch unless the full trusted timeout still fits."""
 
+        if action == "evaluator":
+            self._assert_no_unresolved_scoring_candidates()
         timeout = self._selected_action_timeout(action, configured_timeout)
         if timeout is None:
             return
@@ -3652,6 +3962,20 @@ class ResearchController:
             },
             "runtime_binding": self.config.redacted_dict(),
         }
+        if namespace == CURRENT_RESEARCH_NAMESPACE and comparable:
+            scoring_profile = scoring_shadow_profile_snapshot()
+            scoring_baseline = scoring_profile["scoring_baseline"]
+            if (
+                scoring_baseline["environment_digest"]
+                == runtime_environment.digest
+                and scoring_baseline["evaluator_profile_digest"]
+                == namespace.evaluator.digest
+            ):
+                snapshot["objective_scoring_profile"] = scoring_profile
+            else:
+                snapshot["objective_scoring_unavailable_reason"] = (
+                    "SCORING_BASELINE_ENVIRONMENT_MISMATCH"
+                )
         if not comparable:
             snapshot["compatibility_mode"] = "LEGACY_V1_EVIDENCE"
         return {**snapshot, "snapshot_digest": canonical_sha256(snapshot)}
@@ -3772,6 +4096,48 @@ class ResearchController:
                 raise ControllerDataIntegrityError(
                     "legacy run has an unknown compatibility mode"
                 )
+        scoring_profile = snapshot.get("objective_scoring_profile")
+        scoring_unavailable_reason = snapshot.get(
+            "objective_scoring_unavailable_reason"
+        )
+        if scoring_profile is not None and scoring_unavailable_reason is not None:
+            raise ControllerDataIntegrityError(
+                "run cannot freeze both scoring profile and unavailable reason"
+            )
+        if scoring_profile is not None:
+            if (
+                namespace != CURRENT_RESEARCH_NAMESPACE
+                or not comparable
+                or not isinstance(scoring_profile, Mapping)
+            ):
+                raise ControllerDataIntegrityError(
+                    "scoring shadow profile requires a comparable CURRENT run"
+                )
+            try:
+                validated_scoring = require_scoring_shadow_profile(
+                    scoring_profile
+                )
+                scoring_environment = validated_scoring[
+                    "scoring_baseline"
+                ]["environment_digest"]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ControllerDataIntegrityError(
+                    f"run scoring shadow profile is invalid: {exc}"
+                ) from exc
+            if scoring_environment != actual_environment.digest:
+                raise ControllerDataIntegrityError(
+                    "scoring baseline environment differs from the run"
+                )
+        elif scoring_unavailable_reason is not None:
+            if (
+                namespace != CURRENT_RESEARCH_NAMESPACE
+                or not comparable
+                or scoring_unavailable_reason
+                != "SCORING_BASELINE_ENVIRONMENT_MISMATCH"
+            ):
+                raise ControllerDataIntegrityError(
+                    "run scoring shadow unavailable reason is invalid"
+                )
         if snapshot.get("history_cutoff") != run.get("history_cutoff"):
             raise ControllerDataIntegrityError(
                 "run History cutoff differs from its workflow snapshot"
@@ -3855,6 +4221,553 @@ class ResearchController:
         raise ControllerDataIntegrityError(
             "run is missing its frozen proposer profile"
         )
+
+    def _scoring_shadow_for_result(
+        self,
+        *,
+        run: Mapping[str, Any],
+        baseline: ExperimentRecord,
+        result: Mapping[str, Any],
+        suite: str,
+        candidate_operation: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Derive one shadow report from frozen run and evaluator evidence."""
+
+        snapshot = run.get("workflow_snapshot")
+        snapshot = snapshot if isinstance(snapshot, Mapping) else {}
+        profile = snapshot.get("objective_scoring_profile")
+        candidate_hash_value = result.get("candidate_hash")
+        candidate_hash = (
+            candidate_hash_value
+            if isinstance(candidate_hash_value, str)
+            else None
+        )
+        if not isinstance(profile, Mapping):
+            reason = (
+                "NON_CURRENT_NAMESPACE"
+                if self._run_namespace(run) != CURRENT_RESEARCH_NAMESPACE
+                else str(
+                    snapshot.get(
+                        "objective_scoring_unavailable_reason",
+                        "PROFILE_NOT_FROZEN",
+                    )
+                )
+            )
+            return unavailable_scoring_shadow_report(
+                reason=reason,
+                profile=None,
+                candidate_hash=candidate_hash,
+                incumbent_history_experiment_id=baseline.id,
+                incumbent_candidate_hash=baseline.candidate_hash,
+            )
+        candidate_measurement = None
+        operation_kwargs: dict[str, object] = {}
+        if candidate_operation is not None:
+            result_value = candidate_operation.get("result")
+            if (
+                candidate_operation.get("status") in {"QUALIFIED", "UNQUALIFIED"}
+                and isinstance(result_value, Mapping)
+            ):
+                candidate_measurement = result_value
+            operation_kwargs = {
+                "candidate_operation_id": candidate_operation.get("operation_id"),
+                "candidate_operation_digest": candidate_operation.get(
+                    "operation_digest"
+                ),
+                "candidate_operation_result_digest": candidate_operation.get(
+                    "result_digest"
+                ),
+                "candidate_operation_status": candidate_operation.get("status"),
+            }
+        try:
+            return project_scoring_shadow_report(
+                result,
+                suite=suite,
+                profile=profile,
+                incumbent_history_experiment_id=baseline.id,
+                incumbent_candidate_hash=baseline.candidate_hash,
+                candidate_measurement=candidate_measurement,
+                candidate_framework_git_commit=(
+                    self._scoring_candidate_framework_commit(run)
+                ),
+                **operation_kwargs,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ControllerDataIntegrityError(
+                f"trusted evaluator evidence cannot produce scoring shadow: {exc}"
+            ) from exc
+
+    @staticmethod
+    def _scoring_candidate_framework_commit(
+        run: Mapping[str, Any],
+    ) -> str:
+        snapshot = run.get("workflow_snapshot")
+        runtime = (
+            snapshot.get("runtime_binding")
+            if isinstance(snapshot, Mapping)
+            else None
+        )
+        commit = (
+            runtime.get("expected_git_commit")
+            if isinstance(runtime, Mapping)
+            else None
+        )
+        if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+            raise ControllerDataIntegrityError(
+                "scoring candidate framework commit is not frozen in the Run"
+            )
+        return commit
+
+    def _run_scoring_candidate_shadow(
+        self,
+        *,
+        run: Mapping[str, Any],
+        baseline: ExperimentRecord,
+        identity: ExperimentIdentity,
+        iteration: Mapping[str, Any],
+        candidate_path: Path,
+        raw: Mapping[str, Any],
+        suite: str,
+    ) -> Mapping[str, object] | None:
+        """Run or reconcile one no-replay, shadow-only candidate measurement."""
+
+        snapshot = run.get("workflow_snapshot")
+        profile = (
+            snapshot.get("objective_scoring_profile")
+            if isinstance(snapshot, Mapping)
+            else None
+        )
+        if not isinstance(profile, Mapping):
+            return None
+        preliminary = self._scoring_shadow_for_result(
+            run=run,
+            baseline=baseline,
+            result=raw,
+            suite=suite,
+        )
+        if preliminary.get("reason") != "CANDIDATE_MEASUREMENT_NOT_COLLECTED":
+            return None
+        if not isinstance(self.evaluator, DockerEvaluator):
+            raise ControlledRuntimeError(
+                "scoring candidate measurement requires DockerEvaluator"
+            )
+        candidate_hash = str(iteration["candidate_hash"])
+        framework_commit = self._scoring_candidate_framework_commit(run)
+        self._prepare_framework_snapshot(framework_commit)
+        contract = scoring_candidate_measurement_contract_snapshot()
+        material: dict[str, object] = {
+            "schema_version": 1,
+            "operation": "score-candidate-shadow",
+            "run_id": str(run["id"]),
+            "iteration_id": int(iteration["id"]),
+            "iteration_index": int(iteration["iteration_index"]),
+            "experiment_uid": identity.experiment_uid,
+            "stage": identity.stage,
+            "candidate_hash": candidate_hash,
+            "incumbent_history_experiment_id": baseline.id,
+            "incumbent_hash": baseline.candidate_hash,
+            "scoring_framework_git_commit": framework_commit,
+            "scoring_profile_digest": profile["digest"],
+            "measurement_contract_digest": contract["digest"],
+            "evaluator_image": self.config.evaluator_image,
+        }
+        operation_digest = canonical_sha256(material)
+        operation_id = (
+            "score-candidate-" + operation_digest.removeprefix("sha256:")[:24]
+        )
+        container_name = f"kar-score-candidate-{operation_id[-12:]}"
+        material["container_name"] = container_name
+        operation_dir = (
+            self.config.controller_dir
+            / "runs"
+            / str(run["id"])
+            / "results"
+            / f"{int(iteration['iteration_index']):03d}"
+            / f"{identity.stage}.scoring-shadow"
+        )
+        intent = {
+            **material,
+            "operation_id": operation_id,
+            "operation_digest": operation_digest,
+            "status": "INTENT",
+        }
+        state_path = operation_dir / "state.json"
+        final_path = operation_dir / "final.json"
+
+        expected_prefix = {
+            **material,
+            "operation_id": operation_id,
+            "operation_digest": operation_digest,
+        }
+
+        def validate_envelope(value: Mapping[str, Any]) -> dict[str, Any]:
+            result = value.get("result")
+            status = value.get("status")
+            if (
+                set(value)
+                != set(expected_prefix) | {"status", "result_digest", "result"}
+                or any(value.get(key) != item for key, item in expected_prefix.items())
+                or status
+                not in {
+                    "QUALIFIED",
+                    "UNQUALIFIED",
+                    "LAUNCH_REJECTED",
+                    "UNKNOWN_OUTCOME",
+                }
+                or not isinstance(result, Mapping)
+                or value.get("result_digest") != canonical_sha256(result)
+                or result.get("status") != status
+            ):
+                raise ControllerDataIntegrityError(
+                    "scoring candidate operation envelope is invalid"
+                )
+            return dict(value)
+
+        def envelope(result: Mapping[str, Any]) -> dict[str, Any]:
+            status = result.get("status")
+            return validate_envelope(
+                {
+                    **expected_prefix,
+                    "status": status,
+                    "result_digest": canonical_sha256(result),
+                    "result": dict(result),
+                }
+            )
+
+        def persist_envelope(value: Mapping[str, Any]) -> None:
+            encoded = (canonical_json_text(value) + "\n").encode("utf-8")
+            # Receipt is the first durable trusted-completion boundary.  A
+            # restart can reconstruct final/state from it without GPU replay.
+            _atomic_write_bytes(operation_dir / "receipt.json", encoded)
+            _atomic_write_bytes(final_path, encoded)
+            _atomic_write_bytes(state_path, encoded)
+
+        def reconcile_envelope() -> dict[str, Any] | None:
+            receipt_path = operation_dir / "receipt.json"
+            if not receipt_path.exists() and not receipt_path.is_symlink():
+                return None
+            receipt = validate_envelope(
+                self._read_scoring_evidence(
+                    receipt_path, label="scoring candidate receipt"
+                )
+            )
+            if final_path.exists() or final_path.is_symlink():
+                final = validate_envelope(
+                    self._read_scoring_evidence(
+                        final_path, label="scoring candidate final"
+                    )
+                )
+                if final != receipt:
+                    raise ControllerDataIntegrityError(
+                        "scoring candidate receipt and final differ"
+                    )
+            else:
+                _atomic_write_bytes(
+                    final_path,
+                    (canonical_json_text(receipt) + "\n").encode("utf-8"),
+                )
+            # State is mutable recovery metadata; once receipt/final agree,
+            # repair it from the immutable terminal envelope.
+            _atomic_write_bytes(
+                state_path,
+                (canonical_json_text(receipt) + "\n").encode("utf-8"),
+            )
+            return receipt
+
+        if operation_dir.exists():
+            if operation_dir.is_symlink() or not operation_dir.is_dir():
+                raise ControllerDataIntegrityError(
+                    "scoring candidate operation directory is invalid"
+                )
+            persisted_intent = self._read_scoring_evidence(
+                operation_dir / "intent.json",
+                label="scoring candidate intent",
+            )
+            if persisted_intent != intent:
+                raise ControllerDataIntegrityError(
+                    "scoring candidate intent identity changed"
+                )
+            reconciled = reconcile_envelope()
+            if reconciled is not None:
+                if reconciled["status"] == "UNKNOWN_OUTCOME":
+                    raise UnknownGPUOutcome(
+                        str(reconciled["result"].get("error") or "unresolved")
+                    )
+                return reconciled
+            state = self._read_scoring_evidence(
+                state_path, label="scoring candidate state"
+            )
+            if state.get("status") == "PREPARING":
+                rejected = envelope(
+                    {
+                        "status": "LAUNCH_REJECTED",
+                        "gpu_state": "NOT_STARTED",
+                        "completion_trusted": True,
+                        "phase": "controller-recovery-before-launch",
+                        "error": "controller restarted before Docker authorization",
+                    }
+                )
+                persist_envelope(rejected)
+                return rejected
+            unknown = envelope(
+                {
+                    "status": "UNKNOWN_OUTCOME",
+                    "gpu_state": "STARTED",
+                    "completion_trusted": False,
+                    "phase": "controller-recovery-after-launch-boundary",
+                    "error": "controller restarted without trusted candidate completion",
+                }
+            )
+            persist_envelope(unknown)
+            raise UnknownGPUOutcome(
+                "candidate shadow measurement has an unresolved GPU outcome"
+            )
+        operation_dir.mkdir(parents=True, mode=0o700)
+        _atomic_write_bytes(
+            operation_dir / "intent.json",
+            (canonical_json_text(intent) + "\n").encode("utf-8"),
+        )
+        preparing = {
+            **material,
+            "operation_id": operation_id,
+            "operation_digest": operation_digest,
+            "status": "PREPARING",
+        }
+        _atomic_write_bytes(
+            state_path, (canonical_json_text(preparing) + "\n").encode("utf-8")
+        )
+        incumbent_path = self._experiment_source_path(baseline)
+        self._scoring_candidate_context = {
+            **preparing,
+            "state_path": str(state_path),
+            "state": preparing,
+            "candidate_path": str(candidate_path),
+            "incumbent_path": str(incumbent_path),
+            "launch_started": False,
+        }
+        launch_started = False
+        try:
+            result = self.evaluator.scoring_candidate_probe(
+                operation_id=operation_id,
+                result_dir=operation_dir,
+                candidate_path=candidate_path,
+                incumbent_path=incumbent_path,
+                candidate_hash=candidate_hash,
+                incumbent_hash=baseline.candidate_hash,
+                scoring_profile=profile,
+            )
+            launch_started = bool(
+                self._scoring_candidate_context.get("launch_started")
+            )
+        except BaseException as exc:
+            launched = bool(self._scoring_candidate_context.get("launch_started"))
+            status = "UNKNOWN_OUTCOME" if launched else "LAUNCH_REJECTED"
+            failure = envelope(
+                {
+                    "status": status,
+                    "gpu_state": "STARTED" if launched else "NOT_STARTED",
+                    "completion_trusted": not launched,
+                    "phase": (
+                        "controller-interrupted-after-launch-boundary"
+                        if launched
+                        else "controller-pre-docker-rejection"
+                    ),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            persist_envelope(failure)
+            if launched:
+                raise UnknownGPUOutcome(
+                    "candidate shadow measurement was interrupted after launch"
+                ) from exc
+            return failure
+        finally:
+            self._scoring_candidate_context = None
+        status = result.get("status")
+        if status not in {"QUALIFIED", "UNQUALIFIED", "UNKNOWN_OUTCOME"}:
+            result = {
+                "status": "UNKNOWN_OUTCOME",
+                "gpu_state": "STARTED",
+                "completion_trusted": False,
+                "phase": "invalid-worker-terminal-status",
+                "error": "candidate shadow probe returned an invalid terminal status",
+            }
+        final = envelope(result)
+        persist_envelope(final)
+        if final["status"] == "UNKNOWN_OUTCOME":
+            raise UnknownGPUOutcome(
+                str(final["result"].get("error") or "untrusted candidate outcome")
+            )
+        if launch_started:
+            with ControllerStore(self.controller_db) as terminal_store:
+                terminal_store.update_iteration(
+                    int(iteration["id"]), active_container=None
+                )
+        return final
+
+    def _validate_recorded_scoring_shadow(
+        self,
+        *,
+        run: Mapping[str, Any],
+        baseline: ExperimentRecord,
+        record: ExperimentRecord,
+    ) -> None:
+        """Recompute a new report while allowing untouched legacy History."""
+
+        snapshot = run.get("workflow_snapshot")
+        snapshot = snapshot if isinstance(snapshot, Mapping) else {}
+        frozen_profile = snapshot.get("objective_scoring_profile")
+        recorded = record.result.get("objective_scoring")
+        if recorded is None:
+            if frozen_profile is not None:
+                raise ControllerDataIntegrityError(
+                    "scoring-enabled result omitted its shadow evidence"
+                )
+            return
+        if not isinstance(recorded, Mapping):
+            raise ControllerDataIntegrityError(
+                "recorded scoring shadow is not an object"
+            )
+        raw_result = dict(record.result)
+        raw_result.pop("objective_scoring", None)
+        candidate_operation = self._recorded_scoring_candidate_operation(
+            record=record,
+            report=recorded,
+        )
+        expected = self._scoring_shadow_for_result(
+            run=run,
+            baseline=baseline,
+            result=raw_result,
+            suite=record.suite,
+            candidate_operation=candidate_operation,
+        )
+        if dict(recorded) != expected:
+            raise ControllerDataIntegrityError(
+                "recorded scoring shadow differs from trusted reconstruction"
+            )
+
+    def _recorded_scoring_candidate_operation(
+        self,
+        *,
+        record: ExperimentRecord,
+        report: Mapping[str, object],
+    ) -> dict[str, Any] | None:
+        """Verify the Controller receipt chain referenced by History."""
+
+        operation_id = report.get("candidate_operation_id")
+        operation_digest = report.get("candidate_operation_digest")
+        operation_result_digest = report.get(
+            "candidate_operation_result_digest"
+        )
+        if operation_id is None:
+            if operation_digest is not None or operation_result_digest is not None:
+                raise ControllerDataIntegrityError(
+                    "recorded scoring candidate operation identity is incomplete"
+                )
+            return None
+        try:
+            identity = ExperimentIdentity.from_value(dict(record.identity))
+        except (TypeError, ValueError) as exc:
+            raise ControllerDataIntegrityError(
+                "recorded scoring candidate experiment identity is invalid"
+            ) from exc
+        operation_dir = (
+            self.config.controller_dir
+            / "runs"
+            / identity.run_id
+            / "results"
+            / f"{identity.iteration:03d}"
+            / f"{identity.stage}.scoring-shadow"
+        )
+        if operation_dir.is_symlink() or not operation_dir.is_dir():
+            raise ControllerDataIntegrityError(
+                "recorded scoring candidate operation directory is missing"
+            )
+        final = self._read_scoring_evidence(
+            operation_dir / "final.json", label="recorded scoring candidate final"
+        )
+        receipt = self._read_scoring_evidence(
+            operation_dir / "receipt.json",
+            label="recorded scoring candidate receipt",
+        )
+        state = self._read_scoring_evidence(
+            operation_dir / "state.json", label="recorded scoring candidate state"
+        )
+        if final != receipt or final != state:
+            raise ControllerDataIntegrityError(
+                "recorded scoring candidate terminal evidence differs"
+            )
+        result = final.get("result")
+        if (
+            final.get("operation_id") != operation_id
+            or final.get("operation_digest") != operation_digest
+            or final.get("result_digest") != operation_result_digest
+            or not isinstance(result, Mapping)
+            or canonical_sha256(result) != operation_result_digest
+            or result.get("status") != final.get("status")
+        ):
+            raise ControllerDataIntegrityError(
+                "recorded scoring candidate operation binding is invalid"
+            )
+        semantic = dict(final)
+        for key in (
+            "container_name",
+            "operation_id",
+            "operation_digest",
+            "status",
+            "result_digest",
+            "result",
+        ):
+            semantic.pop(key, None)
+        if (
+            canonical_sha256(semantic) != operation_digest
+            or operation_id
+            != "score-candidate-"
+            + str(operation_digest).removeprefix("sha256:")[:24]
+            or final.get("container_name")
+            != f"kar-score-candidate-{str(operation_id)[-12:]}"
+            or semantic.get("run_id") != identity.run_id
+            or semantic.get("iteration_index") != identity.iteration
+            or semantic.get("experiment_uid") != identity.experiment_uid
+            or semantic.get("stage") != identity.stage
+            or semantic.get("candidate_hash") != record.candidate_hash
+        ):
+            raise ControllerDataIntegrityError(
+                "recorded scoring candidate operation material is invalid"
+            )
+        intent = self._read_scoring_evidence(
+            operation_dir / "intent.json",
+            label="recorded scoring candidate intent",
+        )
+        if intent != {
+            **semantic,
+            "container_name": final["container_name"],
+            "operation_id": operation_id,
+            "operation_digest": operation_digest,
+            "status": "INTENT",
+        }:
+            raise ControllerDataIntegrityError(
+                "recorded scoring candidate intent differs from its final"
+            )
+        measurement = report.get("candidate_measurement")
+        if final.get("status") in {"QUALIFIED", "UNQUALIFIED"}:
+            normalized = dict(result)
+            normalized.pop("container_exit_code", None)
+            normalized.pop("traceback", None)
+            if not isinstance(measurement, Mapping) or normalized != dict(measurement):
+                raise ControllerDataIntegrityError(
+                    "History scoring measurement differs from Controller receipt"
+                )
+        elif final.get("status") == "LAUNCH_REJECTED":
+            if measurement is not None:
+                raise ControllerDataIntegrityError(
+                    "launch-rejected scoring operation recorded a measurement"
+                )
+        else:
+            raise ControllerDataIntegrityError(
+                "History references a non-terminal scoring candidate operation"
+            )
+        return final
 
     def _run_baseline(self, run_id: str) -> ExperimentRecord:
         with ControllerStore(self.controller_db) as store:
@@ -4842,6 +5755,7 @@ class ResearchController:
                     "evaluation attempt identity columns do not match its snapshot"
                 )
 
+        best = self._run_baseline(run_id)
         with HistoryStore(
             self.history_db, state_dir=self.config.state_dir
         ) as history:
@@ -4855,6 +5769,11 @@ class ResearchController:
                 backend=evaluator_backend,
                 suite=suite,
                 stage=stage,
+            )
+            self._validate_recorded_scoring_shadow(
+                run=run,
+                baseline=best,
+                record=persisted,
             )
             if attempt["status"] == "PENDING":
                 store.start_evaluation_attempt(identity.experiment_uid)
@@ -4887,7 +5806,6 @@ class ResearchController:
                 f"terminal stage {stage} has no matching History evidence"
             )
 
-        best = self._run_baseline(run_id)
         baseline_path = (
             self._experiment_source_path(best) if suite == "full" else None
         )
@@ -5031,11 +5949,38 @@ class ResearchController:
             raise UnknownGPUOutcome(
                 f"stage {stage} produced non-durable evaluator evidence"
             ) from exc
+        candidate_operation: Mapping[str, object] | None = None
+        try:
+            candidate_operation = self._run_scoring_candidate_shadow(
+                run=run,
+                baseline=best,
+                identity=identity,
+                iteration=iteration,
+                candidate_path=candidate_path,
+                raw=raw,
+                suite=suite,
+            )
+        except UnknownGPUOutcome as exc:
+            store.finish_evaluation_attempt(
+                identity.experiment_uid,
+                status="UNKNOWN_OUTCOME",
+                result=dict(raw),
+                error=str(exc),
+            )
+            raise
+        record_result = dict(raw)
+        record_result["objective_scoring"] = self._scoring_shadow_for_result(
+            run=run,
+            baseline=best,
+            result=raw,
+            suite=suite,
+            candidate_operation=candidate_operation,
+        )
         try:
             if identity.replicate_kind == "noise":
                 record = record_noise_external_result(
                     candidate_source=source,
-                    result=raw,
+                    result=record_result,
                     state_dir=self.config.state_dir,
                     note=note,
                     git_revision=self.config.expected_git_commit[:12],
@@ -5045,7 +5990,7 @@ class ResearchController:
             else:
                 record = record_external_result(
                     candidate_source=source,
-                    result=raw,
+                    result=record_result,
                     backend=evaluator_backend,
                     suite=suite,
                     state_dir=self.config.state_dir,
@@ -5097,17 +6042,22 @@ class ResearchController:
         outcome: str,
         result: Mapping[str, Any] | None = None,
         error: str | None = None,
+        preserve_active_container: bool = False,
     ) -> None:
+        values: dict[str, Any] = {
+            "status": "COMPLETED",
+            "stage": "DONE",
+            "outcome": outcome,
+            "result": dict(result or {}),
+            "error": error,
+        }
+        if not preserve_active_container:
+            values["active_container"] = None
         store.update_iteration_with_event(
             iteration_id,
             "ITERATION_FINISHED",
             {"outcome": outcome},
-            status="COMPLETED",
-            stage="DONE",
-            outcome=outcome,
-            result=dict(result or {}),
-            error=error,
-            active_container=None,
+            **values,
         )
 
     def _process_iteration(
@@ -5638,6 +6588,12 @@ class ResearchController:
                     return run
                 iteration = store.latest_iteration(run_id)
                 if iteration and iteration.get("active_container"):
+                    if str(iteration["active_container"]).startswith(
+                        "kar-score-candidate-"
+                    ):
+                        raise UnknownGPUOutcome(
+                            "candidate scoring container remains fenced"
+                        )
                     self.runner.remove_exact_container(
                         self.config.docker_binary,
                         str(iteration["active_container"]),
@@ -5721,11 +6677,16 @@ class ResearchController:
                     )
                     raise
                 except UnknownGPUOutcome as exc:
+                    current = store.get_iteration(int(iteration["id"]))
+                    preserve_scoring_container = str(
+                        current.get("active_container") or ""
+                    ).startswith("kar-score-candidate-")
                     self._finish_iteration(
                         store,
                         int(iteration["id"]),
                         outcome="UNKNOWN_GPU_OUTCOME",
                         error=str(exc),
+                        preserve_active_container=preserve_scoring_container,
                     )
                     return store.update_run_with_event(
                         run_id,
@@ -6413,11 +7374,16 @@ class ResearchController:
                         run_dir=run_dir,
                     )
                 except UnknownGPUOutcome as exc:
+                    current = store.get_iteration(int(iteration["id"]))
+                    preserve_scoring_container = str(
+                        current.get("active_container") or ""
+                    ).startswith("kar-score-candidate-")
                     self._finish_iteration(
                         store,
                         int(iteration["id"]),
                         outcome="UNKNOWN_GPU_OUTCOME",
                         error=str(exc),
+                        preserve_active_container=preserve_scoring_container,
                     )
                     store.update_run_with_event(
                         run_id,

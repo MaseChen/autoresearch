@@ -25,6 +25,8 @@ from ..platform.canonical import canonical_sha256
 from ..platform.artifacts import ArtifactId
 from ..platform.proposal import CandidateBundle, TRITON_PYTHON_BUNDLE_LIMITS
 from ..profiler_contract import PROFILER_ACTIVATION_PROFILE_DIGEST
+from ..scoring_shadow import public_scoring_shadow_summary
+from ..scoring_shadow import SCORING_SHADOW_PROFILE_DIGEST
 from .protocol import (
     AGENT_PROTOCOL_DIGEST,
     CompositeEventCursorV1,
@@ -111,6 +113,7 @@ _HISTORY_COLUMNS: Mapping[str, frozenset[str]] = {
             "replicate_kind",
             "replicate_index",
             "baseline_experiment_uid",
+            "result_json",
         }
     ),
     "case_measurements": frozenset(
@@ -513,6 +516,7 @@ class ConsoleReadModel:
             namespace_id=pin.namespace_id,
             execution_environment_digest=pin.execution_environment.digest,
             profiler_activation_profile_digest=PROFILER_ACTIVATION_PROFILE_DIGEST,
+            scoring_shadow_profile_digest=SCORING_SHADOW_PROFILE_DIGEST,
             controller_schema_version=CONTROLLER_SCHEMA_VERSION,
             history_schema_version=HISTORY_SCHEMA_VERSION,
             campaign_schema_version=CAMPAIGN_SCHEMA_VERSION,
@@ -593,11 +597,37 @@ class ConsoleReadModel:
                 SELECT id, created_at, candidate_hash, backend, suite, status,
                        promotable, aggregate_score, artifact_id, namespace_id,
                        experiment_uid, condition_digest, replicate_kind,
-                       replicate_index, baseline_experiment_uid
+                       replicate_index, baseline_experiment_uid, result_json
                 FROM experiments ORDER BY id DESC LIMIT ?
                 """,
                 (limit,),
             )
+            for experiment in experiments:
+                result = experiment.pop("result", None)
+                scoring = public_scoring_shadow_summary(
+                    result.get("objective_scoring")
+                    if isinstance(result, Mapping)
+                    else None
+                )
+                experiment.update(
+                    {
+                        "xpuoj_proxy_status": scoring["status"],
+                        "xpuoj_proxy_score": scoring["objective_score"],
+                        "xpuoj_proxy_reason": scoring["reason"],
+                        "xpuoj_proxy_paired_speedup": scoring[
+                            "paired_aggregate_speedup"
+                        ],
+                        "xpuoj_proxy_worst_case_regression": scoring[
+                            "paired_worst_case_regression"
+                        ],
+                        "xpuoj_proxy_promotion_authority": scoring[
+                            "promotion_authority"
+                        ],
+                        "xpuoj_proxy_profile_digest": scoring[
+                            "profile_digest"
+                        ],
+                    }
+                )
             relations = self._rows(
                 history,
                 """

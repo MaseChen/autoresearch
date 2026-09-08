@@ -26,6 +26,8 @@ from .models import ControllerConfig
 
 
 EVALUATOR_REQUEST_IDENTITY_CONTAINER_PATH = "/request/identity.json"
+SCORING_CANDIDATE_CONTAINER_PATH = "/candidate/kernel.py"
+SCORING_INCUMBENT_CONTAINER_PATH = "/baseline/kernel.py"
 
 
 @dataclass(frozen=True)
@@ -501,6 +503,63 @@ def scoring_baseline_probe_argv(
             "score-baseline-probe",
         ]
     )
+    return argv
+
+
+def scoring_candidate_probe_argv(
+    config: ControllerConfig,
+    *,
+    name: str,
+    run_id: str,
+    cache_dir: Path,
+    candidate_path: Path,
+    incumbent_path: Path,
+    candidate_hash: str,
+    incumbent_hash: str,
+    scoring_profile_digest: str,
+    measurement_contract_digest: str,
+) -> list[str]:
+    """Build the fixed evaluator argv for one shadow candidate probe."""
+
+    argv = _evaluator_base_argv(
+        config,
+        name=name,
+        run_id=run_id,
+        cache_dir=cache_dir,
+        framework_git_commit=config.expected_git_commit,
+    )
+    insertion = argv.index("--entrypoint")
+    argv[insertion:insertion] = [
+        "--mount",
+        (
+            f"type=bind,src={candidate_path},"
+            f"dst={SCORING_CANDIDATE_CONTAINER_PATH},readonly"
+        ),
+        "--mount",
+        (
+            f"type=bind,src={incumbent_path},"
+            f"dst={SCORING_INCUMBENT_CONTAINER_PATH},readonly"
+        ),
+        "--env",
+        (
+            "KERNEL_RESEARCH_SCORING_FRAMEWORK_COMMIT="
+            f"{config.expected_git_commit}"
+        ),
+        "--env",
+        f"KERNEL_RESEARCH_SCORING_CANDIDATE_HASH={candidate_hash}",
+        "--env",
+        f"KERNEL_RESEARCH_SCORING_INCUMBENT_HASH={incumbent_hash}",
+        "--env",
+        f"KERNEL_RESEARCH_SCORING_PROFILE_DIGEST={scoring_profile_digest}",
+        "--env",
+        (
+            "KERNEL_RESEARCH_SCORING_CANDIDATE_CONTRACT_DIGEST="
+            f"{measurement_contract_digest}"
+        ),
+        "--env",
+        "TORCHINDUCTOR_CACHE_DIR=/evaluator-cache/torchinductor",
+    ]
+    argv.extend(["-m", "kernel_research", "score-candidate-probe"])
     return argv
 
 

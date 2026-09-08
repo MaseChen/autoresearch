@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from ..constants import MAX_FEEDBACK_ERROR_CHARS
+from ..scoring_shadow import public_scoring_shadow_summary
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -78,6 +79,9 @@ def summarize_result(
         if confirmation_regression is not None
         else primary_regression
     )
+    objective_scoring = public_scoring_shadow_summary(
+        value.get("objective_scoring")
+    )
     return {
         "status": value.get("status"),
         "error": _bounded_text(summary_error),
@@ -95,6 +99,7 @@ def summarize_result(
         "confirmation_case_speedups": decision.get(
             "confirmation_case_speedups"
         ),
+        "xpuoj_proxy": objective_scoring,
         "cases": cases,
     }
 

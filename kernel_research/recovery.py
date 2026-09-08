@@ -89,6 +89,104 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _canonical_digest(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _verify_checkpoint_scoring_operation(
+    root: Path,
+    *,
+    identity: ExperimentIdentity,
+    candidate_hash: str,
+    result: Mapping[str, Any],
+) -> None:
+    report = result.get("objective_scoring")
+    if not isinstance(report, Mapping):
+        return
+    operation_id = report.get("candidate_operation_id")
+    if operation_id is None:
+        return
+    operation_digest = report.get("candidate_operation_digest")
+    operation_result_digest = report.get("candidate_operation_result_digest")
+    operation_dir = (
+        root
+        / "run"
+        / "results"
+        / f"{identity.iteration:03d}"
+        / f"{identity.stage}.scoring-shadow"
+    )
+    final = _strict_json_object(operation_dir / "final.json")
+    receipt = _strict_json_object(operation_dir / "receipt.json")
+    state = _strict_json_object(operation_dir / "state.json")
+    intent = _strict_json_object(operation_dir / "intent.json")
+    operation_result = final.get("result")
+    if (
+        final != receipt
+        or final != state
+        or final.get("operation_id") != operation_id
+        or final.get("operation_digest") != operation_digest
+        or final.get("result_digest") != operation_result_digest
+        or not isinstance(operation_result, Mapping)
+        or _canonical_digest(operation_result) != operation_result_digest
+        or operation_result.get("status") != final.get("status")
+    ):
+        raise ValueError("checkpoint scoring operation terminal evidence differs")
+    semantic = dict(final)
+    for key in (
+        "container_name",
+        "operation_id",
+        "operation_digest",
+        "status",
+        "result_digest",
+        "result",
+    ):
+        semantic.pop(key, None)
+    expected_id = "score-candidate-" + str(operation_digest).removeprefix(
+        "sha256:"
+    )[:24]
+    if (
+        _canonical_digest(semantic) != operation_digest
+        or operation_id != expected_id
+        or final.get("container_name")
+        != f"kar-score-candidate-{str(operation_id)[-12:]}"
+        or semantic.get("run_id") != identity.run_id
+        or semantic.get("iteration_index") != identity.iteration
+        or semantic.get("experiment_uid") != identity.experiment_uid
+        or semantic.get("stage") != identity.stage
+        or semantic.get("candidate_hash") != candidate_hash
+        or intent
+        != {
+            **semantic,
+            "container_name": final.get("container_name"),
+            "operation_id": operation_id,
+            "operation_digest": operation_digest,
+            "status": "INTENT",
+        }
+    ):
+        raise ValueError("checkpoint scoring operation identity is inconsistent")
+    measurement = report.get("candidate_measurement")
+    if final.get("status") in {"QUALIFIED", "UNQUALIFIED"}:
+        normalized = dict(operation_result)
+        normalized.pop("container_exit_code", None)
+        normalized.pop("traceback", None)
+        if not isinstance(measurement, Mapping) or normalized != dict(measurement):
+            raise ValueError(
+                "checkpoint History scoring measurement differs from receipt"
+            )
+    elif final.get("status") == "LAUNCH_REJECTED":
+        if measurement is not None:
+            raise ValueError("checkpoint launch rejection contains a measurement")
+    else:
+        raise ValueError("checkpoint History references unresolved scoring evidence")
+
+
 def _strict_json_object(path: Path) -> dict[str, Any]:
     raw = path.read_bytes()
     if len(raw) > _MAX_MANIFEST_BYTES:
@@ -348,7 +446,8 @@ def _verify_history_identity(
         for attempt in linked:
             experiment = history.execute(
                 """
-                SELECT experiment_uid, namespace_id, artifact_id
+                SELECT experiment_uid, namespace_id, artifact_id,
+                       candidate_hash, identity_json, result_json
                 FROM experiments WHERE id = ?
                 """,
                 (attempt["history_experiment_id"],),
@@ -366,6 +465,32 @@ def _verify_history_identity(
                 raise ValueError(
                     "Controller evaluation link differs from trusted History"
                 )
+            try:
+                experiment_result = _json_mapping(
+                    experiment["result_json"],
+                    name="linked History experiment result",
+                )
+                scoring_report = experiment_result.get("objective_scoring")
+                if (
+                    isinstance(scoring_report, Mapping)
+                    and scoring_report.get("candidate_operation_id") is not None
+                ):
+                    experiment_identity = ExperimentIdentity.from_value(
+                        _json_mapping(
+                            experiment["identity_json"],
+                            name="linked History experiment identity",
+                        )
+                    )
+                    _verify_checkpoint_scoring_operation(
+                        root,
+                        identity=experiment_identity,
+                        candidate_hash=str(experiment["candidate_hash"]),
+                        result=experiment_result,
+                    )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "linked History scoring operation cannot be verified"
+                ) from exc
     finally:
         controller.close()
         history.close()

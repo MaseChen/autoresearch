@@ -39,10 +39,22 @@ from kernel_research.console.read_model import (
     ReadOnlyDatabase,
 )
 from kernel_research.platform.artifacts import ArtifactId
+from kernel_research.platform.canonical import canonical_sha256
 from kernel_research.platform.identity import BaselineRef, ExecutionEnvironmentDigest
 from kernel_research.platform.profiles import LEGACY_RESEARCH_NAMESPACE
 from kernel_research.platform.proposal import CandidateBundle
+from kernel_research.scoring_shadow import unavailable_scoring_shadow_report
 from test_autorun import SEED
+from test_scoring_shadow import (
+    INCUMBENT_HASH,
+    operation_binding,
+    qualified_candidate_measurement,
+    successful_full_result,
+)
+from kernel_research.scoring_shadow import (
+    project_scoring_shadow_report,
+    scoring_shadow_profile_snapshot,
+)
 
 
 def _sha(path: Path) -> str:
@@ -105,6 +117,7 @@ def _identity(commit: str = "a" * 40) -> RuntimeIdentityV1:
         namespace_id="sha256:" + "3" * 64,
         execution_environment_digest="sha256:" + "4" * 64,
         profiler_activation_profile_digest="sha256:" + "5" * 64,
+        scoring_shadow_profile_digest="sha256:" + "6" * 64,
         controller_schema_version=3,
         history_schema_version=3,
         campaign_schema_version=1,
@@ -136,6 +149,19 @@ class ConsoleProtocolTests(unittest.TestCase):
             CompositeEventCursorV1.from_value(cursor.to_dict()), cursor
         )
         self.assertEqual(identity.to_dict()["runtime_identity_digest"], identity.digest)
+        self.assertEqual(RuntimeIdentityV1.from_value(identity.to_dict()), identity)
+        tampered = identity.to_dict()
+        tampered["runtime_identity_digest"] = "sha256:" + "9" * 64
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            RuntimeIdentityV1.from_value(tampered)
+        drifted = identity.to_dict()
+        drifted["agent_protocol_digest"] = "sha256:" + "8" * 64
+        drifted.pop("runtime_identity_digest")
+        drifted["runtime_identity_digest"] = canonical_sha256(
+            {key: value for key, value in drifted.items() if key != "runtime_identity_digest"}
+        )
+        with self.assertRaisesRegex(ValueError, "protocol digest"):
+            RuntimeIdentityV1.from_value(drifted)
         with self.assertRaisesRegex(ValueError, "non-negative"):
             CompositeEventCursorV1(controller_event_id=-1)
 
@@ -298,6 +324,71 @@ class ConsoleReadModelTests(unittest.TestCase):
         for path in before:
             self.assertFalse(Path(str(path) + "-wal").exists())
             self.assertFalse(Path(str(path) + "-shm").exists())
+
+    def test_snapshot_projects_shadow_score_without_exposing_full_result(self) -> None:
+        paths = self._paths()
+        report = unavailable_scoring_shadow_report(
+            reason="PROFILE_NOT_FROZEN",
+            profile=None,
+            candidate_hash="a" * 64,
+            incumbent_history_experiment_id=210,
+            incumbent_candidate_hash="b" * 64,
+        )
+        with closing(sqlite3.connect(paths.history_db)) as connection, connection:
+            connection.execute(
+                """
+                INSERT INTO experiments (
+                    id, status, candidate_hash, suite, result_json
+                ) VALUES (1, 'SUCCESS', ?, 'full', ?)
+                """,
+                ("a" * 64, json.dumps({"objective_scoring": report})),
+            )
+        before = _sha(paths.history_db)
+        snapshot = ConsoleReadModel(paths).snapshot(limit=10)
+        self.assertEqual(_sha(paths.history_db), before)
+        experiment = snapshot.data["experiments"][0]
+        self.assertEqual(experiment["xpuoj_proxy_status"], "UNAVAILABLE")
+        self.assertEqual(
+            experiment["xpuoj_proxy_reason"], "PROFILE_NOT_FROZEN"
+        )
+        self.assertIsNone(experiment["xpuoj_proxy_score"])
+        self.assertFalse(experiment["xpuoj_proxy_promotion_authority"])
+        self.assertNotIn("result", experiment)
+        self.assertNotIn("objective_scoring", experiment)
+
+        measurement = qualified_candidate_measurement()
+        available = project_scoring_shadow_report(
+            successful_full_result(),
+            suite="full",
+            profile=scoring_shadow_profile_snapshot(),
+            incumbent_history_experiment_id=210,
+            incumbent_candidate_hash=INCUMBENT_HASH,
+            candidate_measurement=measurement,
+            candidate_framework_git_commit="c" * 40,
+            **operation_binding(measurement),
+        )
+        with closing(sqlite3.connect(paths.history_db)) as connection, connection:
+            connection.execute(
+                """
+                INSERT INTO experiments (
+                    id, status, candidate_hash, suite, result_json
+                ) VALUES (2, 'SUCCESS', ?, 'full', ?)
+                """,
+                ("a" * 64, json.dumps({"objective_scoring": available})),
+            )
+        projected = ConsoleReadModel(paths).snapshot(limit=10).data["experiments"][0]
+        self.assertEqual(projected["xpuoj_proxy_status"], "AVAILABLE")
+        self.assertEqual(projected["xpuoj_proxy_score"], 50.0)
+        serialized = json.dumps(projected, sort_keys=True)
+        for private_field in (
+            "candidate_measurement",
+            "environment_snapshot_digest",
+            "candidate_anchor_measurement",
+            "paired_safety_measurement",
+            '"cases"',
+            '"rounds"',
+        ):
+            self.assertNotIn(private_field, serialized)
 
     def test_scientific_artifact_requires_verified_success_bundle(self) -> None:
         paths = self._paths()

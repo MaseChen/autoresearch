@@ -53,6 +53,12 @@ from .profiling import (
 SCHEMA_VERSION = 1
 SUCCESS_STATUSES = frozenset({"MOCK_VALIDATED", "SUCCESS"})
 SCORING_FRAMEWORK_COMMIT_ENV = "KERNEL_RESEARCH_SCORING_FRAMEWORK_COMMIT"
+SCORING_CANDIDATE_HASH_ENV = "KERNEL_RESEARCH_SCORING_CANDIDATE_HASH"
+SCORING_INCUMBENT_HASH_ENV = "KERNEL_RESEARCH_SCORING_INCUMBENT_HASH"
+SCORING_PROFILE_DIGEST_ENV = "KERNEL_RESEARCH_SCORING_PROFILE_DIGEST"
+SCORING_CANDIDATE_CONTRACT_DIGEST_ENV = (
+    "KERNEL_RESEARCH_SCORING_CANDIDATE_CONTRACT_DIGEST"
+)
 
 # Backward-compatible private aliases for the original evaluator test surface.
 _apply_c500_promotion = apply_c500_promotion
@@ -89,6 +95,37 @@ def _score_baseline_probe(_args: argparse.Namespace) -> int:
     )
     _print_json(payload)
     return 0 if payload.get("status") == "QUALIFIED" else 2
+
+
+def _score_candidate_probe(_args: argparse.Namespace) -> int:
+    # This command is intentionally argument-free.  The host constructs exact
+    # read-only mounts and identity env values before entering the evaluator.
+    from .autorun.runtime import (
+        SCORING_CANDIDATE_CONTAINER_PATH,
+        SCORING_INCUMBENT_CONTAINER_PATH,
+    )
+    from .scoring_candidate_worker import run_scoring_candidate_probe
+
+    payload = run_scoring_candidate_probe(
+        candidate_path=SCORING_CANDIDATE_CONTAINER_PATH,
+        incumbent_path=SCORING_INCUMBENT_CONTAINER_PATH,
+        expected_candidate_hash=os.environ.get(SCORING_CANDIDATE_HASH_ENV, ""),
+        expected_incumbent_hash=os.environ.get(SCORING_INCUMBENT_HASH_ENV, ""),
+        scoring_framework_git_commit=os.environ.get(
+            SCORING_FRAMEWORK_COMMIT_ENV, ""
+        ),
+        scoring_profile_digest=os.environ.get(SCORING_PROFILE_DIGEST_ENV, ""),
+        expected_measurement_contract_digest=os.environ.get(
+            SCORING_CANDIDATE_CONTRACT_DIGEST_ENV, ""
+        ),
+    )
+    _print_json(payload)
+    status = payload.get("status")
+    if status == "QUALIFIED":
+        return 0
+    if status == "UNQUALIFIED":
+        return 2
+    return 3
 
 
 def _score_baseline_qualify(args: argparse.Namespace) -> int:
@@ -477,6 +514,12 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     score_baseline_probe.set_defaults(handler=_score_baseline_probe)
+
+    score_candidate_probe = subparsers.add_parser(
+        "score-candidate-probe",
+        help=argparse.SUPPRESS,
+    )
+    score_candidate_probe.set_defaults(handler=_score_candidate_probe)
 
     score = subparsers.add_parser(
         "score", help="qualify and inspect versioned objective scoring evidence"
