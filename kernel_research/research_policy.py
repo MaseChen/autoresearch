@@ -339,6 +339,210 @@ def _int64_stride_base_present(tree: ast.AST) -> bool:
     return False
 
 
+def _is_b_pointer_name(name: str) -> bool:
+    """Return whether a JIT parameter is a recognized B-tensor pointer."""
+
+    return name in {"b", "b_ptr", "b_hi", "b_col_major"}
+
+
+def _is_unscoped_int64_cast(node: ast.AST) -> bool:
+    """Recognize widening before later address multiplication.
+
+    Casting ``(expert * stride)`` after the multiplication is deliberately not
+    accepted: the narrow product may already have overflowed.
+    """
+
+    if not isinstance(node, ast.Call):
+        return False
+    if (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr == "to"
+        and len(node.args) == 1
+        and _is_tl_int64(node.args[0])
+    ):
+        return not any(
+            isinstance(child, ast.BinOp) and isinstance(child.op, ast.Mult)
+            for child in ast.walk(node.func.value)
+        )
+    if (
+        isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "tl"
+        and node.func.attr == "cast"
+        and len(node.args) >= 2
+        and _is_tl_int64(node.args[1])
+    ):
+        return not any(
+            isinstance(child, ast.BinOp) and isinstance(child.op, ast.Mult)
+            for child in ast.walk(node.args[0])
+        )
+    return False
+
+
+def _contains_safe_expert_product(
+    node: ast.AST,
+    *,
+    expert_names: set[str],
+    int64_expert_names: set[str],
+) -> bool:
+    """Prove an expert-derived offset is widened before multiplication."""
+
+    for child in ast.walk(node):
+        if not isinstance(child, ast.BinOp) or not isinstance(child.op, ast.Mult):
+            continue
+        for candidate in (child.left, child.right):
+            if _contains_name(candidate, int64_expert_names) or _is_int64_cast(
+                candidate, expert_names
+            ):
+                return True
+    return False
+
+
+def _generic_int64_b_base_present(tree: ast.AST) -> bool:
+    """Prove all observed B loads use an int64 expert-derived base offset.
+
+    The original rule recognizes the seed's exact
+    ``expert_ids_ptr/b_ptr/stride_be`` spelling.  Imported, independently
+    authored kernels can instead encode an expert row offset and feed it to a
+    ``tl.make_block_ptr``.  This proof is deliberately per-JIT-function and
+    requires the widened expert product to reach every observed B load; an
+    unrelated int64 cast cannot satisfy it.
+    """
+
+    saw_b_consumer = False
+    for function in (
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(
+            _is_triton_jit_decorator(decorator)
+            for decorator in node.decorator_list
+        )
+    ):
+        assignments = [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and _assigned_name(node) is not None
+        ]
+        parameter_names = {
+            argument.arg
+            for argument in (
+                *function.args.posonlyargs,
+                *function.args.args,
+                *function.args.kwonlyargs,
+            )
+        }
+        b_names = {name for name in parameter_names if _is_b_pointer_name(name)}
+        if not b_names:
+            continue
+
+        expert_names = {
+            name for name in parameter_names if "expert" in name.lower()
+        }
+        expert_names.update(
+            target
+            for assignment in assignments
+            if (target := _assigned_name(assignment)) is not None
+            and "expert" in target.lower()
+        )
+
+        int64_expert_names: set[str] = set()
+        changed = True
+        while changed:
+            changed = False
+            for assignment in assignments:
+                target = _assigned_name(assignment)
+                value = _assignment_value(assignment)
+                if target is None or value is None or target in int64_expert_names:
+                    continue
+                explicitly_widened_expert = (
+                    "expert" in target.lower()
+                    and _is_unscoped_int64_cast(value)
+                ) or any(
+                    _is_int64_cast(child, expert_names)
+                    for child in ast.walk(value)
+                )
+                derived_from_widened_expert = _contains_name(
+                    value, int64_expert_names
+                )
+                if explicitly_widened_expert or derived_from_widened_expert:
+                    int64_expert_names.add(target)
+                    changed = True
+
+        b_derived_names = set(b_names)
+        safe_b_names: set[str] = set()
+        changed = True
+        while changed:
+            changed = False
+            for assignment in assignments:
+                target = _assigned_name(assignment)
+                value = _assignment_value(assignment)
+                if target is None or value is None:
+                    continue
+                if (
+                    target not in b_derived_names
+                    and _contains_name(value, b_derived_names)
+                ):
+                    b_derived_names.add(target)
+                    changed = True
+                if target in b_derived_names and target not in safe_b_names and (
+                    _contains_name(value, safe_b_names)
+                    or _contains_safe_expert_product(
+                        value,
+                        expert_names=expert_names,
+                        int64_expert_names=int64_expert_names,
+                    )
+                ):
+                    safe_b_names.add(target)
+                    changed = True
+
+        for call in (
+            node for node in ast.walk(function) if isinstance(node, ast.Call)
+        ):
+            if not (
+                isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "tl"
+                and call.func.attr in {"load", "make_block_ptr"}
+            ):
+                continue
+            if call.func.attr == "load":
+                if not call.args:
+                    continue
+                pointer = call.args[0]
+            else:
+                base_keywords = [
+                    keyword.value
+                    for keyword in call.keywords
+                    if keyword.arg == "base"
+                ]
+                if len(base_keywords) > 1:
+                    return False
+                pointer = (
+                    base_keywords[0]
+                    if base_keywords
+                    else call.args[0]
+                    if call.args
+                    else None
+                )
+                if pointer is None:
+                    continue
+            if not _contains_name(pointer, b_derived_names):
+                continue
+            saw_b_consumer = True
+            if not (
+                _contains_name(pointer, safe_b_names)
+                or _contains_safe_expert_product(
+                    pointer,
+                    expert_names=expert_names,
+                    int64_expert_names=int64_expert_names,
+                )
+            ):
+                return False
+    return saw_b_consumer
+
+
 def _safe_decorator(node: ast.expr) -> bool:
     target = node.func if isinstance(node, ast.Call) else node
     return (
@@ -604,12 +808,15 @@ def validate_research_candidate(source: str) -> ResearchPolicyResult:
                     )
                 )
 
-    if not _int64_stride_base_present(tree):
+    if not (
+        _int64_stride_base_present(tree)
+        or _generic_int64_b_base_present(tree)
+    ):
         errors.append(
             _error(
                 "INT64_B_BASE_REQUIRED",
-                "B expert base must multiply stride_be through a recognizable "
-                ".to(tl.int64) conversion",
+                "B expert base must use a recognizable int64 expert-derived "
+                "offset that reaches the B load",
             )
         )
     return ResearchPolicyResult(source, contract.sha256, tuple(errors))

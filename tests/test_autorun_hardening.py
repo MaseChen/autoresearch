@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import replace
 import hashlib
 import json
@@ -54,6 +55,7 @@ from kernel_research.constants import (
 from kernel_research.evaluation import raw_evaluate, record_external_result
 from kernel_research.history import HistoryStore
 from kernel_research.research_policy import (
+    _generic_int64_b_base_present,
     validate_research_candidate,
     validate_research_candidate_bounded,
 )
@@ -294,6 +296,83 @@ class PolicyHardeningTests(unittest.TestCase):
                     for error in validate_research_candidate(source).errors
                 }
                 self.assertIn("INT64_B_BASE_REQUIRED", codes)
+
+    def test_generic_int64_expert_offset_must_reach_every_b_load(self) -> None:
+        safe = ast.parse(
+            """
+import triton
+import triton.language as tl
+
+@triton.jit
+def kernel(b, packed, N: tl.constexpr, K: tl.constexpr):
+    expert_row_offset = (packed >> 8).to(tl.int64)
+    b_block = tl.make_block_ptr(
+        base=b + expert_row_offset * K,
+        shape=(K, N),
+        strides=(1, K),
+        offsets=(0, 0),
+        block_shape=(128, 128),
+        order=(0, 1),
+    )
+    values = tl.load(b_block)
+"""
+        )
+        self.assertTrue(_generic_int64_b_base_present(safe))
+
+        unsafe_variants = (
+            # Widening after the product cannot repair an earlier overflow.
+            """
+import triton
+import triton.language as tl
+
+@triton.jit
+def kernel(b, packed, N: tl.constexpr, K: tl.constexpr):
+    expert_row_offset = ((packed >> 8) * N).to(tl.int64)
+    b_block = tl.make_block_ptr(
+        base=b + expert_row_offset * K,
+        shape=(K, N), strides=(1, K), offsets=(0, 0),
+        block_shape=(128, 128), order=(0, 1),
+    )
+    values = tl.load(b_block)
+""",
+            # An unrelated int64 value does not make the B base safe.
+            """
+import triton
+import triton.language as tl
+
+@triton.jit
+def kernel(b, packed, N: tl.constexpr, K: tl.constexpr):
+    unrelated = packed.to(tl.int64)
+    expert_row_offset = (packed >> 8) * N
+    b_block = tl.make_block_ptr(
+        base=b + expert_row_offset * K,
+        shape=(K, N), strides=(1, K), offsets=(0, 0),
+        block_shape=(128, 128), order=(0, 1),
+    )
+    values = tl.load(b_block)
+""",
+            # One safe B path cannot mask a second unsafe B load.
+            """
+import triton
+import triton.language as tl
+
+@triton.jit
+def kernel(b, packed, N: tl.constexpr, K: tl.constexpr):
+    expert_row_offset = (packed >> 8).to(tl.int64)
+    safe_block = tl.make_block_ptr(
+        base=b + expert_row_offset * K,
+        shape=(K, N), strides=(1, K), offsets=(0, 0),
+        block_shape=(128, 128), order=(0, 1),
+    )
+    safe_values = tl.load(safe_block)
+    unsafe_values = tl.load(b + (packed >> 8) * N * K)
+""",
+        )
+        for source in unsafe_variants:
+            with self.subTest(source=source):
+                self.assertFalse(
+                    _generic_int64_b_base_present(ast.parse(source))
+                )
 
     def test_bounded_worker_handles_pathological_source_and_timeout(self) -> None:
         signature = (
