@@ -14,8 +14,10 @@
 
 ### Phase 2: Compiled baseline and device-event timing
 
-- [ ] Implement qualification worker and immutable descriptor output.
-- [ ] Implement balanced device-event timing records.
+- [x] Implement evaluator-side qualification probe and immutable descriptor
+  aggregation.
+- [x] Implement balanced device-event timing records.
+- [ ] Add trusted-host ten-probe orchestration and durable private evidence.
 - [ ] Add fail-closed graph-break, fallback, drift, and timeout tests.
 
 ### Phase 3: Trusted integration

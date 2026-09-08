@@ -75,6 +75,16 @@ def _doctor(args: argparse.Namespace) -> int:
     return 0 if payload["status"] in SUCCESS_STATUSES else 2
 
 
+def _score_baseline_probe(_args: argparse.Namespace) -> int:
+    # Lazy import is mandatory: the trusted host Python intentionally has no
+    # Torch/NumPy, while this fixed command runs inside the evaluator image.
+    from .scoring_baseline_worker import run_scoring_baseline_probe
+
+    payload = run_scoring_baseline_probe()
+    _print_json(payload)
+    return 0 if payload.get("status") == "QUALIFIED" else 2
+
+
 def evaluate_and_record(
     candidate_path: str | Path,
     *,
@@ -434,6 +444,12 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--backend", choices=("mock", "c500"), required=True)
     doctor.add_argument("--timeout", type=float, default=None)
     doctor.set_defaults(handler=_doctor)
+
+    score_baseline_probe = subparsers.add_parser(
+        "score-baseline-probe",
+        help=argparse.SUPPRESS,
+    )
+    score_baseline_probe.set_defaults(handler=_score_baseline_probe)
 
     evaluate = subparsers.add_parser(
         "evaluate",

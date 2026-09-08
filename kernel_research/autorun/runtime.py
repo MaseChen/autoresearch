@@ -466,6 +466,24 @@ def evaluator_doctor_argv(
     return argv
 
 
+def scoring_baseline_probe_argv(
+    config: ControllerConfig, *, name: str, run_id: str, cache_dir: Path
+) -> list[str]:
+    """Build the fixed evaluator-container argv for one baseline probe."""
+
+    argv = _evaluator_base_argv(
+        config, name=name, run_id=run_id, cache_dir=cache_dir
+    )
+    argv.extend(
+        [
+            "-m",
+            "kernel_research",
+            "score-baseline-probe",
+        ]
+    )
+    return argv
+
+
 def write_opencode_config(path: Path, config: ControllerConfig) -> None:
     """Write the no-tool, bounded-step OpenCode configuration."""
 
