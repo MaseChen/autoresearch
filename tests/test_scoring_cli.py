@@ -19,6 +19,24 @@ class ScoringCliTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             parser.parse_args(["score-baseline-probe", "--case", "other"])
 
+    def test_public_qualifier_accepts_only_the_trusted_config(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            ["score", "baseline-qualify", "--config", "/trusted/config.json"]
+        )
+        self.assertEqual(args.score_command, "baseline-qualify")
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "score",
+                    "baseline-qualify",
+                    "--config",
+                    "/trusted/config.json",
+                    "--device",
+                    "gpu2",
+                ]
+            )
+
     def test_internal_probe_prints_qualified_result(self) -> None:
         payload = {"status": "QUALIFIED", "cases": []}
         with (

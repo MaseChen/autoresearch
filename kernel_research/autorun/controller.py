@@ -33,8 +33,19 @@ from ..evaluation import (
 )
 from ..history import ExperimentRecord, HistoryStore
 from ..noise import SQLITE_MAX_INT, trusted_noise_baseline_source
+from ..compiled_reference import scoring_reference_source_sha256
+from ..device_timing import device_event_protocol_snapshot
+from ..scoring_qualification import (
+    SCORING_BASELINE_QUALIFICATION_RUNS,
+    ScoringBaselineQualification,
+    aggregate_scoring_baseline_probes,
+)
 from ..platform.artifacts import ArtifactId
-from ..platform.canonical import canonical_json_text, canonical_sha256
+from ..platform.canonical import (
+    canonical_json_text,
+    canonical_sha256,
+    require_sha256_digest,
+)
 from ..platform.components import TargetComponents
 from ..platform.identity import (
     BaselineRef,
@@ -68,6 +79,7 @@ from .runtime import (
     evaluator_argv,
     evaluator_doctor_argv,
     parse_json_output,
+    scoring_baseline_probe_argv,
 )
 from .states import RunStatus, Stage, TERMINAL_RUN_STATUSES
 from .store import ControllerStore
@@ -403,6 +415,101 @@ class DockerEvaluator:
                 f"{result.returncode}"
             )
         return payload
+
+    def scoring_baseline_probe(
+        self,
+        *,
+        operation_id: str,
+        probe_index: int,
+        result_dir: Path,
+    ) -> dict[str, Any]:
+        """Run one fixed scoring-baseline probe and preserve private output."""
+
+        name = f"kar-score-{operation_id[-12:]}-{probe_index:02d}"
+        cache_dir = self._cache_dir(
+            candidate_hash=scoring_reference_source_sha256().removeprefix("sha256:"),
+            purpose="xpuoj-scoring-baseline",
+        )
+        timeout = float(self.config.evaluator_timeout_sec)
+        if self.before_container_start is not None:
+            self.before_container_start(operation_id, "scoring-baseline", timeout)
+        command = self.runner.run(
+            scoring_baseline_probe_argv(
+                self.config,
+                name=name,
+                run_id=operation_id,
+                cache_dir=cache_dir,
+            ),
+            input_text=None,
+            timeout_sec=timeout,
+            max_output_bytes=EVALUATOR_OUTPUT_LIMIT_BYTES,
+            container_name=name,
+            docker_binary=self.config.docker_binary,
+        )
+        result_dir.mkdir(parents=True, exist_ok=True)
+        stdout_path = result_dir / f"probe-{probe_index:02d}.stdout.json"
+        stderr_path = result_dir / f"probe-{probe_index:02d}.stderr.txt"
+        _atomic_write_bytes(stdout_path, command.stdout.encode("utf-8"))
+        _atomic_write_bytes(stderr_path, command.stderr.encode("utf-8"))
+        combined = (command.stdout + "\n" + command.stderr).lower()
+        if command.timed_out:
+            return {
+                "status": "UNKNOWN_OUTCOME",
+                "error": "scoring baseline evaluator timed out",
+                "container_exit_code": command.returncode,
+            }
+        if command.output_limited:
+            return {
+                "status": "UNKNOWN_OUTCOME",
+                "error": "scoring baseline evaluator output exceeded limit",
+                "container_exit_code": command.returncode,
+            }
+        if command.returncode in {137, -9} or any(
+            marker in combined for marker in FATAL_GPU_MARKERS
+        ):
+            return {
+                "status": "UNKNOWN_OUTCOME",
+                "error": "scoring baseline evaluator had an untrusted GPU termination",
+                "container_exit_code": command.returncode,
+            }
+        try:
+            payload = parse_json_output(command.stdout)
+        except ValueError as exc:
+            return {
+                "status": "UNKNOWN_OUTCOME",
+                "error": f"scoring baseline evaluator produced invalid output: {exc}",
+                "container_exit_code": command.returncode,
+            }
+        expected = {
+            "schema_version": 1,
+            "command": "score-baseline-probe",
+            "protocol_id": "xpuoj-th0-proxy-v1",
+            "reference_source_sha256": scoring_reference_source_sha256(),
+            "compiler_config": {
+                "backend": "inductor",
+                "fullgraph": True,
+                "dynamic": False,
+                "mode": "default",
+            },
+            "timing_protocol": device_event_protocol_snapshot(),
+        }
+        if any(payload.get(key) != value for key, value in expected.items()):
+            return {
+                "status": "UNKNOWN_OUTCOME",
+                "error": "scoring baseline evaluator identity echo mismatch",
+                "container_exit_code": command.returncode,
+            }
+        status = payload.get("status")
+        trusted_exit = (
+            status == "QUALIFIED" and command.returncode == 0
+        ) or (status == "UNQUALIFIED" and command.returncode == 2)
+        if not trusted_exit:
+            return {
+                "status": "UNKNOWN_OUTCOME",
+                "error": "scoring baseline evaluator status/exit mismatch",
+                "container_exit_code": command.returncode,
+            }
+        return {**payload, "container_exit_code": command.returncode}
 
     def evaluate(
         self,
@@ -884,6 +991,7 @@ class ResearchController:
         self.runner = runner or CommandRunner()
         self._preflight_run_overrides: dict[str, Mapping[str, Any]] = {}
         self._campaign_resume_doctor_overrides: dict[str, dict[str, Any]] = {}
+        self._scoring_baseline_context: dict[str, Any] | None = None
         self.evaluator = evaluator or DockerEvaluator(
             config,
             controller_dir=config.controller_dir,
@@ -1031,6 +1139,16 @@ class ResearchController:
     def _before_docker_container(
         self, run_id: str, action: str, configured_timeout: float
     ) -> None:
+        scoring_context = self._scoring_baseline_context
+        if action == "scoring-baseline":
+            self._authorize_scoring_baseline_probe(
+                scoring_context,
+                operation_id=run_id,
+                configured_timeout=configured_timeout,
+            )
+            return
+        if action != "doctor":
+            self._assert_no_unresolved_scoring_baseline()
         run_override = self._preflight_run_overrides.get(run_id)
         campaign_doctor = self._campaign_resume_doctor_overrides.get(run_id)
         if campaign_doctor is not None:
@@ -1067,6 +1185,480 @@ class ResearchController:
             configured_timeout=configured_timeout,
             run_override=run_override,
         )
+
+    def _scoring_baseline_root(self) -> Path:
+        return self.config.controller_dir / "scoring-baseline"
+
+    @staticmethod
+    def _read_scoring_evidence(path: Path, *, label: str) -> dict[str, Any]:
+        if path.is_symlink() or not path.is_file():
+            raise ControllerDataIntegrityError(f"{label} is not a regular file")
+        try:
+            return _strict_json_object_bytes(
+                path.read_bytes(),
+                label=label,
+                max_bytes=EVALUATOR_OUTPUT_LIMIT_BYTES,
+            )
+        except (OSError, ValueError) as exc:
+            raise ControllerDataIntegrityError(
+                f"{label} is unreadable: {exc}"
+            ) from exc
+
+    def _verify_scoring_baseline_final(
+        self,
+        *,
+        operation_dir: Path,
+        operation_material: Mapping[str, Any],
+        operation_id: str,
+        operation_digest: str,
+    ) -> dict[str, Any]:
+        """Re-prove a terminal qualification and its private evidence graph."""
+
+        final = self._read_scoring_evidence(
+            operation_dir / "final.json", label="scoring baseline final evidence"
+        )
+        state = self._read_scoring_evidence(
+            operation_dir / "state.json", label="scoring baseline state"
+        )
+        if canonical_json_text(final) != canonical_json_text(state):
+            raise ControllerDataIntegrityError(
+                "scoring baseline terminal state differs from final evidence"
+            )
+        for key, expected in operation_material.items():
+            if final.get(key) != expected:
+                raise ControllerDataIntegrityError(
+                    f"scoring baseline final evidence changed {key}"
+                )
+        if (
+            final.get("operation_id") != operation_id
+            or final.get("operation_digest") != operation_digest
+            or final.get("status") not in {"QUALIFIED", "UNQUALIFIED"}
+        ):
+            raise ControllerDataIntegrityError(
+                "scoring baseline final evidence identity mismatch"
+            )
+
+        common_keys = set(operation_material) | {
+            "operation_id",
+            "operation_digest",
+            "status",
+        }
+        receipt_paths = sorted(operation_dir.glob("probe-*.receipt.json"))
+        if any(
+            path.is_symlink()
+            or not path.is_file()
+            or path.name != f"probe-{index:02d}.receipt.json"
+            for index, path in enumerate(receipt_paths)
+        ):
+            raise ControllerDataIntegrityError(
+                "scoring baseline receipt sequence is not exact"
+            )
+        receipts = [
+            self._read_scoring_evidence(
+                path, label=f"scoring baseline receipt {index}"
+            )
+            for index, path in enumerate(receipt_paths)
+        ]
+
+        qualification_value = final.get("qualification")
+        if qualification_value is not None:
+            if set(final) != common_keys | {"qualification", "private_object_id"}:
+                raise ControllerDataIntegrityError(
+                    "scoring baseline qualified final fields are not exact"
+                )
+            if not isinstance(qualification_value, Mapping):
+                raise ControllerDataIntegrityError(
+                    "scoring baseline qualification is not an object"
+                )
+            try:
+                qualification = ScoringBaselineQualification.from_value(
+                    qualification_value
+                )
+                object_id = require_sha256_digest(
+                    final.get("private_object_id"), field="private_object_id"
+                )
+            except (TypeError, ValueError) as exc:
+                raise ControllerDataIntegrityError(
+                    f"scoring baseline qualification is invalid: {exc}"
+                ) from exc
+            expected_status = (
+                "QUALIFIED" if qualification.qualified else "UNQUALIFIED"
+            )
+            if final["status"] != expected_status:
+                raise ControllerDataIntegrityError(
+                    "scoring baseline qualification and final status disagree"
+                )
+            if len(receipts) != SCORING_BASELINE_QUALIFICATION_RUNS:
+                raise ControllerDataIntegrityError(
+                    "scoring baseline qualification has an incomplete receipt set"
+                )
+            if tuple(canonical_sha256(receipt) for receipt in receipts) != (
+                qualification.probe_digests
+            ):
+                raise ControllerDataIntegrityError(
+                    "scoring baseline receipt digest mismatch"
+                )
+            qualification_bytes = (
+                canonical_json_text(qualification.to_dict()) + "\n"
+            ).encode("utf-8")
+            raw_digest = object_id.removeprefix("sha256:")
+            object_path = (
+                self.config.controller_dir
+                / "objects"
+                / "sha256"
+                / raw_digest[:2]
+                / raw_digest[2:]
+            )
+            if (
+                object_path.is_symlink()
+                or not object_path.is_file()
+                or hashlib.sha256(qualification_bytes).hexdigest() != raw_digest
+                or object_path.read_bytes() != qualification_bytes
+            ):
+                raise ControllerDataIntegrityError(
+                    "scoring baseline private qualification object mismatch"
+                )
+            return final
+
+        if final["status"] != "UNQUALIFIED" or "private_object_id" in final:
+            raise ControllerDataIntegrityError(
+                "scoring baseline terminal evidence is incomplete"
+            )
+        if "failed_probe_index" in final:
+            if set(final) != common_keys | {"failed_probe_index", "reason"}:
+                raise ControllerDataIntegrityError(
+                    "scoring baseline failed-probe final fields are not exact"
+                )
+            failed_index = final["failed_probe_index"]
+            if (
+                type(failed_index) is not int
+                or not 0 <= failed_index < SCORING_BASELINE_QUALIFICATION_RUNS
+                or len(receipts) != failed_index + 1
+                or any(
+                    receipt.get("status") != "QUALIFIED"
+                    for receipt in receipts[:-1]
+                )
+                or receipts[-1].get("status") != "UNQUALIFIED"
+            ):
+                raise ControllerDataIntegrityError(
+                    "scoring baseline failed-probe receipts are inconsistent"
+                )
+        else:
+            if set(final) != common_keys | {"reason"}:
+                raise ControllerDataIntegrityError(
+                    "scoring baseline aggregation final fields are not exact"
+                )
+            if (
+                len(receipts) != SCORING_BASELINE_QUALIFICATION_RUNS
+                or any(receipt.get("status") != "QUALIFIED" for receipt in receipts)
+            ):
+                raise ControllerDataIntegrityError(
+                    "scoring baseline aggregation receipts are inconsistent"
+                )
+        if not isinstance(final.get("reason"), str) or not final["reason"]:
+            raise ControllerDataIntegrityError(
+                "scoring baseline unqualified reason is invalid"
+            )
+        return final
+
+    def _assert_no_unresolved_scoring_baseline(self) -> None:
+        root = self._scoring_baseline_root()
+        if not root.exists():
+            return
+        if root.is_symlink() or not root.is_dir():
+            raise ControllerDataIntegrityError(
+                "scoring baseline evidence root is not a regular directory"
+            )
+        for operation in sorted(root.iterdir()):
+            if operation.is_symlink() or not operation.is_dir():
+                raise ControllerDataIntegrityError(
+                    "scoring baseline evidence contains an invalid object"
+                )
+            state_path = operation / "state.json"
+            if not state_path.is_file() or state_path.is_symlink():
+                raise ControllerDataIntegrityError(
+                    "scoring baseline operation has no trusted state"
+                )
+            try:
+                state = _strict_json_object_bytes(
+                    state_path.read_bytes(),
+                    label="scoring baseline state",
+                    max_bytes=EVALUATOR_OUTPUT_LIMIT_BYTES,
+                )
+            except (OSError, ValueError) as exc:
+                raise ControllerDataIntegrityError(
+                    f"scoring baseline state is unreadable: {exc}"
+                ) from exc
+            status = state.get("status")
+            try:
+                operation_digest = require_sha256_digest(
+                    state.get("operation_digest"), field="operation_digest"
+                )
+            except ValueError as exc:
+                raise ControllerDataIntegrityError(
+                    "scoring baseline operation digest is invalid"
+                ) from exc
+            expected_operation_id = (
+                "score-baseline-" + operation_digest.removeprefix("sha256:")[:24]
+            )
+            if (
+                state.get("operation_id") != expected_operation_id
+                or operation.name != expected_operation_id
+            ):
+                raise ControllerDataIntegrityError(
+                    "scoring baseline operation directory identity mismatch"
+                )
+            if status not in {
+                "RUNNING",
+                "UNKNOWN_OUTCOME",
+                "QUALIFIED",
+                "UNQUALIFIED",
+            }:
+                raise ControllerDataIntegrityError(
+                    "scoring baseline operation has an invalid status"
+                )
+            if status in {"RUNNING", "UNKNOWN_OUTCOME"}:
+                raise ControlledRuntimeError(
+                    "a scoring baseline probe has an unresolved GPU outcome"
+                )
+
+    def _assert_scoring_host_idle(self) -> None:
+        self._assert_noise_resource_available()
+        with ControllerStore(self.controller_db) as store:
+            running = store.connection.execute(
+                "SELECT id FROM runs WHERE status = 'RUNNING' LIMIT 1"
+            ).fetchone()
+            unresolved = store.connection.execute(
+                """
+                SELECT experiment_uid FROM evaluation_attempts
+                WHERE status IN ('PENDING', 'RUNNING', 'UNKNOWN_OUTCOME')
+                LIMIT 1
+                """
+            ).fetchone()
+        if running is not None:
+            raise ControlledRuntimeError(
+                "scoring baseline qualification requires no active Controller Run"
+            )
+        if unresolved is not None:
+            raise ControlledRuntimeError(
+                "scoring baseline qualification is blocked by an unresolved evaluator"
+            )
+
+    def _authorize_scoring_baseline_probe(
+        self,
+        context: Mapping[str, Any] | None,
+        *,
+        operation_id: str,
+        configured_timeout: float,
+    ) -> None:
+        if (
+            context is None
+            or context.get("operation_id") != operation_id
+            or context.get("status") != "RUNNING"
+            or type(context.get("probe_index")) is not int
+            or configured_timeout != float(self.config.evaluator_timeout_sec)
+        ):
+            raise ControllerDataIntegrityError(
+                "scoring baseline Docker launch has no exact active intent"
+            )
+        state_path = Path(str(context["state_path"]))
+        try:
+            state = _strict_json_object_bytes(
+                state_path.read_bytes(),
+                label="scoring baseline intent",
+                max_bytes=EVALUATOR_OUTPUT_LIMIT_BYTES,
+            )
+        except (OSError, ValueError) as exc:
+            raise ControllerDataIntegrityError(
+                f"scoring baseline intent cannot be re-read: {exc}"
+            ) from exc
+        if (
+            state.get("status") != "RUNNING"
+            or state.get("operation_id") != operation_id
+            or state.get("active_probe_index") != context["probe_index"]
+        ):
+            raise ControllerDataIntegrityError(
+                "scoring baseline durable intent changed before Docker"
+            )
+        self._assert_scoring_host_idle()
+        self._verify_repository()
+
+    def qualify_scoring_baseline(self) -> dict[str, Any]:
+        """Run ten private, non-promotable scoring-baseline probes."""
+
+        if not isinstance(self.evaluator, DockerEvaluator):
+            raise ControlledRuntimeError(
+                "scoring baseline qualification requires DockerEvaluator"
+            )
+        self._prepare_runtime_dirs()
+        self._require_gpu_risk_acknowledgement()
+        host_errors = self.config.validate_host(require_secret=False)
+        if host_errors:
+            raise ControlledRuntimeError("; ".join(host_errors))
+        self._verify_repository()
+        self._prepare_framework()
+        image = self._inspect_image(self.config.evaluator_image)
+        if not image["available"]:
+            raise ControlledRuntimeError("pinned evaluator image is unavailable")
+        operation_material = {
+            "schema_version": 1,
+            "operation": "score-baseline-qualify",
+            "expected_git_commit": self.config.expected_git_commit,
+            "framework_git_commit": self.config.resolved_framework_git_commit,
+            "evaluator_image": self.config.evaluator_image,
+            "reference_source_sha256": scoring_reference_source_sha256(),
+            "timing_protocol": device_event_protocol_snapshot(),
+            "probe_count": SCORING_BASELINE_QUALIFICATION_RUNS,
+        }
+        operation_digest = canonical_sha256(operation_material)
+        operation_id = "score-baseline-" + operation_digest.removeprefix("sha256:")[:24]
+        root = self._scoring_baseline_root()
+        operation_dir = root / operation_id
+        state_path = operation_dir / "state.json"
+        final_path = operation_dir / "final.json"
+
+        with gpu_lock(self.config.controller_dir / "gpu1.lock"):
+            self._assert_no_unresolved_scoring_baseline()
+            self._assert_scoring_host_idle()
+            if final_path.exists():
+                final = self._verify_scoring_baseline_final(
+                    operation_dir=operation_dir,
+                    operation_material=operation_material,
+                    operation_id=operation_id,
+                    operation_digest=operation_digest,
+                )
+                return {**final, "idempotent": True}
+            if operation_dir.exists():
+                raise ControlledRuntimeError(
+                    "scoring baseline operation is incomplete; GPU replay is forbidden"
+                )
+            root.mkdir(parents=True, exist_ok=True)
+            root.chmod(0o700)
+            operation_dir.mkdir(mode=0o700)
+            intent = {
+                **operation_material,
+                "operation_id": operation_id,
+                "operation_digest": operation_digest,
+                "status": "RUNNING",
+                "active_probe_index": None,
+                "completed_probes": 0,
+            }
+            _atomic_write_bytes(
+                operation_dir / "intent.json",
+                (canonical_json_text(intent) + "\n").encode("utf-8"),
+            )
+            _atomic_write_bytes(
+                state_path,
+                (canonical_json_text(intent) + "\n").encode("utf-8"),
+            )
+            probes: list[dict[str, Any]] = []
+            for probe_index in range(SCORING_BASELINE_QUALIFICATION_RUNS):
+                state = {
+                    **intent,
+                    "active_probe_index": probe_index,
+                    "completed_probes": probe_index,
+                }
+                _atomic_write_bytes(
+                    state_path,
+                    (canonical_json_text(state) + "\n").encode("utf-8"),
+                )
+                self._scoring_baseline_context = {
+                    "operation_id": operation_id,
+                    "probe_index": probe_index,
+                    "status": "RUNNING",
+                    "state_path": str(state_path),
+                }
+                try:
+                    result = self.evaluator.scoring_baseline_probe(
+                        operation_id=operation_id,
+                        probe_index=probe_index,
+                        result_dir=operation_dir,
+                    )
+                finally:
+                    self._scoring_baseline_context = None
+                _atomic_write_bytes(
+                    operation_dir / f"probe-{probe_index:02d}.receipt.json",
+                    (canonical_json_text(result) + "\n").encode("utf-8"),
+                )
+                if result.get("status") == "UNKNOWN_OUTCOME":
+                    unknown = {
+                        **state,
+                        "status": "UNKNOWN_OUTCOME",
+                        "error": result.get("error"),
+                    }
+                    _atomic_write_bytes(
+                        state_path,
+                        (canonical_json_text(unknown) + "\n").encode("utf-8"),
+                    )
+                    raise ControlledRuntimeError(
+                        "scoring baseline GPU outcome is unknown; replay is forbidden"
+                    )
+                if result.get("status") != "QUALIFIED":
+                    final = {
+                        **operation_material,
+                        "operation_id": operation_id,
+                        "operation_digest": operation_digest,
+                        "status": "UNQUALIFIED",
+                        "failed_probe_index": probe_index,
+                        "reason": result.get("error", "probe did not qualify"),
+                    }
+                    _atomic_write_bytes(
+                        final_path,
+                        (canonical_json_text(final) + "\n").encode("utf-8"),
+                    )
+                    _atomic_write_bytes(
+                        state_path,
+                        (canonical_json_text(final) + "\n").encode("utf-8"),
+                    )
+                    return {**final, "idempotent": False}
+                probes.append(result)
+            runtime_environment = self._resolved_execution_environment(
+                CURRENT_RESEARCH_NAMESPACE
+            )
+            try:
+                qualification = aggregate_scoring_baseline_probes(
+                    probes,
+                    environment_digest=runtime_environment.digest,
+                    evaluator_profile_digest=CURRENT_RESEARCH_NAMESPACE.evaluator.digest,
+                )
+            except (TypeError, ValueError) as exc:
+                final = {
+                    **operation_material,
+                    "operation_id": operation_id,
+                    "operation_digest": operation_digest,
+                    "status": "UNQUALIFIED",
+                    "reason": f"probe aggregation failed: {exc}",
+                }
+                _atomic_write_bytes(
+                    final_path,
+                    (canonical_json_text(final) + "\n").encode("utf-8"),
+                )
+                _atomic_write_bytes(
+                    state_path,
+                    (canonical_json_text(final) + "\n").encode("utf-8"),
+                )
+                return {**final, "idempotent": False}
+            qualification_bytes = (
+                canonical_json_text(qualification.to_dict()) + "\n"
+            ).encode("utf-8")
+            object_id = self._store_private_object(qualification_bytes)
+            final = {
+                **operation_material,
+                "operation_id": operation_id,
+                "operation_digest": operation_digest,
+                "status": "QUALIFIED" if qualification.qualified else "UNQUALIFIED",
+                "qualification": qualification.to_dict(),
+                "private_object_id": object_id,
+            }
+            _atomic_write_bytes(
+                final_path,
+                (canonical_json_text(final) + "\n").encode("utf-8"),
+            )
+            _atomic_write_bytes(
+                state_path,
+                (canonical_json_text(final) + "\n").encode("utf-8"),
+            )
+            return {**final, "idempotent": False}
 
     def campaign_resume_doctor(
         self,

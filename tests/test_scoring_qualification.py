@@ -9,6 +9,7 @@ from kernel_research.compiled_reference import (
 )
 from kernel_research.device_timing import device_event_protocol_snapshot
 from kernel_research.scoring_qualification import (
+    ScoringBaselineQualification,
     aggregate_scoring_baseline_probes,
     validate_anchor_drift,
 )
@@ -61,10 +62,30 @@ class ScoringQualificationTests(unittest.TestCase):
             qualification.descriptor.case_baseline_ms["decode"], 1.00045
         )
         self.assertRegex(qualification.digest, r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(
+            ScoringBaselineQualification.from_value(qualification.to_dict()),
+            qualification,
+        )
         validate_anchor_drift(
             qualification,
             {case: envelope["p50"] for case, envelope in qualification.case_envelopes_ms.items()},
         )
+
+    def test_serialized_qualification_rejects_tampered_derived_fields(self) -> None:
+        qualification = aggregate_scoring_baseline_probes(
+            [probe(index * 0.0001) for index in range(10)],
+            environment_digest=DIGEST_A,
+            evaluator_profile_digest=DIGEST_B,
+        )
+        tampered = copy.deepcopy(qualification.to_dict())
+        tampered["case_envelopes_ms"]["decode"]["p50"] = 2.0
+        with self.assertRaisesRegex(ValueError, "inconsistent"):
+            ScoringBaselineQualification.from_value(tampered)
+
+        tampered = copy.deepcopy(qualification.to_dict())
+        tampered["probe_digests"][0] = DIGEST_B
+        with self.assertRaisesRegex(ValueError, "digest or fields differ"):
+            ScoringBaselineQualification.from_value(tampered)
 
     def test_unstable_probes_remain_unqualified(self) -> None:
         probes = [probe(0.0) for _ in range(5)] + [probe(0.2) for _ in range(5)]

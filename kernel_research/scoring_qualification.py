@@ -10,7 +10,11 @@ from typing import Any, Mapping, Sequence
 
 from .device_timing import device_event_protocol_snapshot
 from .objective_scoring import ScoringBaselineDescriptor
-from .platform.canonical import canonical_sha256, require_sha256_digest
+from .platform.canonical import (
+    canonical_json_text,
+    canonical_sha256,
+    require_sha256_digest,
+)
 
 
 SCORING_BASELINE_QUALIFICATION_RUNS = 10
@@ -38,16 +42,62 @@ class ScoringBaselineQualification:
     schema_version: int = 1
 
     def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise ValueError("unsupported scoring baseline qualification schema")
+        if type(self.qualified) is not bool:
+            raise TypeError("qualified must be a boolean")
+        if not isinstance(self.reason, str) or not self.reason:
+            raise ValueError("qualification reason must be a non-empty string")
+        if self.qualified != (self.reason == "qualified"):
+            raise ValueError("qualification status and reason disagree")
         if len(self.probe_digests) != SCORING_BASELINE_QUALIFICATION_RUNS:
             raise ValueError("qualification requires exactly ten probe digests")
         for digest in self.probe_digests:
             require_sha256_digest(digest, field="probe_digest")
-        normalized = {
-            case_id: MappingProxyType(
-                {key: float(value) for key, value in sorted(envelope.items())}
-            )
-            for case_id, envelope in sorted(self.case_envelopes_ms.items())
-        }
+        if set(self.case_envelopes_ms) != set(self.descriptor.case_baseline_ms):
+            raise ValueError("qualification and descriptor case sets differ")
+        expected_envelope_keys = {"p01", "p50", "p99", "mad", "relative_mad"}
+        normalized: dict[str, Mapping[str, float]] = {}
+        for case_id, envelope in sorted(self.case_envelopes_ms.items()):
+            if not isinstance(case_id, str) or not case_id:
+                raise ValueError("qualification case ID must be a non-empty string")
+            if (
+                not isinstance(envelope, Mapping)
+                or set(envelope) != expected_envelope_keys
+            ):
+                raise ValueError("qualification case envelope fields are not exact")
+            values: dict[str, float] = {}
+            for key in sorted(expected_envelope_keys):
+                raw = envelope[key]
+                if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                    raise TypeError("qualification envelope values must be numeric")
+                value = float(raw)
+                if not math.isfinite(value) or value < 0.0:
+                    raise ValueError(
+                        "qualification envelope values must be finite and non-negative"
+                    )
+                values[key] = value
+            if (
+                values["p01"] <= 0.0
+                or values["p50"] <= 0.0
+                or values["p99"] <= 0.0
+                or values["p01"] > values["p50"]
+                or values["p50"] > values["p99"]
+                or not math.isclose(
+                    values["p50"],
+                    float(self.descriptor.case_baseline_ms[case_id]),
+                    rel_tol=1.0e-12,
+                    abs_tol=1.0e-12,
+                )
+                or not math.isclose(
+                    values["relative_mad"],
+                    values["mad"] / values["p50"],
+                    rel_tol=1.0e-12,
+                    abs_tol=1.0e-12,
+                )
+            ):
+                raise ValueError("qualification case envelope is inconsistent")
+            normalized[case_id] = MappingProxyType(values)
         object.__setattr__(self, "case_envelopes_ms", MappingProxyType(normalized))
 
     @property
@@ -69,6 +119,44 @@ class ScoringBaselineQualification:
         if include_digest:
             value["digest"] = self.digest
         return value
+
+    @classmethod
+    def from_value(
+        cls, value: Mapping[str, object]
+    ) -> "ScoringBaselineQualification":
+        expected_keys = {
+            "schema_version",
+            "descriptor",
+            "probe_digests",
+            "case_envelopes_ms",
+            "qualified",
+            "reason",
+            "digest",
+        }
+        if set(value) != expected_keys:
+            raise ValueError("scoring baseline qualification fields are not exact")
+        descriptor_value = value["descriptor"]
+        probe_digests = value["probe_digests"]
+        envelopes = value["case_envelopes_ms"]
+        if not isinstance(descriptor_value, Mapping):
+            raise ValueError("qualification descriptor must be an object")
+        if not isinstance(probe_digests, Sequence) or isinstance(
+            probe_digests, (str, bytes)
+        ):
+            raise ValueError("qualification probe_digests must be an array")
+        if not isinstance(envelopes, Mapping):
+            raise ValueError("qualification case_envelopes_ms must be an object")
+        qualification = cls(
+            schema_version=value["schema_version"],  # type: ignore[arg-type]
+            descriptor=ScoringBaselineDescriptor.from_value(descriptor_value),
+            probe_digests=tuple(probe_digests),  # type: ignore[arg-type]
+            case_envelopes_ms=envelopes,  # type: ignore[arg-type]
+            qualified=value["qualified"],  # type: ignore[arg-type]
+            reason=value["reason"],  # type: ignore[arg-type]
+        )
+        if canonical_json_text(qualification.to_dict()) != canonical_json_text(value):
+            raise ValueError("scoring baseline qualification digest or fields differ")
+        return qualification
 
 
 def aggregate_scoring_baseline_probes(

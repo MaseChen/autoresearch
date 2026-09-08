@@ -17,8 +17,9 @@
 - [x] Implement evaluator-side qualification probe and immutable descriptor
   aggregation.
 - [x] Implement balanced device-event timing records.
-- [ ] Add trusted-host ten-probe orchestration and durable private evidence.
-- [ ] Add fail-closed graph-break, fallback, drift, and timeout tests.
+- [x] Add trusted-host ten-probe orchestration and durable private evidence.
+- [x] Add fail-closed graph-break, fallback, drift, timeout, output, and
+  status/identity mismatch handling.
 
 ### Phase 3: Trusted integration
 

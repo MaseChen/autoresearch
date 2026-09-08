@@ -85,6 +85,13 @@ def _score_baseline_probe(_args: argparse.Namespace) -> int:
     return 0 if payload.get("status") == "QUALIFIED" else 2
 
 
+def _score_baseline_qualify(args: argparse.Namespace) -> int:
+    controller = ResearchController(ControllerConfig.load(args.config))
+    payload = controller.qualify_scoring_baseline()
+    _print_json(payload)
+    return 0 if payload.get("status") == "QUALIFIED" else 2
+
+
 def evaluate_and_record(
     candidate_path: str | Path,
     *,
@@ -450,6 +457,17 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     score_baseline_probe.set_defaults(handler=_score_baseline_probe)
+
+    score = subparsers.add_parser(
+        "score", help="qualify and inspect versioned objective scoring evidence"
+    )
+    score_commands = score.add_subparsers(dest="score_command", required=True)
+    score_baseline_qualify = score_commands.add_parser(
+        "baseline-qualify",
+        help="run the fixed ten-probe compiled scoring baseline qualification",
+    )
+    score_baseline_qualify.add_argument("--config", required=True)
+    score_baseline_qualify.set_defaults(handler=_score_baseline_qualify)
 
     evaluate = subparsers.add_parser(
         "evaluate",
