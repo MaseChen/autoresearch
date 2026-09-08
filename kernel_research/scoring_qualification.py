@@ -9,21 +9,28 @@ from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 from .device_timing import device_event_protocol_snapshot
-from .objective_scoring import ScoringBaselineDescriptor
+from .objective_scoring import ObjectiveScoreReport, ScoringBaselineDescriptor
 from .platform.canonical import (
     canonical_json_text,
     canonical_sha256,
     require_sha256_digest,
 )
 from .scoring_measurement import (
+    MAX_AGGREGATE_PARITY_BIAS_POINTS,
+    MAX_AGGREGATE_PROBE_DEVIATION_POINTS,
+    MAX_AGGREGATE_SCORE_MAD_POINTS,
+    MAX_CASE_RELATIVE_MAD,
     MAX_COMPILED_TO_EAGER_RATIO,
     MIN_SCORING_REFERENCE_MATCHED_RATIO,
+    SCORING_BASELINE_QUALIFICATION_RUNS,
     scoring_baseline_measurement_contract_snapshot,
+    scoring_baseline_stability_contract_snapshot,
     validate_device_event_measurement,
 )
 
 
-SCORING_BASELINE_QUALIFICATION_RUNS = 10
+# Retained only to verify schema-V1 evidence.  New qualifications use the
+# score-aligned stability contract embedded in the measurement identity.
 MAX_RELATIVE_MAD = 0.005
 
 
@@ -45,10 +52,12 @@ class ScoringBaselineQualification:
     case_envelopes_ms: Mapping[str, Mapping[str, float]]
     qualified: bool
     reason: str
-    schema_version: int = 1
+    aggregate_score_envelope: Mapping[str, float] | None = None
+    qualification_stability: Mapping[str, object] | None = None
+    schema_version: int = 2
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1:
+        if self.schema_version not in {1, 2}:
             raise ValueError("unsupported scoring baseline qualification schema")
         if type(self.qualified) is not bool:
             raise TypeError("qualified must be a boolean")
@@ -105,6 +114,98 @@ class ScoringBaselineQualification:
                 raise ValueError("qualification case envelope is inconsistent")
             normalized[case_id] = MappingProxyType(values)
         object.__setattr__(self, "case_envelopes_ms", MappingProxyType(normalized))
+        if self.schema_version == 1:
+            if (
+                self.aggregate_score_envelope is not None
+                or self.qualification_stability is not None
+            ):
+                raise ValueError("schema-V1 qualification has V2 stability fields")
+            return
+        expected_stability = scoring_baseline_stability_contract_snapshot()
+        if self.qualification_stability != expected_stability:
+            raise ValueError("qualification stability contract changed")
+        raw_aggregate = self.aggregate_score_envelope
+        expected_aggregate_keys = {
+            "p01",
+            "p50",
+            "p99",
+            "mad",
+            "relative_mad",
+            "parity_bias_points",
+            "maximum_probe_deviation_points",
+        }
+        if (
+            not isinstance(raw_aggregate, Mapping)
+            or set(raw_aggregate) != expected_aggregate_keys
+        ):
+            raise ValueError("aggregate score envelope fields are not exact")
+        aggregate: dict[str, float] = {}
+        for key in sorted(expected_aggregate_keys):
+            raw = raw_aggregate[key]
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                raise TypeError("aggregate score envelope values must be numeric")
+            value = float(raw)
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(
+                    "aggregate score envelope values must be finite and non-negative"
+                )
+            aggregate[key] = value
+        if (
+            aggregate["p01"] <= 0.0
+            or aggregate["p01"] > aggregate["p50"]
+            or aggregate["p50"] > aggregate["p99"]
+            or not math.isclose(
+                aggregate["relative_mad"],
+                aggregate["mad"] / aggregate["p50"],
+                rel_tol=1.0e-12,
+                abs_tol=1.0e-12,
+            )
+            or not math.isclose(
+                aggregate["parity_bias_points"],
+                abs(aggregate["p50"] - 50.0),
+                rel_tol=1.0e-12,
+                abs_tol=1.0e-12,
+            )
+            or aggregate["maximum_probe_deviation_points"]
+            < max(
+                abs(aggregate["p01"] - 50.0),
+                abs(aggregate["p50"] - 50.0),
+                abs(aggregate["p99"] - 50.0),
+            )
+        ):
+            raise ValueError("aggregate score envelope is inconsistent")
+        case_stability_exceeded = any(
+            envelope["relative_mad"] > MAX_CASE_RELATIVE_MAD
+            for envelope in normalized.values()
+        )
+        if case_stability_exceeded:
+            expected_reason = "case_relative_mad_exceeded"
+        elif aggregate["mad"] > MAX_AGGREGATE_SCORE_MAD_POINTS:
+            expected_reason = "aggregate_score_mad_exceeded"
+        elif (
+            aggregate["parity_bias_points"]
+            > MAX_AGGREGATE_PARITY_BIAS_POINTS
+        ):
+            expected_reason = "aggregate_score_parity_bias_exceeded"
+        elif (
+            aggregate["maximum_probe_deviation_points"]
+            > MAX_AGGREGATE_PROBE_DEVIATION_POINTS
+        ):
+            expected_reason = "aggregate_score_probe_deviation_exceeded"
+        else:
+            expected_reason = "qualified"
+        if self.reason != expected_reason:
+            raise ValueError("qualification result disagrees with stability evidence")
+        object.__setattr__(
+            self,
+            "aggregate_score_envelope",
+            MappingProxyType(aggregate),
+        )
+        object.__setattr__(
+            self,
+            "qualification_stability",
+            MappingProxyType(dict(expected_stability)),
+        )
 
     @property
     def digest(self) -> str:
@@ -122,6 +223,17 @@ class ScoringBaselineQualification:
             "qualified": self.qualified,
             "reason": self.reason,
         }
+        if self.schema_version == 2:
+            value.update(
+                {
+                    "aggregate_score_envelope": dict(
+                        self.aggregate_score_envelope or {}
+                    ),
+                    "qualification_stability": dict(
+                        self.qualification_stability or {}
+                    ),
+                }
+            )
         if include_digest:
             value["digest"] = self.digest
         return value
@@ -139,6 +251,11 @@ class ScoringBaselineQualification:
             "reason",
             "digest",
         }
+        if value.get("schema_version") == 2:
+            expected_keys |= {
+                "aggregate_score_envelope",
+                "qualification_stability",
+            }
         if set(value) != expected_keys:
             raise ValueError("scoring baseline qualification fields are not exact")
         descriptor_value = value["descriptor"]
@@ -159,6 +276,12 @@ class ScoringBaselineQualification:
             case_envelopes_ms=envelopes,  # type: ignore[arg-type]
             qualified=value["qualified"],  # type: ignore[arg-type]
             reason=value["reason"],  # type: ignore[arg-type]
+            aggregate_score_envelope=value.get(  # type: ignore[arg-type]
+                "aggregate_score_envelope"
+            ),
+            qualification_stability=value.get(  # type: ignore[arg-type]
+                "qualification_stability"
+            ),
         )
         if canonical_json_text(qualification.to_dict()) != canonical_json_text(value):
             raise ValueError("scoring baseline qualification digest or fields differ")
@@ -182,6 +305,7 @@ def aggregate_scoring_baseline_probes(
     )
     identity: tuple[object, ...] | None = None
     case_samples: dict[str, list[float]] = {}
+    probe_case_samples: list[dict[str, float]] = []
     probe_digests: list[str] = []
     reference_digest = ""
     compiler_config: Mapping[str, object] = {}
@@ -227,6 +351,7 @@ def aggregate_scoring_baseline_probes(
         elif current_identity != identity:
             raise ValueError("scoring baseline probe identity drift")
         probe_digests.append(canonical_sha256(probe))
+        probe_samples: dict[str, float] = {}
         for case in cases:
             if not isinstance(case, Mapping) or set(case) != {
                 "case_id",
@@ -304,6 +429,10 @@ def aggregate_scoring_baseline_probes(
             ):
                 raise ValueError("probe compiled-to-eager ratio is inconsistent")
             case_samples.setdefault(case_id, []).append(float(latency))
+            if case_id in probe_samples:
+                raise ValueError("probe case identity is duplicated")
+            probe_samples[case_id] = float(latency)
+        probe_case_samples.append(probe_samples)
     if any(
         len(values) != SCORING_BASELINE_QUALIFICATION_RUNS
         for values in case_samples.values()
@@ -312,8 +441,7 @@ def aggregate_scoring_baseline_probes(
 
     baselines: dict[str, float] = {}
     envelopes: dict[str, dict[str, float]] = {}
-    qualified = True
-    reason = "qualified"
+    case_stability_exceeded = False
     for case_id, values in sorted(case_samples.items()):
         median = statistics.median(values)
         mad = statistics.median(abs(value - median) for value in values)
@@ -326,9 +454,45 @@ def aggregate_scoring_baseline_probes(
             "mad": mad,
             "relative_mad": relative_mad,
         }
-        if relative_mad > MAX_RELATIVE_MAD:
-            qualified = False
-            reason = "relative_mad_exceeded"
+        if relative_mad > MAX_CASE_RELATIVE_MAD:
+            case_stability_exceeded = True
+    aggregate_scores = [
+        ObjectiveScoreReport.calculate(samples, baselines).objective_score
+        for samples in probe_case_samples
+    ]
+    aggregate_median = statistics.median(aggregate_scores)
+    aggregate_mad = statistics.median(
+        abs(score - aggregate_median) for score in aggregate_scores
+    )
+    aggregate_envelope = {
+        "p01": _quantile(aggregate_scores, 0.01),
+        "p50": aggregate_median,
+        "p99": _quantile(aggregate_scores, 0.99),
+        "mad": aggregate_mad,
+        "relative_mad": aggregate_mad / aggregate_median,
+        "parity_bias_points": abs(aggregate_median - 50.0),
+        "maximum_probe_deviation_points": max(
+            abs(score - 50.0) for score in aggregate_scores
+        ),
+    }
+    qualified = False
+    if case_stability_exceeded:
+        reason = "case_relative_mad_exceeded"
+    elif aggregate_mad > MAX_AGGREGATE_SCORE_MAD_POINTS:
+        reason = "aggregate_score_mad_exceeded"
+    elif (
+        aggregate_envelope["parity_bias_points"]
+        > MAX_AGGREGATE_PARITY_BIAS_POINTS
+    ):
+        reason = "aggregate_score_parity_bias_exceeded"
+    elif (
+        aggregate_envelope["maximum_probe_deviation_points"]
+        > MAX_AGGREGATE_PROBE_DEVIATION_POINTS
+    ):
+        reason = "aggregate_score_probe_deviation_exceeded"
+    else:
+        qualified = True
+        reason = "qualified"
     descriptor = ScoringBaselineDescriptor(
         environment_digest=environment_digest,
         evaluator_profile_digest=evaluator_profile_digest,
@@ -347,6 +511,8 @@ def aggregate_scoring_baseline_probes(
         case_envelopes_ms=envelopes,
         qualified=qualified,
         reason=reason,
+        aggregate_score_envelope=aggregate_envelope,
+        qualification_stability=scoring_baseline_stability_contract_snapshot(),
     )
 
 

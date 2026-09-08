@@ -1771,6 +1771,31 @@ class ResearchController:
                 raise ControllerDataIntegrityError(
                     "scoring baseline receipt digest mismatch"
                 )
+            if qualification.schema_version == 2:
+                runtime_environment = self._resolved_execution_environment(
+                    CURRENT_RESEARCH_NAMESPACE
+                )
+                try:
+                    reconstructed = aggregate_scoring_baseline_probes(
+                        receipts,
+                        environment_digest=runtime_environment.digest,
+                        evaluator_profile_digest=(
+                            CURRENT_RESEARCH_NAMESPACE.evaluator.digest
+                        ),
+                        scoring_framework_git_commit=str(
+                            operation_material["scoring_framework_git_commit"]
+                        ),
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ControllerDataIntegrityError(
+                        f"scoring baseline qualification cannot be reconstructed: {exc}"
+                    ) from exc
+                if canonical_json_text(reconstructed.to_dict()) != (
+                    canonical_json_text(qualification.to_dict())
+                ):
+                    raise ControllerDataIntegrityError(
+                        "scoring baseline qualification differs from receipts"
+                    )
             qualification_bytes = (
                 canonical_json_text(qualification.to_dict()) + "\n"
             ).encode("utf-8")

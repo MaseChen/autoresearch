@@ -1,6 +1,6 @@
 # XPU-OJ-Aligned Scoring V2 Progress
 
-## Status: Phase 2 - Measurement protocol implemented; qualification required
+## Status: Phase 2 - V1 pilot sealed; score-aligned V2 validation required
 
 ## Phase progress
 
@@ -31,6 +31,10 @@
   release policy into the measurement identity.
 - [x] Add an incident-specific, no-replay finalizer for the archived `e099b2b`
   memory-cgroup OOM, including a fresh doctor and resumable durable evidence.
+- [x] Complete and seal the bounded ten-probe V1 stability pilot.
+- [x] Preserve its `UNQUALIFIED / relative_mad_exceeded` result without replay.
+- [x] Bind score-aligned case and aggregate stability rules into measurement
+  contract V2 and reaggregate receipts during idempotent verification.
 
 First server qualification attempt (`65e5365`) stopped before Torch or GPU
 dispatch because the container correctly mounted the older scientific
@@ -55,6 +59,16 @@ fresh doctor.  The normal doctor authorization rejected it before Docker with
 failure and return code remain attached to the operation.  The follow-up uses
 the existing standalone `preflight` doctor identity and records a separate
 retry intent, without replacing the first recovery intent.
+
+The bounded replacement then completed all ten probes. All probe-local
+correctness and compile-performance proofs passed, but the immutable aggregate
+was `UNQUALIFIED`: `full_decode_down` relative MAD was 0.509658%, just above
+the V1 0.5% per-case threshold. The sealed evidence manifest is
+`fa3a6fc4911978b6f3e05c6dd5da83ff067a59c9eebf01dcb126d830e03f56ad`.
+This pilot cannot activate scoring. Its four-case self-score MAD was only
+0.04768 points, so the replacement contract directly gates the actual
+arithmetic-mean score while retaining a 1% per-case hard guard. A new digest,
+commit and independent ten-probe validation are required.
 
 ### Phase 3: Trusted integration
 

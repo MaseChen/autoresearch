@@ -10,9 +10,40 @@ from .device_timing import device_event_protocol_snapshot
 from .platform.canonical import canonical_sha256
 
 
-SCORING_BASELINE_MEASUREMENT_SCHEMA_VERSION = 1
+SCORING_BASELINE_MEASUREMENT_SCHEMA_VERSION = 2
 MIN_SCORING_REFERENCE_MATCHED_RATIO = 0.99
 MAX_COMPILED_TO_EAGER_RATIO = 1.01
+SCORING_BASELINE_QUALIFICATION_RUNS = 10
+SCORING_BASELINE_STABILITY_PROTOCOL_ID = "xpuoj-th0-aggregate-stability-v2"
+MAX_CASE_RELATIVE_MAD = 0.01
+MAX_AGGREGATE_SCORE_MAD_POINTS = 0.125
+MAX_AGGREGATE_PARITY_BIAS_POINTS = 0.05
+MAX_AGGREGATE_PROBE_DEVIATION_POINTS = 0.50
+
+
+def scoring_baseline_stability_contract_snapshot() -> dict[str, object]:
+    """Freeze the score-aligned cross-probe qualification rule."""
+
+    snapshot: dict[str, object] = {
+        "protocol_id": SCORING_BASELINE_STABILITY_PROTOCOL_ID,
+        "probe_count": SCORING_BASELINE_QUALIFICATION_RUNS,
+        "case_statistic": "relative-mad-of-probe-anchor-medians",
+        "maximum_case_relative_mad": MAX_CASE_RELATIVE_MAD,
+        "aggregate_formula": "arithmetic-mean-of-th0-self-scores",
+        "aggregate_case_weighting": "equal",
+        "aggregate_parity_score": 50.0,
+        "aggregate_statistic": "median-and-mad-of-probe-self-scores",
+        "maximum_aggregate_score_mad_points": (
+            MAX_AGGREGATE_SCORE_MAD_POINTS
+        ),
+        "maximum_aggregate_parity_bias_points": (
+            MAX_AGGREGATE_PARITY_BIAS_POINTS
+        ),
+        "maximum_aggregate_probe_deviation_points": (
+            MAX_AGGREGATE_PROBE_DEVIATION_POINTS
+        ),
+    }
+    return {**snapshot, "digest": canonical_sha256(snapshot)}
 
 
 def scoring_baseline_measurement_contract_snapshot() -> dict[str, object]:
@@ -31,6 +62,7 @@ def scoring_baseline_measurement_contract_snapshot() -> dict[str, object]:
         "performance_role": "qualification-only-non-regression-proof",
         "minimum_correctness_ratio": MIN_SCORING_REFERENCE_MATCHED_RATIO,
         "maximum_compiled_to_eager_ratio": MAX_COMPILED_TO_EAGER_RATIO,
+        "qualification_stability": scoring_baseline_stability_contract_snapshot(),
         "timing_protocol": device_event_protocol_snapshot(),
     }
     return {**snapshot, "digest": canonical_sha256(snapshot)}
@@ -133,9 +165,16 @@ def validate_device_event_measurement(
 
 
 __all__ = [
+    "MAX_AGGREGATE_PARITY_BIAS_POINTS",
+    "MAX_AGGREGATE_PROBE_DEVIATION_POINTS",
+    "MAX_AGGREGATE_SCORE_MAD_POINTS",
+    "MAX_CASE_RELATIVE_MAD",
     "MAX_COMPILED_TO_EAGER_RATIO",
     "MIN_SCORING_REFERENCE_MATCHED_RATIO",
+    "SCORING_BASELINE_QUALIFICATION_RUNS",
     "SCORING_BASELINE_MEASUREMENT_SCHEMA_VERSION",
+    "SCORING_BASELINE_STABILITY_PROTOCOL_ID",
     "scoring_baseline_measurement_contract_snapshot",
+    "scoring_baseline_stability_contract_snapshot",
     "validate_device_event_measurement",
 ]

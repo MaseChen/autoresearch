@@ -28,6 +28,14 @@
   another case is prepared; this memory policy is part of the measurement
   contract digest.
 - Baseline qualification produces an immutable descriptor or fails closed.
+- Qualification schema V2 records both per-case anchor envelopes and the
+  equal-weight aggregate self-score envelope. The measurement identity binds
+  a 1% per-case MAD guard, 0.125-point aggregate MAD guard, 0.05-point parity
+  bias guard and 0.5-point per-probe deviation guard. The trusted host
+  reconstructs the V2 qualification from all ten receipts on idempotent read.
+- Schema-V1 terminal evidence remains verifiable but cannot be reinterpreted
+  under V2. A V1 `UNQUALIFIED` pilot never supplies a baseline descriptor to
+  scoring integration.
 - The scoring worker runs from an exact Git-materialized scoring snapshot and
   echoes that commit into every probe, qualification, and baseline descriptor;
   it never changes the separately frozen scientific evaluator framework.

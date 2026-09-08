@@ -32,7 +32,7 @@ from kernel_research.device_timing import (
 from kernel_research.scoring_measurement import (
     scoring_baseline_measurement_contract_snapshot,
 )
-from kernel_research.platform.canonical import canonical_sha256
+from kernel_research.platform.canonical import canonical_json_text, canonical_sha256
 
 
 DIGEST_A = "sha256:" + "a" * 64
@@ -167,6 +167,8 @@ def write_oom_incident(controller: ResearchController) -> Path:
     measurement_contract = scoring_baseline_measurement_contract_snapshot()
     measurement_contract.pop("digest")
     measurement_contract.pop("case_memory_policy")
+    measurement_contract.pop("qualification_stability")
+    measurement_contract["schema_version"] = 1
     measurement_contract["digest"] = canonical_sha256(measurement_contract)
     assert measurement_contract["digest"] == SCORING_OOM_MEASUREMENT_DIGEST
     material = {
@@ -817,6 +819,52 @@ class ScoringControllerTests(unittest.TestCase):
                 with self.assertRaisesRegex(Exception, expected):
                     controller.qualify_scoring_baseline()
                 self.assertEqual(runner.calls, 10)
+
+    def test_idempotent_replay_reaggregates_v2_qualification(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner = ProbeRunner()
+            controller = self.controller(root, runner)
+            result = controller.qualify_scoring_baseline()
+            operation = (
+                controller.config.controller_dir
+                / "scoring-baseline"
+                / result["operation_id"]
+            )
+            final = json.loads(
+                (operation / "final.json").read_text(encoding="utf-8")
+            )
+            qualification = final["qualification"]
+            aggregate = qualification["aggregate_score_envelope"]
+            aggregate["p01"] = (aggregate["p01"] + aggregate["p50"]) / 2.0
+            unsigned = dict(qualification)
+            unsigned.pop("digest")
+            qualification["digest"] = canonical_sha256(unsigned)
+            qualification_bytes = (
+                canonical_json_text(qualification) + "\n"
+            ).encode("utf-8")
+            object_id = canonical_sha256(qualification)
+            raw_digest = object_id.removeprefix("sha256:")
+            object_path = (
+                controller.config.controller_dir
+                / "objects"
+                / "sha256"
+                / raw_digest[:2]
+                / raw_digest[2:]
+            )
+            object_path.parent.mkdir(parents=True, exist_ok=True)
+            object_path.write_bytes(qualification_bytes)
+            final["private_object_id"] = object_id
+            encoded_final = canonical_json_text(final) + "\n"
+            (operation / "final.json").write_text(
+                encoded_final, encoding="utf-8"
+            )
+            (operation / "state.json").write_text(
+                encoded_final, encoding="utf-8"
+            )
+            with self.assertRaisesRegex(Exception, "differs from receipts"):
+                controller.qualify_scoring_baseline()
+            self.assertEqual(runner.calls, 10)
 
     def test_terminal_state_and_operation_directory_identity_are_reproved(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

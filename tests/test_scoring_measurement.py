@@ -5,7 +5,12 @@ import unittest
 
 from kernel_research.device_timing import DeviceEventMeasurement, DeviceEventRound
 from kernel_research.scoring_measurement import (
+    MAX_AGGREGATE_PARITY_BIAS_POINTS,
+    MAX_AGGREGATE_PROBE_DEVIATION_POINTS,
+    MAX_AGGREGATE_SCORE_MAD_POINTS,
+    MAX_CASE_RELATIVE_MAD,
     scoring_baseline_measurement_contract_snapshot,
+    scoring_baseline_stability_contract_snapshot,
     validate_device_event_measurement,
 )
 
@@ -28,6 +33,7 @@ class ScoringMeasurementTests(unittest.TestCase):
     def test_contract_is_canonical_and_role_separated(self) -> None:
         first = scoring_baseline_measurement_contract_snapshot()
         self.assertEqual(first, scoring_baseline_measurement_contract_snapshot())
+        self.assertEqual(first["schema_version"], 2)
         self.assertEqual(
             first["anchor_pairing"],
             "compiled-reference-vs-compiled-reference",
@@ -50,6 +56,22 @@ class ScoringMeasurementTests(unittest.TestCase):
             first["performance_role"],
             "qualification-only-non-regression-proof",
         )
+        stability = first["qualification_stability"]
+        self.assertEqual(stability, scoring_baseline_stability_contract_snapshot())
+        self.assertEqual(stability["maximum_case_relative_mad"], 0.01)
+        self.assertEqual(
+            stability["maximum_aggregate_score_mad_points"], 0.125
+        )
+        self.assertEqual(
+            stability["maximum_aggregate_parity_bias_points"], 0.05
+        )
+        self.assertEqual(
+            stability["maximum_aggregate_probe_deviation_points"], 0.50
+        )
+        self.assertEqual(MAX_CASE_RELATIVE_MAD, 0.01)
+        self.assertEqual(MAX_AGGREGATE_SCORE_MAD_POINTS, 0.125)
+        self.assertEqual(MAX_AGGREGATE_PARITY_BIAS_POINTS, 0.05)
+        self.assertEqual(MAX_AGGREGATE_PROBE_DEVIATION_POINTS, 0.50)
         self.assertRegex(str(first["digest"]), r"^sha256:[0-9a-f]{64}$")
 
     def test_measurement_recomputes_zero_mad_and_combined_median(self) -> None:

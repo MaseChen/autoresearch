@@ -34,6 +34,14 @@ score or a measured hardware-efficiency score.
   in the first real run.  Phase ordering is retained, but each deterministic
   case is now regenerated for the proof phase and released before the next
   case.  This is a resource-correctness requirement, not a scoring change.
+- The first memory-bounded ten-probe pilot completed without OOM and every
+  probe passed its local correctness and compilation proof. Its V1 aggregate
+  remained unqualified because the shortest case exceeded the per-case 0.5%
+  relative-MAD limit by `0.000096581386109984`. The equal-weight four-case
+  self-score was materially more stable (0.04768 score-point MAD). V2 keeps a
+  per-case hard guard but qualifies the actual arithmetic-mean score directly;
+  the pilot is never retroactively accepted and a fresh ten-probe operation is
+  mandatory. See [PILOT-QUALIFICATION.md](PILOT-QUALIFICATION.md).
 - The current semantic reference may not compile as one full graph.  Any graph
   break, fallback, incorrect output, or unsupported W8A8 path must leave the
   scoring baseline unqualified rather than silently selecting another anchor.
@@ -46,4 +54,5 @@ score or a measured hardware-efficiency score.
 - KernelBench `fast_p` and iterative execution feedback
 - PyTorch benchmark and `torch.compile` guidance
 - Triton `do_bench` warmup/replicate contract
+- SOL-ExecBench clock-locking and published run-to-run variance guidance
 - MetaX XPU-OJ scoring and timing documentation

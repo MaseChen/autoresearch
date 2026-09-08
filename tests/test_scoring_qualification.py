@@ -10,11 +10,15 @@ from kernel_research.compiled_reference import (
 from kernel_research.device_timing import device_event_protocol_snapshot
 from kernel_research.device_timing import DeviceEventMeasurement, DeviceEventRound
 from kernel_research.scoring_qualification import (
+    MAX_RELATIVE_MAD,
     ScoringBaselineQualification,
     aggregate_scoring_baseline_probes,
     validate_anchor_drift,
 )
 from kernel_research.scoring_measurement import (
+    MAX_AGGREGATE_PROBE_DEVIATION_POINTS,
+    MAX_AGGREGATE_SCORE_MAD_POINTS,
+    MAX_CASE_RELATIVE_MAD,
     scoring_baseline_measurement_contract_snapshot,
 )
 
@@ -70,6 +74,15 @@ def probe(offset: float = 0.0) -> dict:
     }
 
 
+def scale_anchor(probe_value: dict, scale: float) -> dict:
+    value = copy.deepcopy(probe_value)
+    for case in value["cases"]:
+        anchor = float(case["anchor_median_ms"]) * scale
+        case["anchor_median_ms"] = anchor
+        case["anchor_measurement"] = measurement(anchor, anchor)
+    return value
+
+
 class ScoringQualificationTests(unittest.TestCase):
     def test_ten_stable_probes_create_frozen_descriptor_and_envelope(self) -> None:
         probes = [probe(index * 0.0001) for index in range(10)]
@@ -82,6 +95,12 @@ class ScoringQualificationTests(unittest.TestCase):
         self.assertTrue(qualification.qualified)
         self.assertEqual(qualification.reason, "qualified")
         self.assertEqual(len(qualification.probe_digests), 10)
+        self.assertEqual(qualification.schema_version, 2)
+        self.assertIsNotNone(qualification.aggregate_score_envelope)
+        self.assertLessEqual(
+            qualification.aggregate_score_envelope["mad"],
+            MAX_AGGREGATE_SCORE_MAD_POINTS,
+        )
         self.assertAlmostEqual(
             qualification.descriptor.case_baseline_ms["decode"], 1.00045
         )
@@ -115,6 +134,23 @@ class ScoringQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "digest or fields differ"):
             ScoringBaselineQualification.from_value(tampered)
 
+        tampered = copy.deepcopy(qualification.to_dict())
+        tampered["aggregate_score_envelope"]["mad"] = 1.0
+        with self.assertRaisesRegex(ValueError, "inconsistent"):
+            ScoringBaselineQualification.from_value(tampered)
+
+        tampered = copy.deepcopy(qualification.to_dict())
+        tampered["qualification_stability"]["maximum_case_relative_mad"] = 2.0
+        with self.assertRaisesRegex(ValueError, "stability contract"):
+            ScoringBaselineQualification.from_value(tampered)
+
+        tampered = copy.deepcopy(qualification.to_dict())
+        tampered["aggregate_score_envelope"][
+            "maximum_probe_deviation_points"
+        ] = 0.0
+        with self.assertRaisesRegex(ValueError, "inconsistent"):
+            ScoringBaselineQualification.from_value(tampered)
+
     def test_unstable_probes_remain_unqualified(self) -> None:
         probes = [probe(0.0) for _ in range(5)] + [probe(0.2) for _ in range(5)]
         qualification = aggregate_scoring_baseline_probes(
@@ -124,11 +160,83 @@ class ScoringQualificationTests(unittest.TestCase):
             scoring_framework_git_commit=SCORING_COMMIT,
         )
         self.assertFalse(qualification.qualified)
-        self.assertEqual(qualification.reason, "relative_mad_exceeded")
+        self.assertEqual(qualification.reason, "case_relative_mad_exceeded")
         with self.assertRaisesRegex(ValueError, "not active"):
             validate_anchor_drift(
                 qualification, {"decode": 1.0, "prefill": 10.0}
             )
+
+    def test_aggregate_score_stability_is_an_independent_gate(self) -> None:
+        probes = [
+            scale_anchor(probe(), scale)
+            for scale in ([0.991] * 5 + [1.009] * 5)
+        ]
+        qualification = aggregate_scoring_baseline_probes(
+            probes,
+            environment_digest=DIGEST_A,
+            evaluator_profile_digest=DIGEST_B,
+            scoring_framework_git_commit=SCORING_COMMIT,
+        )
+        self.assertTrue(
+            all(
+                envelope["relative_mad"] <= MAX_CASE_RELATIVE_MAD
+                for envelope in qualification.case_envelopes_ms.values()
+            )
+        )
+        self.assertGreater(
+            qualification.aggregate_score_envelope["mad"],
+            MAX_AGGREGATE_SCORE_MAD_POINTS,
+        )
+        self.assertFalse(qualification.qualified)
+        self.assertEqual(qualification.reason, "aggregate_score_mad_exceeded")
+
+    def test_one_aggregate_outlier_fails_closed_even_with_zero_mad(self) -> None:
+        probes = [probe() for _ in range(9)] + [scale_anchor(probe(), 1.05)]
+        qualification = aggregate_scoring_baseline_probes(
+            probes,
+            environment_digest=DIGEST_A,
+            evaluator_profile_digest=DIGEST_B,
+            scoring_framework_git_commit=SCORING_COMMIT,
+        )
+        self.assertTrue(
+            all(
+                envelope["relative_mad"] <= MAX_CASE_RELATIVE_MAD
+                for envelope in qualification.case_envelopes_ms.values()
+            )
+        )
+        self.assertEqual(qualification.aggregate_score_envelope["mad"], 0.0)
+        self.assertGreater(
+            qualification.aggregate_score_envelope[
+                "maximum_probe_deviation_points"
+            ],
+            MAX_AGGREGATE_PROBE_DEVIATION_POINTS,
+        )
+        self.assertFalse(qualification.qualified)
+        self.assertEqual(
+            qualification.reason,
+            "aggregate_score_probe_deviation_exceeded",
+        )
+
+    def test_schema_v1_qualification_remains_verifiable(self) -> None:
+        current = aggregate_scoring_baseline_probes(
+            [probe(index * 0.0001) for index in range(10)],
+            environment_digest=DIGEST_A,
+            evaluator_profile_digest=DIGEST_B,
+            scoring_framework_git_commit=SCORING_COMMIT,
+        )
+        legacy = ScoringBaselineQualification(
+            schema_version=1,
+            descriptor=current.descriptor,
+            probe_digests=current.probe_digests,
+            case_envelopes_ms=current.case_envelopes_ms,
+            qualified=True,
+            reason="qualified",
+        )
+        self.assertEqual(
+            ScoringBaselineQualification.from_value(legacy.to_dict()),
+            legacy,
+        )
+        self.assertEqual(MAX_RELATIVE_MAD, 0.005)
 
     def test_probe_identity_and_anchor_drift_fail_closed(self) -> None:
         probes = [probe(index * 0.0001) for index in range(10)]
