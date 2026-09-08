@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 import traceback
 from typing import Any, Iterable
@@ -37,6 +38,7 @@ def _selected_arguments(tensors: dict[str, Any]) -> tuple[Any, ...]:
 
 def run_scoring_baseline_probe(
     *,
+    scoring_framework_git_commit: str,
     torch_module: Any | None = None,
     case_specs: Iterable[Any] | None = None,
 ) -> dict[str, Any]:
@@ -46,6 +48,13 @@ def run_scoring_baseline_probe(
     Test injection is deliberately keyword-only and is not exposed by the CLI.
     """
 
+    if (
+        not isinstance(scoring_framework_git_commit, str)
+        or not re.fullmatch(r"[0-9a-f]{40}", scoring_framework_git_commit)
+    ):
+        raise ValueError(
+            "scoring_framework_git_commit must be 40 lowercase hex digits"
+        )
     try:
         if torch_module is None:
             import torch as torch_module  # type: ignore[no-redef]
@@ -140,6 +149,7 @@ def run_scoring_baseline_probe(
             "command": "score-baseline-probe",
             "status": "QUALIFIED",
             "protocol_id": "xpuoj-th0-proxy-v1",
+            "scoring_framework_git_commit": scoring_framework_git_commit,
             "reference_source_sha256": scoring_reference_source_sha256(),
             "compiler_config": dict(SCORING_COMPILER_CONFIG),
             "compiler_factory_seconds": compiler_factory_seconds,
@@ -161,6 +171,7 @@ def run_scoring_baseline_probe(
             "command": "score-baseline-probe",
             "status": "UNQUALIFIED",
             "protocol_id": "xpuoj-th0-proxy-v1",
+            "scoring_framework_git_commit": scoring_framework_git_commit,
             "reference_source_sha256": scoring_reference_source_sha256(),
             "compiler_config": dict(SCORING_COMPILER_CONFIG),
             "timing_protocol": device_event_protocol_snapshot(),

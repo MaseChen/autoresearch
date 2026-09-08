@@ -15,9 +15,47 @@ from kernel_research.compiled_reference import (
     scoring_reference_source_sha256,
 )
 from kernel_research.device_timing import device_event_protocol_snapshot
+from kernel_research.platform.canonical import canonical_sha256
 
 
 DIGEST_A = "sha256:" + "a" * 64
+
+
+def rewrite_unknown_as_legacy_operation(operation: Path) -> Path:
+    intent_path = operation / "intent.json"
+    state_path = operation / "state.json"
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    intent.pop("scoring_framework_git_commit")
+    state.pop("scoring_framework_git_commit")
+    material = {
+        key: value
+        for key, value in intent.items()
+        if key
+        not in {
+            "operation_id",
+            "operation_digest",
+            "status",
+            "active_probe_index",
+            "completed_probes",
+        }
+    }
+    digest = canonical_sha256(material)
+    operation_id = "score-baseline-" + digest.removeprefix("sha256:")[:24]
+    for value in (intent, state):
+        value["operation_id"] = operation_id
+        value["operation_digest"] = digest
+    rewritten = operation.parent / operation_id
+    operation.rename(rewritten)
+    (rewritten / "intent.json").write_text(
+        json.dumps(intent, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    (rewritten / "state.json").write_text(
+        json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    return rewritten
 
 
 def make_config(root: Path) -> ControllerConfig:
@@ -64,6 +102,7 @@ def probe(index: int) -> dict:
         "command": "score-baseline-probe",
         "status": "QUALIFIED",
         "protocol_id": "xpuoj-th0-proxy-v1",
+        "scoring_framework_git_commit": "d" * 40,
         "reference_source_sha256": scoring_reference_source_sha256(),
         "compiler_config": dict(SCORING_COMPILER_CONFIG),
         "timing_protocol": device_event_protocol_snapshot(),
@@ -80,15 +119,28 @@ class ProbeRunner:
         timeout: bool = False,
         unqualified: bool = False,
         identity_mismatch: bool = False,
+        pre_gpu_cli_rejection: bool = False,
     ) -> None:
         self.calls = 0
         self.timeout = timeout
         self.unqualified = unqualified
         self.identity_mismatch = identity_mismatch
+        self.pre_gpu_cli_rejection = pre_gpu_cli_rejection
 
     def run(self, argv, **_kwargs):
         index = self.calls
         self.calls += 1
+        if self.pre_gpu_cli_rejection:
+            return CommandResult(
+                argv=tuple(argv),
+                returncode=2,
+                stdout="",
+                stderr=(
+                    "usage: kernel-research [-h] {doctor}\n"
+                    "kernel-research: error: argument command: invalid choice: "
+                    "'score-baseline-probe' (choose from 'doctor')\n"
+                ),
+            )
         payload = probe(index)
         returncode = 0
         if self.unqualified:
@@ -115,7 +167,9 @@ class ScoringControllerTests(unittest.TestCase):
         self.patchers = [
             mock.patch.object(controller, "_verify_repository", return_value={}),
             mock.patch.object(
-                controller, "_prepare_framework", return_value=root / "framework"
+                controller,
+                "_prepare_framework_snapshot",
+                return_value=root / "framework",
             ),
             mock.patch.object(
                 controller,
@@ -133,6 +187,52 @@ class ScoringControllerTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         return controller
+
+    def test_exact_argparse_rejection_can_be_finalized_without_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner = ProbeRunner(pre_gpu_cli_rejection=True)
+            controller = self.controller(root, runner)
+            with self.assertRaisesRegex(Exception, "outcome is unknown"):
+                controller.qualify_scoring_baseline()
+            operation = next(
+                (controller.config.controller_dir / "scoring-baseline").iterdir()
+            )
+            rewrite_unknown_as_legacy_operation(operation)
+            with mock.patch.object(
+                controller, "_scoring_container_present", return_value=False
+            ):
+                final = controller.finalize_scoring_pre_gpu_failure()
+                repeated = controller.finalize_scoring_pre_gpu_failure()
+            self.assertEqual(final["status"], "UNQUALIFIED")
+            self.assertEqual(
+                final["failure_classification"],
+                "KNOWN_PRE_GPU_CLI_REJECTION",
+            )
+            self.assertFalse(final["idempotent"])
+            self.assertTrue(repeated["idempotent"])
+            self.assertEqual(runner.calls, 1)
+
+    def test_pre_gpu_finalizer_rejects_stderr_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner = ProbeRunner(pre_gpu_cli_rejection=True)
+            controller = self.controller(root, runner)
+            with self.assertRaisesRegex(Exception, "outcome is unknown"):
+                controller.qualify_scoring_baseline()
+            stderr = next(
+                (controller.config.controller_dir / "scoring-baseline").glob(
+                    "*/probe-00.stderr.txt"
+                )
+            )
+            stderr.write_text("usage: unrelated\n", encoding="utf-8")
+            with (
+                mock.patch.object(
+                    controller, "_scoring_container_present", return_value=False
+                ),
+                self.assertRaisesRegex(Exception, "argparse proof"),
+            ):
+                controller.finalize_scoring_pre_gpu_failure()
 
     def test_ten_probe_operation_is_private_durable_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

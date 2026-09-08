@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any, Sequence
@@ -51,6 +52,7 @@ from .profiling import (
 
 SCHEMA_VERSION = 1
 SUCCESS_STATUSES = frozenset({"MOCK_VALIDATED", "SUCCESS"})
+SCORING_FRAMEWORK_COMMIT_ENV = "KERNEL_RESEARCH_SCORING_FRAMEWORK_COMMIT"
 
 # Backward-compatible private aliases for the original evaluator test surface.
 _apply_c500_promotion = apply_c500_promotion
@@ -80,7 +82,11 @@ def _score_baseline_probe(_args: argparse.Namespace) -> int:
     # Torch/NumPy, while this fixed command runs inside the evaluator image.
     from .scoring_baseline_worker import run_scoring_baseline_probe
 
-    payload = run_scoring_baseline_probe()
+    payload = run_scoring_baseline_probe(
+        scoring_framework_git_commit=os.environ.get(
+            SCORING_FRAMEWORK_COMMIT_ENV, ""
+        )
+    )
     _print_json(payload)
     return 0 if payload.get("status") == "QUALIFIED" else 2
 
@@ -90,6 +96,13 @@ def _score_baseline_qualify(args: argparse.Namespace) -> int:
     payload = controller.qualify_scoring_baseline()
     _print_json(payload)
     return 0 if payload.get("status") == "QUALIFIED" else 2
+
+
+def _score_baseline_finalize_pre_gpu(args: argparse.Namespace) -> int:
+    controller = ResearchController(ControllerConfig.load(args.config))
+    payload = controller.finalize_scoring_pre_gpu_failure()
+    _print_json(payload)
+    return 0
 
 
 def evaluate_and_record(
@@ -468,6 +481,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     score_baseline_qualify.add_argument("--config", required=True)
     score_baseline_qualify.set_defaults(handler=_score_baseline_qualify)
+    score_baseline_finalize = score_commands.add_parser(
+        "baseline-finalize-pre-gpu",
+        help="finalize the one proven pre-GPU scoring CLI rejection",
+    )
+    score_baseline_finalize.add_argument("--config", required=True)
+    score_baseline_finalize.set_defaults(
+        handler=_score_baseline_finalize_pre_gpu
+    )
 
     evaluate = subparsers.add_parser(
         "evaluate",

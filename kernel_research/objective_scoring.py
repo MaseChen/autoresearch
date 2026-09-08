@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 import math
+import re
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
@@ -281,6 +282,7 @@ class ScoringBaselineDescriptor:
 
     environment_digest: str
     evaluator_profile_digest: str
+    scoring_framework_git_commit: str
     reference_source_sha256: str
     compiler_backend: str
     compiler_config: Mapping[str, object]
@@ -297,6 +299,13 @@ class ScoringBaselineDescriptor:
         require_sha256_digest(
             self.evaluator_profile_digest, field="evaluator_profile_digest"
         )
+        if (
+            not isinstance(self.scoring_framework_git_commit, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", self.scoring_framework_git_commit)
+        ):
+            raise ValueError(
+                "scoring_framework_git_commit must be 40 lowercase hex digits"
+            )
         require_sha256_digest(
             self.reference_source_sha256, field="reference_source_sha256"
         )
@@ -330,6 +339,7 @@ class ScoringBaselineDescriptor:
             "protocol_id": self.protocol_id,
             "environment_digest": self.environment_digest,
             "evaluator_profile_digest": self.evaluator_profile_digest,
+            "scoring_framework_git_commit": self.scoring_framework_git_commit,
             "reference_source_sha256": self.reference_source_sha256,
             "compiler_backend": self.compiler_backend,
             "compiler_config": _canonical_copy(
@@ -351,6 +361,7 @@ class ScoringBaselineDescriptor:
             "protocol_id",
             "environment_digest",
             "evaluator_profile_digest",
+            "scoring_framework_git_commit",
             "reference_source_sha256",
             "compiler_backend",
             "compiler_config",
@@ -369,6 +380,9 @@ class ScoringBaselineDescriptor:
             environment_digest=value["environment_digest"],  # type: ignore[arg-type]
             evaluator_profile_digest=value[
                 "evaluator_profile_digest"
+            ],  # type: ignore[arg-type]
+            scoring_framework_git_commit=value[
+                "scoring_framework_git_commit"
             ],  # type: ignore[arg-type]
             reference_source_sha256=value[
                 "reference_source_sha256"

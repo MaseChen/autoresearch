@@ -6,6 +6,7 @@ from unittest import mock
 
 from kernel_research.scoring_baseline_worker import run_scoring_baseline_probe
 
+SCORING_COMMIT = "d" * 40
 
 class FakeMeasurement:
     candidate_median_ms = 1.0
@@ -80,6 +81,7 @@ class ScoringBaselineWorkerTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         result = run_scoring_baseline_probe(
+            scoring_framework_git_commit=SCORING_COMMIT,
             torch_module=object(),
             case_specs=(SimpleNamespace(name="case-a"),),
         )
@@ -96,6 +98,7 @@ class ScoringBaselineWorkerTests(unittest.TestCase):
             side_effect=RuntimeError("device unavailable"),
         ):
             result = run_scoring_baseline_probe(
+                scoring_framework_git_commit=SCORING_COMMIT,
                 torch_module=object(),
                 case_specs=(SimpleNamespace(name="case-a"),),
             )
@@ -103,6 +106,14 @@ class ScoringBaselineWorkerTests(unittest.TestCase):
         self.assertIn("device unavailable", result["error"])
         self.assertEqual(result["cases"], [])
         self.assertNotIn("objective_score", result)
+
+    def test_scoring_framework_commit_is_required_and_echoed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "scoring_framework_git_commit"):
+            run_scoring_baseline_probe(
+                scoring_framework_git_commit="invalid",
+                torch_module=object(),
+                case_specs=(SimpleNamespace(name="case-a"),),
+            )
 
 
 if __name__ == "__main__":

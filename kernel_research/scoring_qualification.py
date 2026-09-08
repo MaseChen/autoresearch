@@ -164,6 +164,7 @@ def aggregate_scoring_baseline_probes(
     *,
     environment_digest: str,
     evaluator_profile_digest: str,
+    scoring_framework_git_commit: str,
 ) -> ScoringBaselineQualification:
     """Aggregate ten independent, exact-identity evaluator probes."""
 
@@ -187,11 +188,18 @@ def aggregate_scoring_baseline_probes(
             raise ValueError(f"scoring baseline probe {index} has invalid cases")
         current_identity = (
             probe.get("protocol_id"),
+            probe.get("scoring_framework_git_commit"),
             probe.get("reference_source_sha256"),
             canonical_sha256(probe.get("compiler_config")),
             probe.get("environment_snapshot_digest"),
             tuple(case.get("case_id") for case in cases if isinstance(case, Mapping)),
         )
+        if probe.get("scoring_framework_git_commit") != (
+            scoring_framework_git_commit
+        ):
+            raise ValueError(
+                f"scoring baseline probe {index} changed scoring framework commit"
+            )
         if identity is None:
             identity = current_identity
             reference_digest = str(probe["reference_source_sha256"])
@@ -243,6 +251,7 @@ def aggregate_scoring_baseline_probes(
     descriptor = ScoringBaselineDescriptor(
         environment_digest=environment_digest,
         evaluator_profile_digest=evaluator_profile_digest,
+        scoring_framework_git_commit=scoring_framework_git_commit,
         reference_source_sha256=reference_digest,
         compiler_backend="inductor",
         compiler_config=compiler_config,

@@ -323,11 +323,17 @@ def _evaluator_base_argv(
     name: str,
     run_id: str,
     cache_dir: Path,
+    framework_git_commit: str | None = None,
 ) -> list[str]:
+    selected_framework_commit = (
+        config.resolved_framework_git_commit
+        if framework_git_commit is None
+        else framework_git_commit
+    )
     framework_dir = (
         config.controller_dir
         / "framework"
-        / config.resolved_framework_git_commit
+        / selected_framework_commit
     )
     argv = _common_security_argv(
         config,
@@ -472,8 +478,20 @@ def scoring_baseline_probe_argv(
     """Build the fixed evaluator-container argv for one baseline probe."""
 
     argv = _evaluator_base_argv(
-        config, name=name, run_id=run_id, cache_dir=cache_dir
+        config,
+        name=name,
+        run_id=run_id,
+        cache_dir=cache_dir,
+        framework_git_commit=config.expected_git_commit,
     )
+    insertion = argv.index("--workdir")
+    argv[insertion:insertion] = [
+        "--env",
+        (
+            "KERNEL_RESEARCH_SCORING_FRAMEWORK_COMMIT="
+            f"{config.expected_git_commit}"
+        ),
+    ]
     argv.extend(
         [
             "-m",

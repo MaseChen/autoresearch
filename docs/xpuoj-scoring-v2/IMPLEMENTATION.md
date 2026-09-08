@@ -19,6 +19,12 @@
 - Full-graph compiled reference is correctness-qualified without fallback.
 - Device-event protocol records balanced raw rounds and excludes compile time.
 - Baseline qualification produces an immutable descriptor or fails closed.
+- The scoring worker runs from an exact Git-materialized scoring snapshot and
+  echoes that commit into every probe, qualification, and baseline descriptor;
+  it never changes the separately frozen scientific evaluator framework.
+- A fixed argparse rejection before worker dispatch may be terminalized only by
+  the no-argument trusted finalizer after exact raw-evidence and zero-container
+  checks. It never authorizes replay or changes a scientific database.
 
 ## Phase 3 success criteria
 

@@ -20,6 +20,15 @@
 - [x] Add trusted-host ten-probe orchestration and durable private evidence.
 - [x] Add fail-closed graph-break, fallback, drift, timeout, output, and
   status/identity mismatch handling.
+- [x] Separate the scoring framework snapshot from the frozen scientific
+  framework and bind its exact Git commit through worker and descriptor.
+- [x] Add a narrow trusted finalizer for the observed pre-GPU argparse failure.
+
+First server qualification attempt (`65e5365`) stopped before Torch or GPU
+dispatch because the container correctly mounted the older scientific
+framework, which did not contain the new private probe command. The durable
+operation remains `UNKNOWN_OUTCOME` until the exact no-replay finalizer is run
+from a reviewed recovery checkout; it must not be rewritten by hand.
 
 ### Phase 3: Trusted integration
 

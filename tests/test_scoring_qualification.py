@@ -17,6 +17,7 @@ from kernel_research.scoring_qualification import (
 
 DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
+SCORING_COMMIT = "c" * 40
 
 
 def probe(offset: float = 0.0) -> dict:
@@ -39,6 +40,7 @@ def probe(offset: float = 0.0) -> dict:
         "command": "score-baseline-probe",
         "status": "QUALIFIED",
         "protocol_id": "xpuoj-th0-proxy-v1",
+        "scoring_framework_git_commit": SCORING_COMMIT,
         "reference_source_sha256": scoring_reference_source_sha256(),
         "compiler_config": dict(SCORING_COMPILER_CONFIG),
         "timing_protocol": device_event_protocol_snapshot(),
@@ -54,6 +56,7 @@ class ScoringQualificationTests(unittest.TestCase):
             probes,
             environment_digest=DIGEST_A,
             evaluator_profile_digest=DIGEST_B,
+            scoring_framework_git_commit=SCORING_COMMIT,
         )
         self.assertTrue(qualification.qualified)
         self.assertEqual(qualification.reason, "qualified")
@@ -76,6 +79,7 @@ class ScoringQualificationTests(unittest.TestCase):
             [probe(index * 0.0001) for index in range(10)],
             environment_digest=DIGEST_A,
             evaluator_profile_digest=DIGEST_B,
+            scoring_framework_git_commit=SCORING_COMMIT,
         )
         tampered = copy.deepcopy(qualification.to_dict())
         tampered["case_envelopes_ms"]["decode"]["p50"] = 2.0
@@ -93,6 +97,7 @@ class ScoringQualificationTests(unittest.TestCase):
             probes,
             environment_digest=DIGEST_A,
             evaluator_profile_digest=DIGEST_B,
+            scoring_framework_git_commit=SCORING_COMMIT,
         )
         self.assertFalse(qualification.qualified)
         self.assertEqual(qualification.reason, "relative_mad_exceeded")
@@ -110,11 +115,13 @@ class ScoringQualificationTests(unittest.TestCase):
                 tampered,
                 environment_digest=DIGEST_A,
                 evaluator_profile_digest=DIGEST_B,
+                scoring_framework_git_commit=SCORING_COMMIT,
             )
         qualification = aggregate_scoring_baseline_probes(
             probes,
             environment_digest=DIGEST_A,
             evaluator_profile_digest=DIGEST_B,
+            scoring_framework_git_commit=SCORING_COMMIT,
         )
         with self.assertRaisesRegex(ValueError, "SCORING_ENVIRONMENT_DRIFT"):
             validate_anchor_drift(
@@ -127,6 +134,7 @@ class ScoringQualificationTests(unittest.TestCase):
                 [probe()] * 9,
                 environment_digest=DIGEST_A,
                 evaluator_profile_digest=DIGEST_B,
+                scoring_framework_git_commit=SCORING_COMMIT,
             )
         probes = [probe() for _ in range(10)]
         probes[4]["status"] = "UNQUALIFIED"
@@ -135,6 +143,7 @@ class ScoringQualificationTests(unittest.TestCase):
                 probes,
                 environment_digest=DIGEST_A,
                 evaluator_profile_digest=DIGEST_B,
+                scoring_framework_git_commit=SCORING_COMMIT,
             )
 
 

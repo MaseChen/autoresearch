@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+from pathlib import Path
 import unittest
 from unittest import mock
 from contextlib import redirect_stderr
@@ -43,11 +45,16 @@ class ScoringCliTests(unittest.TestCase):
             mock.patch(
                 "kernel_research.scoring_baseline_worker.run_scoring_baseline_probe",
                 return_value=payload,
+            ) as probe,
+            mock.patch.dict(
+                os.environ,
+                {"KERNEL_RESEARCH_SCORING_FRAMEWORK_COMMIT": "d" * 40},
             ),
             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
         ):
             self.assertEqual(cli.main(["score-baseline-probe"]), 0)
         self.assertEqual(json.loads(stdout.getvalue()), payload)
+        probe.assert_called_once_with(scoring_framework_git_commit="d" * 40)
 
     def test_runtime_argv_uses_fixed_image_entrypoint_and_command(self) -> None:
         config = mock.create_autospec(ControllerConfig, instance=True)
@@ -57,21 +64,51 @@ class ScoringCliTests(unittest.TestCase):
         config.video_gid = 44
         config.evaluator_memory = "64g"
         config.evaluator_cpus = 8.0
-        config.controller_dir = mock.MagicMock()
-        config.controller_dir.__truediv__.return_value.__truediv__.return_value = "/framework"
+        config.controller_dir = Path("/controller")
         config.resolved_framework_git_commit = "a" * 40
+        config.expected_git_commit = "c" * 40
         config.gpu_devices = ()
         config.evaluator_image = "registry/image@sha256:" + "b" * 64
         argv = scoring_baseline_probe_argv(
             config,
             name="kar-score-baseline",
             run_id="score-baseline",
-            cache_dir=mock.MagicMock(),
+            cache_dir=Path("/cache"),
         )
         self.assertEqual(argv[-3:], ["-m", "kernel_research", "score-baseline-probe"])
+        self.assertIn(
+            "KERNEL_RESEARCH_SCORING_FRAMEWORK_COMMIT=" + "c" * 40,
+            argv,
+        )
+        self.assertTrue(
+            any("/framework/" + "c" * 40 in str(value) for value in argv)
+        )
         self.assertIn("--read-only", argv)
         self.assertIn("--network", argv)
         self.assertEqual(argv[argv.index("--network") + 1], "none")
+
+    def test_pre_gpu_finalizer_has_no_operation_or_evidence_parameters(self) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            [
+                "score",
+                "baseline-finalize-pre-gpu",
+                "--config",
+                "/trusted/config.json",
+            ]
+        )
+        self.assertEqual(args.score_command, "baseline-finalize-pre-gpu")
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "score",
+                    "baseline-finalize-pre-gpu",
+                    "--config",
+                    "/trusted/config.json",
+                    "--operation-id",
+                    "untrusted",
+                ]
+            )
 
 
 if __name__ == "__main__":

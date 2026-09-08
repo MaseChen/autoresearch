@@ -15,6 +15,7 @@ from kernel_research.objective_scoring import (
 DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
 DIGEST_C = "sha256:" + "c" * 64
+COMMIT_A = "d" * 40
 
 
 class AnchoredScoreTests(unittest.TestCase):
@@ -65,6 +66,7 @@ class ScoringIdentityTests(unittest.TestCase):
         first = ScoringBaselineDescriptor(
             environment_digest=DIGEST_A,
             evaluator_profile_digest=DIGEST_B,
+            scoring_framework_git_commit=COMMIT_A,
             reference_source_sha256=DIGEST_C,
             compiler_backend="inductor",
             compiler_config={"dynamic": False, "fullgraph": True, "mode": "default"},
@@ -73,6 +75,7 @@ class ScoringIdentityTests(unittest.TestCase):
         second = ScoringBaselineDescriptor(
             environment_digest=DIGEST_A,
             evaluator_profile_digest=DIGEST_B,
+            scoring_framework_git_commit=COMMIT_A,
             reference_source_sha256=DIGEST_C,
             compiler_backend="inductor",
             compiler_config={"mode": "default", "fullgraph": True, "dynamic": False},
@@ -92,6 +95,7 @@ class ScoringIdentityTests(unittest.TestCase):
             ScoringBaselineDescriptor(
                 environment_digest="bad",
                 evaluator_profile_digest=DIGEST_B,
+                scoring_framework_git_commit=COMMIT_A,
                 reference_source_sha256=DIGEST_C,
                 compiler_backend="inductor",
                 compiler_config={},
@@ -101,8 +105,19 @@ class ScoringIdentityTests(unittest.TestCase):
             ScoringBaselineDescriptor(
                 environment_digest=DIGEST_A,
                 evaluator_profile_digest=DIGEST_B,
+                scoring_framework_git_commit=COMMIT_A,
                 reference_source_sha256=DIGEST_C,
                 compiler_backend="eager",
+                compiler_config={},
+                case_baseline_ms={"case": 1.0},
+            )
+        with self.assertRaisesRegex(ValueError, "scoring_framework_git_commit"):
+            ScoringBaselineDescriptor(
+                environment_digest=DIGEST_A,
+                evaluator_profile_digest=DIGEST_B,
+                scoring_framework_git_commit="not-a-commit",
+                reference_source_sha256=DIGEST_C,
+                compiler_backend="inductor",
                 compiler_config={},
                 case_baseline_ms={"case": 1.0},
             )

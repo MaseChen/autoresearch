@@ -94,6 +94,11 @@ FATAL_GPU_MARKERS = (
     "illegal memory access",
     "mcerrorillegaladdress",
 )
+SCORING_PRE_GPU_FAILURE_CLASS = "KNOWN_PRE_GPU_CLI_REJECTION"
+SCORING_PRE_GPU_ERROR = (
+    "scoring baseline evaluator produced invalid output: container did not emit "
+    "one JSON object: Expecting value: line 1 column 1 (char 0)"
+)
 
 
 def _resolve_builtin_target(namespace: ResearchNamespace) -> TargetComponents:
@@ -484,6 +489,7 @@ class DockerEvaluator:
             "schema_version": 1,
             "command": "score-baseline-probe",
             "protocol_id": "xpuoj-th0-proxy-v1",
+            "scoring_framework_git_commit": self.config.expected_git_commit,
             "reference_source_sha256": scoring_reference_source_sha256(),
             "compiler_config": {
                 "backend": "inductor",
@@ -1444,6 +1450,253 @@ class ResearchController:
                 "scoring baseline qualification is blocked by an unresolved evaluator"
             )
 
+    def _scoring_container_present(self, name: str) -> bool:
+        try:
+            completed = subprocess.run(
+                [
+                    str(self.config.docker_binary),
+                    "ps",
+                    "-a",
+                    "--filter",
+                    f"name=^/{name}$",
+                    "--format",
+                    "{{.ID}}",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                shell=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ControllerDataIntegrityError(
+                f"scoring baseline container inventory failed: {exc}"
+            ) from exc
+        if completed.returncode != 0 or completed.stderr.strip():
+            raise ControllerDataIntegrityError(
+                "scoring baseline container inventory is unavailable"
+            )
+        return bool(completed.stdout.strip())
+
+    def finalize_scoring_pre_gpu_failure(self) -> dict[str, Any]:
+        """Terminalize the one proven argparse rejection without GPU replay."""
+
+        self._prepare_runtime_dirs()
+        self._verify_repository()
+        root = self._scoring_baseline_root()
+        with gpu_lock(self.config.controller_dir / "gpu1.lock"):
+            self._assert_scoring_host_idle()
+            if root.is_symlink() or not root.is_dir():
+                raise ControllerDataIntegrityError(
+                    "scoring baseline evidence root is unavailable"
+                )
+            unknown: list[tuple[Path, dict[str, Any]]] = []
+            finalized: list[dict[str, Any]] = []
+            for operation in sorted(root.iterdir()):
+                if operation.is_symlink() or not operation.is_dir():
+                    raise ControllerDataIntegrityError(
+                        "scoring baseline evidence contains an invalid object"
+                    )
+                state = self._read_scoring_evidence(
+                    operation / "state.json", label="scoring baseline state"
+                )
+                if state.get("status") == "UNKNOWN_OUTCOME":
+                    unknown.append((operation, state))
+                elif (
+                    state.get("status") == "UNQUALIFIED"
+                    and state.get("failure_classification")
+                    == SCORING_PRE_GPU_FAILURE_CLASS
+                ):
+                    finalized.append(state)
+            if not unknown:
+                if len(finalized) == 1:
+                    operation_id = str(finalized[0].get("operation_id", ""))
+                    operation_dir = root / operation_id
+                    final = self._read_scoring_evidence(
+                        operation_dir / "final.json",
+                        label="scoring baseline pre-GPU final",
+                    )
+                    if canonical_json_text(final) != canonical_json_text(
+                        finalized[0]
+                    ):
+                        raise ControllerDataIntegrityError(
+                            "pre-GPU scoring final differs from terminal state"
+                        )
+                    return {**final, "idempotent": True}
+                raise ControlledRuntimeError(
+                    "there is no unique pre-GPU scoring failure to finalize"
+                )
+            if len(unknown) != 1:
+                raise ControlledRuntimeError(
+                    "pre-GPU scoring finalizer requires exactly one unknown operation"
+                )
+            operation_dir, state = unknown[0]
+            if (operation_dir / "final.json").exists() or (
+                operation_dir / "final.json"
+            ).is_symlink():
+                raise ControllerDataIntegrityError(
+                    "unknown scoring operation already has final evidence"
+                )
+            expected_names = {
+                "intent.json",
+                "state.json",
+                "probe-00.receipt.json",
+                "probe-00.stdout.json",
+                "probe-00.stderr.txt",
+            }
+            entries = list(operation_dir.iterdir())
+            if (
+                {entry.name for entry in entries} != expected_names
+                or any(entry.is_symlink() or not entry.is_file() for entry in entries)
+            ):
+                raise ControllerDataIntegrityError(
+                    "pre-GPU scoring operation file inventory is not exact"
+                )
+            intent = self._read_scoring_evidence(
+                operation_dir / "intent.json", label="scoring baseline intent"
+            )
+            material_keys = {
+                "schema_version",
+                "operation",
+                "expected_git_commit",
+                "framework_git_commit",
+                "evaluator_image",
+                "reference_source_sha256",
+                "timing_protocol",
+                "probe_count",
+            }
+            optional_material_keys = {"scoring_framework_git_commit"}
+            present_optional = optional_material_keys & set(intent)
+            material_keys |= present_optional
+            intent_tail = {
+                "operation_id",
+                "operation_digest",
+                "status",
+                "active_probe_index",
+                "completed_probes",
+            }
+            state_tail = intent_tail | {"error"}
+            if set(intent) != material_keys | intent_tail or set(state) != (
+                material_keys | state_tail
+            ):
+                raise ControllerDataIntegrityError(
+                    "pre-GPU scoring intent/state fields are not exact"
+                )
+            material = {key: intent[key] for key in material_keys}
+            operation_digest = canonical_sha256(material)
+            operation_id = (
+                "score-baseline-"
+                + operation_digest.removeprefix("sha256:")[:24]
+            )
+            expected_intent = {
+                **material,
+                "operation_id": operation_id,
+                "operation_digest": operation_digest,
+                "status": "RUNNING",
+                "active_probe_index": None,
+                "completed_probes": 0,
+            }
+            expected_state = {
+                **expected_intent,
+                "status": "UNKNOWN_OUTCOME",
+                "active_probe_index": 0,
+                "error": SCORING_PRE_GPU_ERROR,
+            }
+            if (
+                intent != expected_intent
+                or state != expected_state
+                or operation_dir.name != operation_id
+                or material["schema_version"] != 1
+                or material["operation"] != "score-baseline-qualify"
+                or material["expected_git_commit"]
+                != self.config.expected_git_commit
+                or material["framework_git_commit"]
+                != self.config.resolved_framework_git_commit
+                or (
+                    "scoring_framework_git_commit" in material
+                    and material["scoring_framework_git_commit"]
+                    != self.config.expected_git_commit
+                )
+                or material["evaluator_image"] != self.config.evaluator_image
+                or material["reference_source_sha256"]
+                != scoring_reference_source_sha256()
+                or material["timing_protocol"] != device_event_protocol_snapshot()
+                or material["probe_count"] != SCORING_BASELINE_QUALIFICATION_RUNS
+            ):
+                raise ControllerDataIntegrityError(
+                    "pre-GPU scoring operation identity is not exact"
+                )
+            receipt_paths = sorted(operation_dir.glob("probe-*.receipt.json"))
+            if [path.name for path in receipt_paths] != [
+                "probe-00.receipt.json"
+            ]:
+                raise ControllerDataIntegrityError(
+                    "pre-GPU scoring operation has unexpected receipts"
+                )
+            receipt = self._read_scoring_evidence(
+                receipt_paths[0], label="scoring baseline pre-GPU receipt"
+            )
+            if receipt != {
+                "container_exit_code": 2,
+                "error": SCORING_PRE_GPU_ERROR,
+                "status": "UNKNOWN_OUTCOME",
+            }:
+                raise ControllerDataIntegrityError(
+                    "pre-GPU scoring receipt does not prove argparse rejection"
+                )
+            stdout_path = operation_dir / "probe-00.stdout.json"
+            stderr_path = operation_dir / "probe-00.stderr.txt"
+            if (
+                stdout_path.is_symlink()
+                or not stdout_path.is_file()
+                or stdout_path.stat().st_size != 0
+                or stderr_path.is_symlink()
+                or not stderr_path.is_file()
+                or not 0 < stderr_path.stat().st_size <= 64 * 1024
+            ):
+                raise ControllerDataIntegrityError(
+                    "pre-GPU scoring raw output contract is invalid"
+                )
+            try:
+                stderr = stderr_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise ControllerDataIntegrityError(
+                    "pre-GPU scoring stderr cannot be read"
+                ) from exc
+            lowered = stderr.lower()
+            if (
+                not stderr.startswith("usage: kernel-research ")
+                or "argument command: invalid choice: 'score-baseline-probe'"
+                not in stderr
+                or "traceback" in lowered
+                or any(marker in lowered for marker in FATAL_GPU_MARKERS)
+            ):
+                raise ControllerDataIntegrityError(
+                    "pre-GPU scoring stderr lacks the fixed argparse proof"
+                )
+            container_name = f"kar-score-{operation_id[-12:]}-00"
+            if self._scoring_container_present(container_name):
+                raise ControlledRuntimeError(
+                    "pre-GPU scoring container is still present"
+                )
+            final = {
+                **material,
+                "operation_id": operation_id,
+                "operation_digest": operation_digest,
+                "status": "UNQUALIFIED",
+                "reason": "fixed evaluator CLI rejected before GPU handler dispatch",
+                "failure_classification": SCORING_PRE_GPU_FAILURE_CLASS,
+            }
+            _atomic_write_bytes(
+                operation_dir / "final.json",
+                (canonical_json_text(final) + "\n").encode("utf-8"),
+            )
+            _atomic_write_bytes(
+                operation_dir / "state.json",
+                (canonical_json_text(final) + "\n").encode("utf-8"),
+            )
+            return {**final, "idempotent": False}
+
     def _authorize_scoring_baseline_probe(
         self,
         context: Mapping[str, Any] | None,
@@ -1496,7 +1749,7 @@ class ResearchController:
         if host_errors:
             raise ControlledRuntimeError("; ".join(host_errors))
         self._verify_repository()
-        self._prepare_framework()
+        self._prepare_framework_snapshot(self.config.expected_git_commit)
         image = self._inspect_image(self.config.evaluator_image)
         if not image["available"]:
             raise ControlledRuntimeError("pinned evaluator image is unavailable")
@@ -1505,6 +1758,7 @@ class ResearchController:
             "operation": "score-baseline-qualify",
             "expected_git_commit": self.config.expected_git_commit,
             "framework_git_commit": self.config.resolved_framework_git_commit,
+            "scoring_framework_git_commit": self.config.expected_git_commit,
             "evaluator_image": self.config.evaluator_image,
             "reference_source_sha256": scoring_reference_source_sha256(),
             "timing_protocol": device_event_protocol_snapshot(),
@@ -1620,6 +1874,7 @@ class ResearchController:
                     probes,
                     environment_digest=runtime_environment.digest,
                     evaluator_profile_digest=CURRENT_RESEARCH_NAMESPACE.evaluator.digest,
+                    scoring_framework_git_commit=self.config.expected_git_commit,
                 )
             except (TypeError, ValueError) as exc:
                 final = {
@@ -3082,10 +3337,13 @@ class ResearchController:
             "baseline_artifact": str(artifact),
         }
 
-    def _prepare_framework(self) -> Path:
-        """Materialize the exact evaluator framework commit from Git blobs."""
+    def _prepare_framework_snapshot(self, framework_commit: str) -> Path:
+        """Materialize one exact, immutable package tree from Git blobs."""
 
-        framework_commit = self.config.resolved_framework_git_commit
+        if not re.fullmatch(r"[0-9a-f]{40}", framework_commit):
+            raise ControllerDataIntegrityError(
+                "framework snapshot commit must be 40 lowercase hex digits"
+            )
         destination = (
             self.config.controller_dir
             / "framework"
@@ -3167,6 +3425,13 @@ class ResearchController:
             if temporary.exists():
                 shutil.rmtree(temporary)
         return destination
+
+    def _prepare_framework(self) -> Path:
+        """Materialize the frozen scientific evaluator framework commit."""
+
+        return self._prepare_framework_snapshot(
+            self.config.resolved_framework_git_commit
+        )
 
     def _prepare_runtime_dirs(self) -> None:
         for directory in (
