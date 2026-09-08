@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
@@ -3343,12 +3344,23 @@ class BoundedProfilingTests(unittest.TestCase):
             (self.state / "history.sqlite3").read_bytes()
         ).hexdigest()
         runner = _FakeProfileRunner()
+        wall_clock = datetime(2030, 1, 1, 12, tzinfo=timezone.utc)
+
+        def rollback_wall_clock():
+            nonlocal wall_clock
+            wall_clock -= timedelta(seconds=1)
+            return wall_clock.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
         with (
             mock.patch.object(profiling, "require_active_profiler"),
             mock.patch.object(
                 profiling,
                 "_current_deployment_profile_subject",
                 return_value=(subject, baseline_ref, binding),
+            ),
+            mock.patch(
+                "kernel_research.campaign.store._utc_now",
+                side_effect=rollback_wall_clock,
             ),
         ):
             report = profiling.run_profile_image_doctor(
@@ -3387,7 +3399,7 @@ class BoundedProfilingTests(unittest.TestCase):
             attempts = store.list_profile_canary_attempts(canary_id)
             self.assertEqual(
                 [attempt["recipe_id"] for attempt in attempts],
-                sorted(profiling.PROFILE_RECIPE_IDS),
+                list(profiling.PROFILE_RECIPE_IDS),
             )
             self.assertTrue(
                 all(

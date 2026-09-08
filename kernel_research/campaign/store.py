@@ -2287,7 +2287,7 @@ class CampaignStore:
         for row in self.connection.execute(
             """
             SELECT * FROM profile_canary_attempt_intents
-            WHERE campaign_id = ? ORDER BY created_at, recipe_id
+            WHERE campaign_id = ? ORDER BY rowid
             """,
             (campaign_id,),
         ):
