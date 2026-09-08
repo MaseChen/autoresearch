@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import unittest
+from unittest import mock
 
 from kernel_research.scoring_shadow import (
     project_scoring_shadow_report,
@@ -15,6 +16,7 @@ from kernel_research.platform.canonical import canonical_sha256
 from kernel_research.scoring_candidate_measurement import (
     SCORING_CANDIDATE_WORKER_REVISION,
     qualified_scoring_probe_environment_snapshot,
+    scoring_candidate_worker_source_sha256,
 )
 
 
@@ -119,6 +121,12 @@ def operation_binding(measurement: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _redigest(report: dict[str, object]) -> None:
+    report["digest"] = canonical_sha256(
+        {key: value for key, value in report.items() if key != "digest"}
+    )
+
+
 class ScoringShadowProfileTests(unittest.TestCase):
     def test_profile_freezes_qualified_identity_without_promotion_authority(self) -> None:
         profile = scoring_shadow_profile_snapshot()
@@ -155,6 +163,18 @@ class ScoringShadowProfileTests(unittest.TestCase):
         profile["promotion_authority"] = True
         with self.assertRaisesRegex(ValueError, "qualified activation"):
             require_scoring_shadow_profile(profile)
+
+    def test_qualified_environment_and_worker_source_constants_fail_closed(self) -> None:
+        with mock.patch(
+            "kernel_research.scoring_candidate_measurement.canonical_sha256",
+            return_value="sha256:" + "0" * 64,
+        ), self.assertRaisesRegex(RuntimeError, "environment constant"):
+            qualified_scoring_probe_environment_snapshot()
+        with mock.patch(
+            "kernel_research.scoring_candidate_measurement.Path.is_symlink",
+            return_value=True,
+        ), self.assertRaisesRegex(RuntimeError, "not a regular file"):
+            scoring_candidate_worker_source_sha256()
 
 
 class ScoringShadowProjectionTests(unittest.TestCase):
@@ -450,6 +470,63 @@ class ScoringShadowProjectionTests(unittest.TestCase):
         variants.append(activation_drift)
         for value in variants:
             with self.assertRaises(ValueError):
+                public_scoring_shadow_summary(value)
+
+    def test_public_projection_rejects_self_consistent_boundary_tampering(self) -> None:
+        unavailable = unavailable_scoring_shadow_report(
+            reason="PROFILE_NOT_FROZEN",
+            profile=None,
+            candidate_hash=CANDIDATE_HASH,
+            incumbent_history_experiment_id=210,
+            incumbent_candidate_hash=INCUMBENT_HASH,
+        )
+        available = project_scoring_shadow_report(
+            successful_full_result(),
+            suite="full",
+            profile=scoring_shadow_profile_snapshot(),
+            incumbent_history_experiment_id=210,
+            incumbent_candidate_hash=INCUMBENT_HASH,
+            candidate_measurement=qualified_candidate_measurement(),
+            candidate_framework_git_commit="c" * 40,
+            **operation_binding(qualified_candidate_measurement()),
+        )
+        variants = []
+
+        unfrozen_with_activation = copy.deepcopy(unavailable)
+        unfrozen_with_activation["qualification_digest"] = "sha256:" + "0" * 64
+        _redigest(unfrozen_with_activation)
+        variants.append(unfrozen_with_activation)
+
+        incomplete_operation = copy.deepcopy(unavailable)
+        incomplete_operation["candidate_operation_digest"] = "sha256:" + "1" * 64
+        _redigest(incomplete_operation)
+        variants.append(incomplete_operation)
+
+        unexpected_measurement = copy.deepcopy(unavailable)
+        unexpected_measurement["candidate_measurement"] = {}
+        unexpected_measurement["candidate_measurement_digest"] = canonical_sha256({})
+        _redigest(unexpected_measurement)
+        variants.append(unexpected_measurement)
+
+        invalid_status = copy.deepcopy(unavailable)
+        invalid_status["status"] = "INVALID"
+        _redigest(invalid_status)
+        variants.append(invalid_status)
+
+        mismatched_operation = copy.deepcopy(available)
+        mismatched_operation["candidate_operation_id"] = (
+            "score-candidate-" + "f" * 24
+        )
+        _redigest(mismatched_operation)
+        variants.append(mismatched_operation)
+
+        invalid_available_identity = copy.deepcopy(available)
+        invalid_available_identity["candidate_hash"] = "invalid"
+        _redigest(invalid_available_identity)
+        variants.append(invalid_available_identity)
+
+        for value in variants:
+            with self.subTest(status=value["status"]), self.assertRaises(ValueError):
                 public_scoring_shadow_summary(value)
 
 
