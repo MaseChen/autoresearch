@@ -18,7 +18,10 @@ from test_autorun import (
     _with_different_block_size_n,
 )
 from kernel_research.autorun.cli import build_parser
-from kernel_research.autorun.controller import ResearchController
+from kernel_research.autorun.controller import (
+    ControllerDataIntegrityError,
+    ResearchController,
+)
 from kernel_research.autorun.models import ProposalV1
 from kernel_research.autorun.store import ControllerStore
 from kernel_research.cases import FULL_CASES, get_suite
@@ -327,6 +330,48 @@ class XpuojExternalBenchmarkTests(unittest.TestCase):
                 },
                 {XPUOJ_BENCHMARK_NAMESPACE.namespace_id},
             )
+
+    def test_standalone_benchmark_does_not_require_campaign_child_or_lease(
+        self,
+    ) -> None:
+        controller = object.__new__(ResearchController)
+        run = {
+            "id": "xpuoj-production-preflight",
+            "namespace_id": XPUOJ_BENCHMARK_NAMESPACE.namespace_id,
+            "baseline_ref": {"source": "campaign"},
+            "workflow_snapshot": {
+                "mode": "BENCHMARK",
+                "cohort_id": "xpuoj-141440-autoresearch-v1",
+                "evidence_operation": (
+                    "xpuoj-external-baseline-benchmark-v1"
+                ),
+            },
+        }
+        self.assertIsNone(
+            controller._campaign_action_deadline(run, now=1_000.0)
+        )
+
+        for changed in (
+            {"namespace_id": CURRENT_RESEARCH_NAMESPACE.namespace_id},
+            {
+                "workflow_snapshot": {
+                    **run["workflow_snapshot"],
+                    "evidence_operation": "different-operation",
+                }
+            },
+            {
+                "workflow_snapshot": {
+                    **run["workflow_snapshot"],
+                    "campaign_id": "partial-campaign",
+                }
+            },
+        ):
+            invalid = {**run, **changed}
+            with self.assertRaisesRegex(
+                ControllerDataIntegrityError,
+                "incomplete child/lease identity",
+            ):
+                controller._campaign_action_deadline(invalid, now=1_000.0)
 
 
 if __name__ == "__main__":

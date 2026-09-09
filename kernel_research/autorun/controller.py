@@ -3228,7 +3228,22 @@ class ResearchController:
             if isinstance(snapshot, Mapping)
             else None
         )
-        campaign_owned = campaign_id is not None or baseline_source == "campaign"
+        standalone_xpuoj_benchmark = (
+            isinstance(snapshot, Mapping)
+            and run.get("namespace_id")
+            == XPUOJ_BENCHMARK_NAMESPACE.namespace_id
+            and snapshot.get("mode") == "BENCHMARK"
+            and snapshot.get("evidence_operation")
+            == "xpuoj-external-baseline-benchmark-v1"
+            and snapshot.get("cohort_id") == "xpuoj-141440-autoresearch-v1"
+            and campaign_id is None
+            and snapshot.get("campaign_child") is None
+            and snapshot.get("resource_lease") is None
+            and baseline_source == "campaign"
+        )
+        campaign_owned = (
+            campaign_id is not None or baseline_source == "campaign"
+        ) and not standalone_xpuoj_benchmark
         if not campaign_owned:
             return None
         if not isinstance(snapshot, Mapping):
@@ -6808,10 +6823,10 @@ class ResearchController:
         baseline_ref: BaselineRef | Mapping[str, Any],
         history_cutoff: str | int | None,
     ) -> dict[str, Any]:
-        """Start one Campaign-owned run from an already-resolved snapshot.
+        """Start one bounded run from an already-resolved snapshot.
 
         This is intentionally narrower than ``start``: the caller supplies a
-        stable run ID and an explicit Campaign baseline, while this trusted
+        stable run ID and an explicit frozen baseline, while this trusted
         host still owns preflight, the six-hour/single-run caps, persistence,
         and the existing state machine.  It never adopts the baseline into Git
         or consults History for a replacement parent.
