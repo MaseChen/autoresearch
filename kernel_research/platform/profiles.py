@@ -12,6 +12,8 @@ from typing import Any
 from ..constants import (
     CURRENT_C500_CASE_IDS,
     CURRENT_C500_EVALUATION_PROTOCOL_ID,
+    XPUOJ_C500_CASE_IDS,
+    XPUOJ_C500_EVALUATION_PROTOCOL_ID,
     CURRENT_C500_HOLDOUT_CASE_IDS,
     LEGACY_C500_CASE_IDS,
     LEGACY_C500_EVALUATION_PROTOCOL_ID,
@@ -442,6 +444,46 @@ def _protocol_config(
     }
 
 
+def _xpuoj_protocol_config() -> dict[str, Any]:
+    """Frozen four-case protocol for external XPU-OJ baseline comparisons."""
+
+    stages = (
+        ("PROPOSE", None, "validation", False, False),
+        ("POLICY", None, "validation", False, False),
+        ("FULL_PRIMARY", "full", "primary", True, True),
+        ("CONFIRMATION", "full", "confirmation", True, False),
+    )
+    return {
+        "stages": [
+            {
+                "stage_id": stage_id,
+                "suite_id": suite_id,
+                "replicate_kind": replicate_kind,
+                "requires_baseline": requires_baseline,
+                "may_request_confirmation": may_request_confirmation,
+            }
+            for (
+                stage_id,
+                suite_id,
+                replicate_kind,
+                requires_baseline,
+                may_request_confirmation,
+            ) in stages
+        ],
+        "suite_revision": "xpuoj-four-case-v1",
+        "suite_case_ids": {"full": list(XPUOJ_C500_CASE_IDS["full"])},
+        "case_roles": {
+            case_id: "scored" for case_id in XPUOJ_C500_CASE_IDS["full"]
+        },
+        "warmup_iterations": 10,
+        "measurement_rounds": 3,
+        "samples_per_round": 10,
+        "interleaved_baseline": True,
+        "benchmark_only": True,
+        "external_baseline_authority": "xpuoj-accepted-submission-v1",
+    }
+
+
 def _proposer_config(*, harness: str, model: str) -> dict[str, str]:
     return {
         "harness": harness,
@@ -628,6 +670,13 @@ _BUILTIN_DEFINITIONS = (
         ),
     ),
     _definition(
+        "evaluation_protocol",
+        XPUOJ_C500_EVALUATION_PROTOCOL_ID,
+        "v1",
+        "c500-xpuoj-evaluation-protocol",
+        _xpuoj_protocol_config(),
+    ),
+    _definition(
         "promotion_policy",
         "current-c500",
         "v1",
@@ -746,11 +795,22 @@ CURRENT_RESEARCH_NAMESPACE = ResearchNamespace.from_profiles(
     promotion_policy=_builtin_ref("promotion_policy", "current-c500", "v1"),
 )
 
+XPUOJ_BENCHMARK_NAMESPACE = ResearchNamespace.from_profiles(
+    operator=_builtin_ref("operator", "fused-moe-w8a8-tn", "v1"),
+    language=_builtin_ref("language", "triton-python", "v1"),
+    evaluator=_builtin_ref("evaluator", "metax-c500", "legacy-v1"),
+    evaluation_protocol=_builtin_ref(
+        "evaluation_protocol", XPUOJ_C500_EVALUATION_PROTOCOL_ID, "v1"
+    ),
+    promotion_policy=_builtin_ref("promotion_policy", "current-c500", "v1"),
+)
+
 
 __all__ = [
     "BUILTIN_PROFILE_REGISTRY",
     "CURRENT_RESEARCH_NAMESPACE",
     "LEGACY_RESEARCH_NAMESPACE",
+    "XPUOJ_BENCHMARK_NAMESPACE",
     "PROFILE_KINDS",
     "ProfileDefinition",
     "ProfileRef",

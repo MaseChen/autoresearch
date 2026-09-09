@@ -124,6 +124,32 @@ def _checkpoint(args: argparse.Namespace) -> int:
     return 0
 
 
+def _register_xpuoj_baseline(args: argparse.Namespace) -> int:
+    record = _controller(args).register_xpuoj_external_baseline(
+        candidate_path=args.candidate,
+        receipt_path=args.receipt,
+        proof_experiment_id=args.proof_experiment_id,
+    )
+    _print(
+        {
+            "schema_version": 1,
+            "command": "register-xpuoj-baseline",
+            "status": "SUCCESS",
+            "experiment": record.to_dict(),
+        }
+    )
+    return 0
+
+
+def _start_xpuoj_benchmark(args: argparse.Namespace) -> int:
+    payload = _controller(args).start_xpuoj_benchmark(
+        run_id=args.run_id,
+        baseline_experiment_id=args.baseline_experiment_id,
+    )
+    _print(payload)
+    return 0 if payload["status"] in {"PROMOTED", "BUDGET_EXHAUSTED"} else 3
+
+
 def _restore(args: argparse.Namespace) -> int:
     _print(
         restore_checkpoint(
@@ -209,6 +235,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     migrate.add_argument("--operation-id", default=None)
     migrate.set_defaults(handler=_migrate_v3)
+    register_xpuoj = subparsers.add_parser(
+        "register-xpuoj-baseline",
+        help=(
+            "register the exact accepted XPU-OJ #141440 source as "
+            "benchmark-only baseline"
+        ),
+    )
+    register_xpuoj.add_argument("--config", required=True)
+    register_xpuoj.add_argument("--candidate", required=True)
+    register_xpuoj.add_argument("--receipt", required=True)
+    register_xpuoj.add_argument("--proof-experiment-id", type=int, required=True)
+    register_xpuoj.set_defaults(handler=_register_xpuoj_baseline)
+    start_xpuoj = subparsers.add_parser(
+        "start-xpuoj-benchmark",
+        help="start one bounded run from the registered external XPU-OJ baseline",
+    )
+    start_xpuoj.add_argument("--config", required=True)
+    start_xpuoj.add_argument("--run-id", required=True)
+    start_xpuoj.add_argument("--baseline-experiment-id", type=int, required=True)
+    start_xpuoj.set_defaults(handler=_start_xpuoj_benchmark)
     return parser
 
 

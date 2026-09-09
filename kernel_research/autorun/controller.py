@@ -75,6 +75,7 @@ from ..platform.profiles import (
     BUILTIN_PROFILE_REGISTRY,
     CURRENT_RESEARCH_NAMESPACE,
     LEGACY_RESEARCH_NAMESPACE,
+    XPUOJ_BENCHMARK_NAMESPACE,
     ProfileRef,
     ResearchNamespace,
 )
@@ -144,6 +145,15 @@ SCORING_OOM_PRE_DOCTOR_EVIDENCE_DIR = Path(
 )
 SCORING_OOM_PRE_DOCTOR_ERROR = (
     "unknown run id: score-baseline-oom-recovery"
+)
+XPUOJ_EXTERNAL_BASELINE_SOURCE_SHA256 = (
+    "fd7fba3a4a16275af6f3367e5d0bf9a1d717066d7c93434ed291842254a2bf7f"
+)
+XPUOJ_EXTERNAL_BASELINE_RECEIPT_SHA256 = (
+    "2875e8235f445c0a95da66b73f292f1c83ba9d11176e9e6186df4facdb09af1d"
+)
+XPUOJ_LOCAL_FOUR_CASE_PROOF_SHA256 = (
+    "423c0bbae93fea33dbe1ee5695677df8acfc595c5c637949676b04e49d5a8626"
 )
 
 
@@ -227,6 +237,19 @@ def _target_binding_snapshot(target: TargetComponents) -> dict[str, Any]:
             "revision": target.promotion.revision,
         },
     }
+
+
+def _is_xpuoj_benchmark_seed(record: ExperimentRecord) -> bool:
+    evidence = record.result.get("evidence")
+    return (
+        record.namespace_id == XPUOJ_BENCHMARK_NAMESPACE.namespace_id
+        and record.status == "SUCCESS"
+        and not record.promotable
+        and isinstance(evidence, Mapping)
+        and evidence.get("role") == "external_xpuoj_benchmark_baseline"
+        and evidence.get("benchmark_baseline_eligible") is True
+        and evidence.get("promotion_authority") is False
+    )
 
 
 class ProposerFailure(ControlledRuntimeError):
@@ -4835,7 +4858,7 @@ class ResearchController:
             record is None
             or record.namespace_id != namespace_id
             or record.artifact_id != str(baseline_ref.artifact_id)
-            or not record.promotable
+            or not (record.promotable or _is_xpuoj_benchmark_seed(record))
         ):
             raise ControllerDataIntegrityError(
                 "frozen run baseline cannot be proven from History"
@@ -6380,6 +6403,15 @@ class ResearchController:
             )
         candidate_path = Path(str(iteration["candidate_path"]))
         source = candidate_path.read_text(encoding="utf-8")
+        stages = tuple(
+            (definition.stage_id, definition.suite_id)
+            for definition in target.protocol.stages
+            if definition.suite_id is not None
+        )
+        if not stages:
+            raise ControllerDataIntegrityError(
+                "trusted evaluation protocol has no executable stage"
+            )
         if iteration["stage"] == "POLICY":
             policy = target.validate_candidate(source)
             if not policy.valid:
@@ -6407,7 +6439,7 @@ class ResearchController:
                 iteration_id,
                 "POLICY_PASSED",
                 {"candidate_hash": policy.sha256},
-                stage="SMOKE",
+                stage=stages[0][0],
             )
             if proposal_only:
                 self._finish_iteration(
@@ -6425,12 +6457,7 @@ class ResearchController:
                 )
                 return "STOP"
 
-        stages = tuple(
-            (definition.stage_id, definition.suite_id)
-            for definition in target.protocol.stages
-            if definition.suite_id is not None
-        )
-        for stage, suite in stages:
+        for stage_index, (stage, suite) in enumerate(stages):
             run = store.get_run(run_id)
             self._validate_run_snapshot(run)
             stage_target = _trusted_target(self._run_namespace(run))
@@ -6495,23 +6522,14 @@ class ResearchController:
                     error=record.error_summary,
                 )
                 return "CONTINUE"
-            if stage == "SMOKE":
-                store.update_iteration_with_event(
-                    iteration_id,
-                    "STAGE_ADVANCED",
-                    {"from": "SMOKE", "to": "QUICK"},
-                    stage="QUICK",
-                )
-            elif stage == "QUICK":
-                store.update_iteration_with_event(
-                    iteration_id,
-                    "STAGE_ADVANCED",
-                    {"from": "QUICK", "to": "FULL_PRIMARY"},
-                    stage="FULL_PRIMARY",
-                )
-            elif stage == "FULL_PRIMARY":
+            next_stage = (
+                stages[stage_index + 1][0]
+                if stage_index + 1 < len(stages)
+                else None
+            )
+            if stage == "FULL_PRIMARY":
                 phase = record.result.get("promotion", {}).get("phase")
-                if phase == "primary":
+                if phase == "primary" and next_stage == "CONFIRMATION":
                     store.update_iteration_with_event(
                         iteration_id,
                         "STAGE_ADVANCED",
@@ -6529,6 +6547,13 @@ class ResearchController:
                         result=record.result,
                     )
                     return "CONTINUE"
+            elif next_stage is not None:
+                store.update_iteration_with_event(
+                    iteration_id,
+                    "STAGE_ADVANCED",
+                    {"from": stage, "to": next_stage},
+                    stage=next_stage,
+                )
             else:
                 promoted = bool(
                     record.result.get("promotion", {})
@@ -6820,11 +6845,12 @@ class ResearchController:
         trusted_targets = {
             LEGACY_RESEARCH_NAMESPACE.namespace_id: LEGACY_RESEARCH_NAMESPACE,
             CURRENT_RESEARCH_NAMESPACE.namespace_id: CURRENT_RESEARCH_NAMESPACE,
+            XPUOJ_BENCHMARK_NAMESPACE.namespace_id: XPUOJ_BENCHMARK_NAMESPACE,
         }
         trusted_namespace = trusted_targets.get(target_namespace.namespace_id)
         if trusted_namespace is None or target_namespace != trusted_namespace:
             raise ControllerDataIntegrityError(
-                "bounded runs support only exact built-in LEGACY/CURRENT targets"
+                "bounded runs support only exact built-in trusted targets"
             )
         target_namespace = trusted_namespace
         try:
@@ -7052,6 +7078,313 @@ class ResearchController:
         return self._start_new_run(
             run_id=uuid.uuid4().hex,
             proposal_only=proposal_only,
+        )
+
+    def register_xpuoj_external_baseline(
+        self,
+        *,
+        candidate_path: str | os.PathLike[str],
+        receipt_path: str | os.PathLike[str],
+        proof_experiment_id: int,
+    ) -> ExperimentRecord:
+        """Register the frozen XPU-OJ #141440 source as benchmark-only seed."""
+
+        candidate = Path(candidate_path)
+        receipt = Path(receipt_path)
+        if candidate.is_symlink() or receipt.is_symlink():
+            raise ValueError("XPU-OJ benchmark inputs must not be symlinks")
+        candidate = candidate.resolve(strict=True)
+        receipt = receipt.resolve(strict=True)
+        if not candidate.is_file() or not receipt.is_file():
+            raise ValueError("XPU-OJ benchmark inputs must be regular files")
+        if candidate.stat().st_size > TRITON_PYTHON_BUNDLE_LIMITS.max_file_bytes:
+            raise ValueError("XPU-OJ benchmark source exceeds the trusted size limit")
+        if receipt.stat().st_size > 256 * 1024:
+            raise ValueError("XPU-OJ benchmark receipt exceeds the trusted size limit")
+        source_bytes = candidate.read_bytes()
+        receipt_bytes = receipt.read_bytes()
+        if (
+            hashlib.sha256(source_bytes).hexdigest()
+            != XPUOJ_EXTERNAL_BASELINE_SOURCE_SHA256
+        ):
+            raise ValueError("XPU-OJ #141440 source identity mismatch")
+        if (
+            hashlib.sha256(receipt_bytes).hexdigest()
+            != XPUOJ_EXTERNAL_BASELINE_RECEIPT_SHA256
+        ):
+            raise ValueError("XPU-OJ #141440 receipt identity mismatch")
+        try:
+            source = source_bytes.decode("utf-8")
+            receipt_text = receipt_bytes.decode("utf-8")
+        except UnicodeError as exc:
+            raise ValueError("XPU-OJ benchmark inputs must be UTF-8") from exc
+        receipt_case_statuses: dict[int, list[bool]] = {}
+        for line in receipt_text.splitlines():
+            if "SPJ Report" not in line:
+                continue
+            matched_case = re.search(r"Testcase\s+#([1-4])\b", line)
+            if matched_case is None:
+                continue
+            case_id = int(matched_case.group(1))
+            receipt_case_statuses.setdefault(case_id, []).append(
+                re.search(r"Pass:\s+OK\b", line) is not None
+            )
+        if (
+            "Accepted#141440" not in receipt_text
+            or "Score84" not in receipt_text
+            or set(receipt_case_statuses) != {1, 2, 3, 4}
+            or not all(all(statuses) for statuses in receipt_case_statuses.values())
+        ):
+            raise ValueError("XPU-OJ #141440 receipt does not prove four accepted cases")
+        target = _trusted_target(XPUOJ_BENCHMARK_NAMESPACE)
+        validation = target.validate_candidate(source)
+        if not validation.valid:
+            raise ValueError("XPU-OJ benchmark baseline fails the trusted candidate policy")
+        bundle = CandidateBundle.single_file(
+            content=source,
+            limits=target.language.bundle_limits,
+        )
+        environment = self._resolved_execution_environment(
+            XPUOJ_BENCHMARK_NAMESPACE
+        )
+        external_cases = (
+            ("full_decode_gate_up", 0.883),
+            ("full_prefill_gate_up", 7.275),
+            ("full_decode_down", 0.481),
+            ("full_prefill_down", 3.342),
+        )
+        with HistoryStore(self.history_db, state_dir=self.config.state_dir) as history:
+            proof = history.get_experiment(proof_experiment_id)
+            try:
+                proof_identity = (
+                    None
+                    if proof is None
+                    else ExperimentIdentity.from_value(dict(proof.identity))
+                )
+            except (TypeError, ValueError):
+                proof_identity = None
+            if (
+                proof is None
+                or proof.candidate_hash != XPUOJ_LOCAL_FOUR_CASE_PROOF_SHA256
+                or proof.namespace_id
+                != CURRENT_RESEARCH_NAMESPACE.namespace_id
+                or proof.status != "SUCCESS"
+                or proof.suite != "full"
+                or proof_identity is None
+                or proof_identity.namespace != CURRENT_RESEARCH_NAMESPACE
+                or proof_identity.stage != "full_primary"
+                or proof_identity.suite != "full"
+                or not proof_identity.execution_environment.is_resolved
+                or proof.result.get("evaluation_protocol_id")
+                != CURRENT_RESEARCH_NAMESPACE.evaluation_protocol.id
+                or len(proof.case_measurements) != 4
+                or tuple(case.name for case in proof.case_measurements)
+                != target.protocol.expected_cases("full")
+                or any(case.passed is not True for case in proof.case_measurements)
+            ):
+                raise ValueError("local four-case execution proof is missing or invalid")
+            history.ensure_namespace(
+                XPUOJ_BENCHMARK_NAMESPACE.namespace_id,
+                XPUOJ_BENCHMARK_NAMESPACE.to_dict(),
+            )
+            history.store_candidate_bundle(bundle)
+            history.store_candidate_artifact(
+                source,
+                artifact_id=str(ArtifactId.source_sha256(validation.sha256)),
+                artifact_kind="source_text_v1",
+                manifest={
+                    "format": "python_source_v1",
+                    "entrypoint": target.language.entrypoint,
+                    "media_type": "text/x-python",
+                },
+            )
+            experiment_uid = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    "kernel-research/xpuoj/external-baseline/v1/141440/"
+                    + validation.sha256,
+                )
+            )
+            initial_ref = BaselineRef.create(
+                namespace=XPUOJ_BENCHMARK_NAMESPACE,
+                artifact_id=bundle.artifact_id,
+                source="campaign",
+                revision="external-xpuoj-141440",
+                execution_environment=environment,
+            )
+            identity = ExperimentIdentity.create(
+                experiment_uid=experiment_uid,
+                namespace=XPUOJ_BENCHMARK_NAMESPACE,
+                mode="BENCHMARK",
+                candidate_artifact_id=bundle.artifact_id,
+                parent_artifact_id=bundle.artifact_id,
+                baseline=initial_ref,
+                execution_environment=environment,
+                stage="external_baseline_registration",
+                suite="full",
+                replicate_kind="external",
+                replicate_index=0,
+                proposer_profile=None,
+                prompt_digest=None,
+                feedback_digest=None,
+                cohort_id="xpuoj-141440",
+                history_cutoff=proof.id,
+                campaign_id=None,
+                run_id="xpuoj-baseline-141440",
+                iteration=0,
+            )
+            result = {
+                "schema_version": 1,
+                "status": "SUCCESS",
+                "backend": "c500",
+                "suite": "full",
+                "candidate_hash": validation.sha256,
+                "eligible_for_promotion": False,
+                "aggregate_score": None,
+                "cases": [
+                    {
+                        "case_id": case_id,
+                        "status": "EXTERNAL_ACCEPTED",
+                        "matched_ratio": 1.0,
+                        "p50_us": time_ms * 1000.0,
+                        "measurement_authority": "xpuoj-submission-141440",
+                    }
+                    for case_id, time_ms in external_cases
+                ],
+                "evidence": {
+                    "role": "external_xpuoj_benchmark_baseline",
+                    "benchmark_baseline_eligible": True,
+                    "submission_id": 141440,
+                    "external_score": 84,
+                    "external_receipt_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+                    "local_four_case_proof_experiment_id": proof.id,
+                    "promotion_authority": False,
+                },
+            }
+            return history.record_experiment(
+                candidate_source=source,
+                status="SUCCESS",
+                backend="c500",
+                suite="full",
+                git_commit=self.config.expected_git_commit,
+                promotable=False,
+                aggregate_score=None,
+                note="external-xpuoj-baseline:submission-141440",
+                environment={
+                    **environment.to_dict(),
+                    "external_benchmark": {
+                        "authority": "xpuoj-submission-141440",
+                        "score": 84,
+                        "receipt_sha256": (
+                            XPUOJ_EXTERNAL_BASELINE_RECEIPT_SHA256
+                        ),
+                    },
+                },
+                case_measurements=(
+                    {
+                        "name": case_id,
+                        "matched_ratio": 1.0,
+                        "passed": True,
+                        "metrics": {
+                            "measurement_authority": (
+                                "xpuoj-submission-141440"
+                            ),
+                            "xpuoj_time_ms": time_ms,
+                        },
+                    }
+                    for case_id, time_ms in external_cases
+                ),
+                candidate_hash=validation.sha256,
+                result=result,
+                experiment_uid=identity.experiment_uid,
+                namespace_id=identity.namespace_id,
+                condition_digest=identity.condition_digest,
+                replicate_kind=identity.replicate_kind,
+                replicate_index=identity.replicate_index,
+                candidate_artifact_id=str(identity.candidate_artifact_id),
+                baseline_experiment_uid=None,
+                identity=identity,
+            )
+
+    def start_xpuoj_benchmark(
+        self, *, run_id: str, baseline_experiment_id: int
+    ) -> dict[str, Any]:
+        """Start one benchmark-only run from the exact external XPU-OJ seed."""
+
+        target = _trusted_target(XPUOJ_BENCHMARK_NAMESPACE)
+        with HistoryStore(self.history_db, state_dir=self.config.state_dir) as history:
+            baseline = history.get_experiment(baseline_experiment_id)
+        if (
+            baseline is None
+            or baseline.namespace_id != XPUOJ_BENCHMARK_NAMESPACE.namespace_id
+            or baseline.candidate_hash
+            != XPUOJ_EXTERNAL_BASELINE_SOURCE_SHA256
+            or baseline.status != "SUCCESS"
+            or not _is_xpuoj_benchmark_seed(baseline)
+        ):
+            raise ValueError("baseline is not the trusted XPU-OJ #141440 seed")
+        environment = self._resolved_execution_environment(XPUOJ_BENCHMARK_NAMESPACE)
+        baseline_ref = BaselineRef.create(
+            namespace=XPUOJ_BENCHMARK_NAMESPACE,
+            artifact_id=baseline.artifact_id,
+            source="campaign",
+            revision=f"history-{baseline.id}",
+            execution_environment=environment,
+        )
+        proposer = self._proposer_profile()
+        deployment = BUILTIN_PROFILE_REGISTRY.get(
+            kind="deployment", profile_id="legacy-local-c500", revision="v1"
+        ).ref
+        refs = {
+            "deployment": deployment,
+            "operator": XPUOJ_BENCHMARK_NAMESPACE.operator,
+            "language": XPUOJ_BENCHMARK_NAMESPACE.language,
+            "evaluator": XPUOJ_BENCHMARK_NAMESPACE.evaluator,
+            "evaluation_protocol": XPUOJ_BENCHMARK_NAMESPACE.evaluation_protocol,
+            "promotion_policy": XPUOJ_BENCHMARK_NAMESPACE.promotion_policy,
+            "proposer": proposer,
+        }
+        feedback_digest = canonical_sha256([])
+        prompt_digest = canonical_sha256(
+            {"id": "proposal-v1", "revision": "v1", "format": "single-json-object"}
+        )
+        material = {
+            "schema_version": 2,
+            "mode": "BENCHMARK",
+            "namespace": XPUOJ_BENCHMARK_NAMESPACE.to_dict(),
+            "deployment_profile": deployment.to_dict(),
+            "proposer_profile": proposer.to_dict(),
+            "resolved_profiles": {
+                name: BUILTIN_PROFILE_REGISTRY.resolve(ref).to_dict()
+                for name, ref in refs.items()
+            },
+            "target_components": _target_binding_snapshot(target),
+            "baseline_ref": baseline_ref.to_dict(),
+            "execution_environment": environment.to_dict(),
+            "runtime_execution_environment": environment.to_dict(),
+            "scientifically_comparable": True,
+            "history_cutoff": baseline.id,
+            "workflow": [stage.stage_id for stage in target.protocol.stages],
+            "budget": {
+                "max_candidates": self.config.max_candidates,
+                "max_wall_seconds": round(self.config.max_hours * 3600),
+                "max_consecutive_failures": self.config.max_consecutive_failures,
+                "stop_after_promotion": self.config.stop_after_promotion,
+            },
+            "runtime_binding": self.config.redacted_dict(),
+            "cohort_id": "xpuoj-141440-autoresearch-v1",
+            "prompt_protocol_digest": prompt_digest,
+            "feedback_snapshot_digest": feedback_digest,
+            "campaign_snapshot": {"feedback_snapshot": []},
+            "evidence_operation": "xpuoj-external-baseline-benchmark-v1",
+            "child_deadline_epoch": self.clock() + self.config.max_hours * 3600,
+        }
+        snapshot = {**material, "snapshot_digest": canonical_sha256(material)}
+        return self.start_from_snapshot(
+            run_id=run_id,
+            workflow_snapshot=snapshot,
+            baseline_ref=baseline_ref,
+            history_cutoff=baseline.id,
         )
 
     def start_console_operation(

@@ -20,6 +20,7 @@ from typing import Any, Mapping
 from .constants import (
     CURRENT_C500_EVALUATION_PROTOCOL_ID,
     LEGACY_C500_EVALUATION_PROTOCOL_ID,
+    XPUOJ_C500_EVALUATION_PROTOCOL_ID,
 )
 from .contract import validate_candidate
 
@@ -32,6 +33,7 @@ _SUPPORTED_EVALUATION_PROTOCOL_IDS = frozenset(
     {
         LEGACY_C500_EVALUATION_PROTOCOL_ID,
         CURRENT_C500_EVALUATION_PROTOCOL_ID,
+        XPUOJ_C500_EVALUATION_PROTOCOL_ID,
     }
 )
 

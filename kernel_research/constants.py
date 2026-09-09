@@ -14,6 +14,7 @@ LEGACY_C500_EVALUATION_PROTOCOL_ID = "fused-moe-c500-v1"
 CURRENT_C500_EVALUATION_PROTOCOL_ID = (
     "fused-moe-c500-v2-shadow-holdout"
 )
+XPUOJ_C500_EVALUATION_PROTOCOL_ID = "fused-moe-c500-xpuoj-four-case-v1"
 LEGACY_C500_CASE_IDS = {
     "smoke": ("smoke_gate_up", "smoke_down"),
     "quick": (
@@ -38,6 +39,9 @@ CURRENT_C500_CASE_IDS = {
         "quick_shadow_tiles_128_n2",
         "quick_shadow_tiles_129_n2",
     ),
+}
+XPUOJ_C500_CASE_IDS = {
+    "full": LEGACY_C500_CASE_IDS["full"],
 }
 CURRENT_C500_HOLDOUT_CASE_IDS = (
     "quick_shadow_tiles_128_n1",

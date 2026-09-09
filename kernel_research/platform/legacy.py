@@ -9,6 +9,7 @@ from ..backends import MEASUREMENT_ROUNDS, SAMPLES_PER_ROUND, WARMUP_ITERATIONS
 from ..constants import (
     CURRENT_C500_EVALUATION_PROTOCOL_ID,
     LEGACY_C500_EVALUATION_PROTOCOL_ID,
+    XPUOJ_C500_EVALUATION_PROTOCOL_ID,
 )
 from ..contract import validate_source
 from ..research_policy import validate_research_candidate_bounded
@@ -25,6 +26,7 @@ from .profiles import (
     BUILTIN_PROFILE_REGISTRY,
     CURRENT_RESEARCH_NAMESPACE,
     LEGACY_RESEARCH_NAMESPACE,
+    XPUOJ_BENCHMARK_NAMESPACE,
     ProfileDefinition,
     ResearchNamespace,
 )
@@ -33,6 +35,7 @@ from .proposal import BundleLimits, TRITON_PYTHON_BUNDLE_LIMITS
 
 LEGACY_PROTOCOL_ID = LEGACY_C500_EVALUATION_PROTOCOL_ID
 CURRENT_PROTOCOL_ID = CURRENT_C500_EVALUATION_PROTOCOL_ID
+XPUOJ_PROTOCOL_ID = XPUOJ_C500_EVALUATION_PROTOCOL_ID
 
 _OPERATOR_DEFINITION = BUILTIN_PROFILE_REGISTRY.resolve(
     LEGACY_RESEARCH_NAMESPACE.operator
@@ -48,6 +51,9 @@ _LEGACY_PROTOCOL_DEFINITION = BUILTIN_PROFILE_REGISTRY.resolve(
 )
 _CURRENT_PROTOCOL_DEFINITION = BUILTIN_PROFILE_REGISTRY.resolve(
     CURRENT_RESEARCH_NAMESPACE.evaluation_protocol
+)
+_XPUOJ_PROTOCOL_DEFINITION = BUILTIN_PROFILE_REGISTRY.resolve(
+    XPUOJ_BENCHMARK_NAMESPACE.evaluation_protocol
 )
 _PROMOTION_DEFINITION = BUILTIN_PROFILE_REGISTRY.resolve(
     LEGACY_RESEARCH_NAMESPACE.promotion_policy
@@ -222,6 +228,7 @@ LEGACY_C500_PROTOCOL = _protocol(
 CURRENT_C500_PROTOCOL = _protocol(
     _CURRENT_PROTOCOL_DEFINITION,
 )
+XPUOJ_C500_PROTOCOL = _protocol(_XPUOJ_PROTOCOL_DEFINITION)
 _OPERATOR = FusedMoeW8A8TnPack()
 _LANGUAGE = TritonPythonAdapter()
 _DEVICE = MetaXC500Backend()
@@ -249,6 +256,13 @@ CURRENT_TARGET = TargetComponents(
     protocol=CURRENT_C500_PROTOCOL,
     promotion=_PROMOTION,
 )
+XPUOJ_TARGET = TargetComponents(
+    operator=_OPERATOR,
+    language=_LANGUAGE,
+    device=_DEVICE,
+    protocol=XPUOJ_C500_PROTOCOL,
+    promotion=_PROMOTION,
+)
 
 
 def _build_component_registry() -> TrustedComponentRegistry:
@@ -261,6 +275,7 @@ def _build_component_registry() -> TrustedComponentRegistry:
         (_EVALUATOR_DEFINITION, CURRENT_TARGET.device),
         (_LEGACY_PROTOCOL_DEFINITION, LEGACY_TARGET.protocol),
         (_CURRENT_PROTOCOL_DEFINITION, CURRENT_TARGET.protocol),
+        (_XPUOJ_PROTOCOL_DEFINITION, XPUOJ_TARGET.protocol),
         (_PROMOTION_DEFINITION, CURRENT_TARGET.promotion),
     ):
         registry.bind_profile(definition, component=component)
@@ -292,6 +307,9 @@ __all__ = [
     "LEGACY_C500_PROTOCOL",
     "LEGACY_PROTOCOL_ID",
     "LEGACY_TARGET",
+    "XPUOJ_C500_PROTOCOL",
+    "XPUOJ_PROTOCOL_ID",
+    "XPUOJ_TARGET",
     "MetaXC500Backend",
     "TritonPythonAdapter",
     "builtin_component_registry",

@@ -36,7 +36,7 @@ TERMINAL_RUN_STATUSES = frozenset(
 
 STAGE_TRANSITIONS = {
     Stage.PROPOSE: frozenset({Stage.POLICY, Stage.DONE}),
-    Stage.POLICY: frozenset({Stage.SMOKE, Stage.DONE}),
+    Stage.POLICY: frozenset({Stage.SMOKE, Stage.FULL_PRIMARY, Stage.DONE}),
     Stage.SMOKE: frozenset({Stage.QUICK, Stage.DONE}),
     Stage.QUICK: frozenset({Stage.FULL_PRIMARY, Stage.DONE}),
     Stage.FULL_PRIMARY: frozenset({Stage.CONFIRMATION, Stage.DONE}),
